@@ -428,20 +428,21 @@ side.
 - [ ] `ack {accepted: false}` with only one cluster → `Failed`, class `config`, the reason visible in the UI
 - [ ] a terminal status without a completion but with `completion.json` in storage → the cost and `prURL` are lifted from it
 
-**Controller, against a fake backend:**
+**Controller, against a fake backend** — implemented in
+[test/controller](../../test/controller), run by `make controller-test`:
 
-- [ ] 409 `abandon` → the Job cancelled, the CR deleted, no further reports
-- [ ] an unavailable backend → the work taken is played out, reports accumulate and are sent later
-- [ ] 204 → immediate re-poll without backoff
-- [ ] a dropped long poll → a repeat no more than once per second
-- [ ] an unknown `Command.type` → a no-op, not a panic
-- [ ] an unknown field in `Lease` → ignored
-- [ ] a restart between the lease and the ack → a repeat ack with the same epoch
-- [ ] a restart after the ack → state restored from the CR, heartbeat with `reportComplete: false` until the informer is warm
-- [ ] the bundle's `expiresAt` earlier than the expected finish → reissued before the Job is created
-- [ ] values from `secrets` are absent from the created CR's `spec`
-- [ ] `roleConfig` from the lease ended up in the ConfigMap, and only its name in the CR
-- [ ] a spec some of whose fields this cluster's CRD prunes gives `ack {accepted: false, code: SpecFieldsPruned}` rather than a run with a silently lost setting
+- [x] 409 `abandon` → the Job cancelled, the CR deleted, no further reports
+- [x] an unavailable backend → the work taken is played out, reports accumulate and are sent later
+- [x] 204 → immediate re-poll without backoff
+- [x] a dropped long poll → a repeat no more than once per second
+- [x] an unknown `Command.type` → a no-op, not a panic
+- [x] an unknown field in `Lease` → ignored
+- [x] a restart between the lease and the ack → a repeat ack with the same epoch
+- [x] a restart after the ack → state restored from the CR, heartbeat with `reportComplete: false` until the informer is warm
+- [x] the bundle's `expiresAt` earlier than the expected finish → reissued before the Job is created
+- [x] values from `secrets` are absent from the created CR's `spec`
+- [x] `roleConfig` from the lease ended up in the ConfigMap, and only its name in the CR
+- [x] a spec some of whose fields this cluster's CRD prunes gives `ack {accepted: false, code: SpecFieldsPruned}` rather than a run with a silently lost setting
 
 The two fakes — `FakeBackend` and `FakeController` — are part of the contract's
 deliverable, not a test utility belonging to one of the teams. They are the only

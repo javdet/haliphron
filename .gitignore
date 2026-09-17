@@ -26,3 +26,7 @@ searxng/
 /blob-report/
 /playwright/.cache/
 .mcp.json
+
+# Built binaries (built into images, never committed)
+bin/
+

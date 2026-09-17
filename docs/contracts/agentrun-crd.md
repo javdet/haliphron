@@ -502,19 +502,20 @@ else:
 - [x] names do not collide for runs in the same millisecond; the Job name is ≤ 63
 - [x] the Cluster API and the CRD agree on every significant schema key
 
-Beyond that — on the controller, against a fake backend:
+Beyond that — on the controller, against a fake backend and a real API
+server, in [test/controller](../../test/controller):
 
-- [ ] field pruning → `ack {accepted: false, SpecFieldsPruned}`, no Job created
-- [ ] `cancel` after the pod exited with zero → `Succeeded`, not `Cancelled`
-- [ ] `abandon` → the Job and the CR are deleted, no further reports
-- [ ] a restart between CR creation and the ack → a repeat ack with the same epoch
-- [ ] a restart after an attempt failed → the retry budget was not reset
-- [ ] epoch+1 to the same cluster → the old CR deleted, a new one created, no two Jobs
-- [ ] `ImagePullBackOff` longer than `startupDeadlineSeconds` → `Failed`/`infra`
-- [ ] the Job deleted externally while Running → `Failed`/`infra`, not a hang
-- [ ] the finalizer is removed after a bounded wait even with a live pod
-- [ ] values from `lease.secrets` do not appear in the created CR
-- [ ] `roleConfig` ended up in the ConfigMap, and only its name in the CR
+- [x] field pruning → `ack {accepted: false, SpecFieldsPruned}`, no Job created
+- [x] `cancel` after the pod exited with zero → `Succeeded`, not `Cancelled`
+- [x] `abandon` → the Job and the CR are deleted, no further reports
+- [x] a restart between CR creation and the ack → a repeat ack with the same epoch
+- [x] a restart after an attempt failed → the retry budget was not reset
+- [x] epoch+1 to the same cluster → the old CR deleted, a new one created, no two Jobs
+- [x] `ImagePullBackOff` longer than `startupDeadlineSeconds` → `Failed`/`infra`
+- [x] the Job deleted externally while Running → `Failed`/`infra`, not a hang
+- [x] the finalizer is removed after a bounded wait even with a live pod
+- [x] values from `lease.secrets` do not appear in the created CR
+- [x] `roleConfig` ended up in the ConfigMap, and only its name in the CR
 
 ---
 

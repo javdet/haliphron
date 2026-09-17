@@ -6,6 +6,7 @@ PG_IMAGE      ?= postgres:18.1-bookworm
 ENVTEST_K8S   ?= 1.34.x
 AGENT_IMAGE   ?= haliphron/agent:dev
 AGENT_VERSION ?= dev
+CONTROLLER_VERSION ?= 0.1.0
 PG_CONTAINER   = haliphron-contract-pg
 PG_NETWORK     = haliphron-contract-net
 DOCKER_RUN     = docker run --rm -e GOMAXPROCS=2 \
@@ -15,7 +16,7 @@ DOCKER_RUN     = docker run --rm -e GOMAXPROCS=2 \
                  -v haliphron-envtest:/envtest \
                  -v $(PWD):/w -w /w $(GO_IMAGE)
 
-.PHONY: generate test db-test fake-test image-test image-build verify
+.PHONY: generate test db-test fake-test image-test image-build controller-test controller-build verify
 
 ## generate: deepcopy functions and the AgentRun CRD, from the Go types
 generate:
@@ -37,6 +38,14 @@ image-test:
 image-build:
 	docker build -f image/Dockerfile -t $(AGENT_IMAGE) --build-arg VERSION=$(AGENT_VERSION) .
 
+## controller-test: the controller's own tests, and the contract tests against FakeBackend
+controller-test:
+	$(DOCKER_RUN) sh /w/hack/controllertest.sh
+
+## controller-build: the controller binary
+controller-build:
+	$(DOCKER_RUN) sh -c 'cd /w/controller && CGO_ENABLED=0 go build -ldflags "-X github.com/automagicops/haliphron/controller/version.Version=$(CONTROLLER_VERSION)" -o /w/bin/haliphron-controller ./cmd/haliphron-controller'
+
 ## db-test: store contract tests against a real PostgreSQL
 db-test:
 	@docker network create $(PG_NETWORK) 2>/dev/null || true
@@ -52,5 +61,5 @@ db-test:
 
 ## verify: fail if the committed artifacts differ from what the types produce
 verify: generate
-	git diff --exit-code -- config/crd api || \
+	git diff --exit-code -- config/crd config/rbac api || \
 		(echo "generated artifacts are stale: run make generate and commit" && exit 1)

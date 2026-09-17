@@ -10,5 +10,13 @@ fi
 cd /w/api
 /go/bin/controller-gen object paths=./...
 /go/bin/controller-gen crd:crdVersions=v1 paths=./agentrun/... output:crd:artifacts:config=/w/config/crd/bases
+# The controller's RBAC, from the markers on the reconciler. Section 12 of the
+# CRD contract is a list of permissions with a reason attached to each; keeping
+# it generated is what stops the chart and the reasons drifting apart.
+cd /w/controller
+/go/bin/controller-gen rbac:roleName=haliphron-controller paths=./... \
+  output:rbac:artifacts:config=/w/config/rbac
+
 cd /w/api && gofmt -l . && go build ./... && go vet ./...
+cd /w/controller && gofmt -l . && go build ./... && go vet ./...
 echo GEN_OK
