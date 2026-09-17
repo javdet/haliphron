@@ -283,6 +283,74 @@ func TestOutputEnvelopeIsEntrypointFilled(t *testing.T) {
 	}
 }
 
+func TestOutputEnvelopeGoTypeMatchesSchema(t *testing.T) {
+	schema := loadJSON(t, filepath.Join(repoRoot(), "api", "runtime", "v1", "output.schema.json"))
+	res := &resolver{doc: schema}
+
+	// The entrypoint writes this object and the backend reads it. A field that
+	// exists on one side and not the other surfaces as a run whose structured
+	// output the UI cannot show, a week after the release that caused it.
+	var diffs []string
+	compareGoToSchema(t, res, "OutputEnvelope",
+		reflect.TypeOf(runv1.OutputEnvelope{}), schema, &diffs)
+
+	if len(diffs) > 0 {
+		sort.Strings(diffs)
+		t.Fatalf("OutputEnvelope disagrees with its schema:\n  %s", strings.Join(diffs, "\n  "))
+	}
+}
+
+func TestOutputStatusIsDerivedFromTheExitCode(t *testing.T) {
+	schema := loadJSON(t, filepath.Join(repoRoot(), "api", "runtime", "v1", "output.schema.json"))
+	enum := toStrings(dig(t, schema, "properties", "status", "enum"))
+	assertSameSet(t, "output status enum", []string{
+		string(runv1.OutputStatusOK),
+		string(runv1.OutputStatusPartial),
+		string(runv1.OutputStatusFailed),
+	}, enum)
+
+	// The status is the machine's, not the agent's: a model's assessment of
+	// whether it succeeded is worth exactly what its assessment of its own cost
+	// is worth. Derived, therefore, and derived the same way everywhere.
+	for _, tc := range []struct {
+		code int32
+		want runv1.OutputStatus
+	}{
+		{runv1.ExitSuccess, runv1.OutputStatusOK},
+		// A timeout after which there is work all the same.
+		{runv1.ExitAgentTimeout, runv1.OutputStatusPartial},
+		{runv1.ExitAgentError, runv1.OutputStatusFailed},
+		{runv1.ExitOutputInvalid, runv1.OutputStatusFailed},
+		{runv1.ExitGit, runv1.OutputStatusFailed},
+		{runv1.ExitStorage, runv1.OutputStatusFailed},
+		{runv1.ExitConfig, runv1.OutputStatusFailed},
+		// An exit code this build has never seen. The one thing worse than
+		// losing a result is reporting an unexamined one as good.
+		{99, runv1.OutputStatusFailed},
+	} {
+		if got := runv1.OutputStatusForExitCode(tc.code); got != tc.want {
+			t.Errorf("exit %d gives status %q, want %q", tc.code, got, tc.want)
+		}
+	}
+}
+
+func TestOutputSchemaVersionMatchesTheContractMajor(t *testing.T) {
+	schema := loadJSON(t, filepath.Join(repoRoot(), "api", "runtime", "v1", "output.schema.json"))
+	want, ok := dig(t, schema, "properties", "schemaVersion", "const").(float64)
+	if !ok {
+		t.Fatal("schemaVersion has no const; a consumer cannot refuse a version it does not know")
+	}
+	if int(want) != runv1.OutputSchemaVersion {
+		t.Fatalf("the schema pins schemaVersion to %d and Go says %d", int(want), runv1.OutputSchemaVersion)
+	}
+	// They are the same number by construction rather than by coincidence: the
+	// envelope's shape changes when the runtime contract's meaning does.
+	if runv1.OutputSchemaVersion != runv1.ContractMajor {
+		t.Fatalf("the output envelope is at %d and the runtime contract at %d",
+			runv1.OutputSchemaVersion, runv1.ContractMajor)
+	}
+}
+
 // ---------------------------------------------------------------------------
 
 func phaseStrings() []string {

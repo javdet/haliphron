@@ -3,6 +3,9 @@ go 1.25.0
 use (
 	./api
 	./db
+	./fake
+	./image
 	./test/contract
+	./test/image
 	./test/store
 )

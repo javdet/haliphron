@@ -695,10 +695,20 @@ say what they say, and what to look at during review.
 ## 18. Contract test checklist
 
 The image is verified **without a cluster and without a backend**: `docker run`,
-a directory of secret files instead of a volume, MinIO and an HTTP stub instead
-of the controller. That harness — `FakeControlPlane` — ships as part of the
-contract, like `FakeBackend` and `FakeController` in the first two: without it
-the "image" track cannot proceed in parallel.
+a directory of secret files instead of a volume, presigned object storage and an
+HTTP stub instead of the controller. That harness — `FakeControlPlane` — ships
+as part of the contract, like `FakeBackend` and `FakeController` in the first
+two: without it the "image" track cannot proceed in parallel.
+
+Its storage is not MinIO: objects live in a map and the links are signed with
+HMAC over the method, the key and the expiry. What the image must get right is
+the shape of the exchange and the answers it gets when the exchange goes wrong —
+403 on an expired signature, 404 on a checkpoint nobody has written yet, a POST
+policy that refuses a key outside its prefix — and each of those is a row below.
+Where a real S3 would differ in a way the image can observe, the fake says so in
+a comment. The row that MinIO alone can settle, that the presigned links also
+work against a real implementation, belongs to the first integration and not to
+this checklist.
 
 **Configuration and startup:**
 

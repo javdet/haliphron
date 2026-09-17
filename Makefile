@@ -4,6 +4,8 @@
 GO_IMAGE      ?= golang:1.26
 PG_IMAGE      ?= postgres:18.1-bookworm
 ENVTEST_K8S   ?= 1.34.x
+AGENT_IMAGE   ?= haliphron/agent:dev
+AGENT_VERSION ?= dev
 PG_CONTAINER   = haliphron-contract-pg
 PG_NETWORK     = haliphron-contract-net
 DOCKER_RUN     = docker run --rm -e GOMAXPROCS=2 \
@@ -13,7 +15,7 @@ DOCKER_RUN     = docker run --rm -e GOMAXPROCS=2 \
                  -v haliphron-envtest:/envtest \
                  -v $(PWD):/w -w /w $(GO_IMAGE)
 
-.PHONY: generate test db-test verify
+.PHONY: generate test db-test fake-test image-test image-build verify
 
 ## generate: deepcopy functions and the AgentRun CRD, from the Go types
 generate:
@@ -22,6 +24,18 @@ generate:
 ## test: contract tests, including the CRD against a real API server
 test:
 	$(DOCKER_RUN) sh /w/hack/test.sh
+
+## fake-test: the fakes' own contract tests, under the race detector
+fake-test:
+	$(DOCKER_RUN) sh -c 'cd /w/fake && go test -count=1 -race ./...'
+
+## image-test: the agent image entrypoint, against FakeControlPlane
+image-test:
+	$(DOCKER_RUN) sh -c 'cd /w/image && go test -count=1 -race ./... && cd /w/test/image && go test -count=1 -race ./...'
+
+## image-build: the agent image itself
+image-build:
+	docker build -f image/Dockerfile -t $(AGENT_IMAGE) --build-arg VERSION=$(AGENT_VERSION) .
 
 ## db-test: store contract tests against a real PostgreSQL
 db-test:
