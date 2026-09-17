@@ -1,0 +1,28 @@
+pgdata/
+logs/*
+!logs/.gitkeep
+frontend/node_modules/
+frontend/dist/
+.cursor/
+.claude/
+.env
+data/logs/*
+.DS_Store
+dump/
+deploy/compose/config.yaml
+# Compiled backend binaries (built into images, never committed)
+backend/nib
+backend/toolcatalog
+
+# Runtime data now lives in a Docker volume, not the working tree.
+# Image defaults are seeded from backend/seed/.
+data/
+searxng/
+
+# Playwright e2e (root package.json / playwright.config.ts)
+/node_modules/
+/test-results/
+/playwright-report/
+/blob-report/
+/playwright/.cache/
+.mcp.json

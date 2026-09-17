@@ -1,0 +1,25 @@
+# Conversion webhook wiring, applied by the haliphron-runtime chart.
+#
+# With a single version there is nothing to convert, and the API server never
+# calls the webhook. The patch ships anyway, because what is expensive to add
+# later is not the handler — it is the Service, the certificate, the CA bundle
+# injection and the chart upgrade path that carries them. Adding v1 then becomes
+# a version entry and a conversion function, not an infrastructure change in a
+# running installation.
+apiVersion: apiextensions.k8s.io/v1
+kind: CustomResourceDefinition
+metadata:
+  name: agentruns.haliphron.io
+  annotations:
+    cert-manager.io/inject-ca-from: haliphron-agents/haliphron-controller-serving-cert
+spec:
+  conversion:
+    strategy: Webhook
+    webhook:
+      conversionReviewVersions: ["v1"]
+      clientConfig:
+        service:
+          namespace: haliphron-agents
+          name: haliphron-controller-webhook
+          path: /convert
+          port: 443

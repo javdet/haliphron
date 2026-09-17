@@ -1,0 +1,72 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://haliphron.io/schemas/runtime/v1/output.json",
+  "title": "Haliphron structured output envelope",
+  "description": "Schema of the runs/{runID}/output.json object. The envelope is filled in by the entrypoint; the agent writes only the payload — the contents of data — to /workspace/.haliphron/output.json. The split is deliberate: every formatting requirement placed on the model is a chance to burn a paid run on a forgotten field, whereas everything mechanical here is filled in by the machine without mistakes. The schema of data itself is declared by the workflow node; in v1 there are no nodes, and data is validated by nothing.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schemaVersion", "runID", "attempt", "agent", "status", "producedAt", "data"],
+  "properties": {
+    "schemaVersion": {
+      "type": "integer",
+      "const": 1,
+      "description": "Major version of the runtime contract. A consumer that encounters a higher one must refuse, not pick through the keys it recognizes."
+    },
+    "runID": {
+      "type": "string",
+      "pattern": "^[0-9A-HJKMNP-TV-Z]{26}$"
+    },
+    "attempt": {
+      "type": "integer",
+      "minimum": 1
+    },
+    "agent": {
+      "type": "string",
+      "enum": ["claude-code", "codex"]
+    },
+    "model": {
+      "type": "string",
+      "maxLength": 253
+    },
+    "status": {
+      "type": "string",
+      "enum": ["ok", "partial", "failed"],
+      "description": "Derived from the exit code rather than declared by the agent: partial means a timeout after which there is work all the same; failed means the output was kept for the post-mortem, not because anyone trusts it."
+    },
+    "producedAt": {
+      "type": "string",
+      "format": "date-time"
+    },
+    "summary": {
+      "type": "string",
+      "maxLength": 65536,
+      "description": "The first 64 KiB of result.md. Duplicated here so that a consumer of the structured output does not have to fetch a second object for one line of UI."
+    },
+    "data": {
+      "type": "object",
+      "description": "The payload exactly as the agent wrote it. An empty object is a legal value and the normal outcome of a run with no declared schema.",
+      "default": {}
+    },
+    "artifacts": {
+      "type": "array",
+      "maxItems": 256,
+      "description": "Files from /workspace/.haliphron/artifacts/, uploaded under the runs/{runID}/artifacts/ prefix. References, not contents: nothing bounds the size here.",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["path", "key"],
+        "properties": {
+          "path": {
+            "type": "string",
+            "maxLength": 1024,
+            "description": "Path relative to /workspace/.haliphron/artifacts/"
+          },
+          "key": {"type": "string", "maxLength": 1024},
+          "sizeBytes": {"type": "integer", "minimum": 0},
+          "sha256": {"type": "string", "pattern": "^[a-f0-9]{64}$"},
+          "contentType": {"type": "string", "maxLength": 128}
+        }
+      }
+    }
+  }
+}

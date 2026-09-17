@@ -1,0 +1,344 @@
+# Haliphron Runtime API v1
+#
+# The contract between the agent pod and the controller — the only network
+# interface the pod uses at all, apart from presigned links to storage. The
+# pod needs neither egress to the control plane nor a backend token
+# (ADR 16).
+#
+# The controller listens inside the cluster on a separate listener, :8083.
+# The address arrives in the pod as HALIPHRON_CALLBACK_URL and is
+# cluster-local by construction: the backend cannot know it.
+#
+# OpenAPI 3.0.3 — for the same reason as the Cluster API: the main
+# consumer of the shape is Go code generation.
+#
+# camelCase naming, as in every machine contract in haliphron.
+#
+# Semantics live in `docs/contracts/agent-runtime.md`. This file is the shape
+# of the messages; that one is the rules, phases, exit codes and file layout.
+openapi: 3.0.3
+
+info:
+  title: Haliphron Runtime API
+  version: 1.0.0
+  description: |
+    One endpoint: the pod tells the controller how the run ended.
+
+    The call is an **optimization, not a correctness condition**. By the time
+    it is made, the entire contents of the result already sit in storage,
+    including a copy of the report itself (`completion.json`). An undelivered
+    webhook does not change the pod's exit code: the outcome is visible to the
+    controller through the Job's exit code anyway, and the contents are
+    visible to the backend under the `runs/{runID}/` prefix.
+
+    `CompletionReport` here is **the same schema** as in the Cluster API: the
+    controller forwards the report to `/ingest/completion` unchanged, merely
+    wrapping it in an envelope carrying the cluster identity and epoch. The
+    match is held by the `TestRuntimeAndClusterAPIAgreeOnCompletionReport`
+    test, not by agreement.
+  contact:
+    name: Haliphron
+  license:
+    name: Proprietary
+
+servers:
+  - url: http://{controllerService}/runtime/v1
+    variables:
+      controllerService:
+        default: haliphron-controller.haliphron-system.svc:8083
+
+tags:
+  - name: completion
+    description: The pod's completion report
+
+security:
+  - callbackToken: []
+
+paths:
+
+  /completion:
+    post:
+      tags: [completion]
+      operationId: reportCompletion
+      summary: Report the outcome of a run to the controller
+      description: |
+        Called exactly once in the normal case, and repeated on a network
+        error — delivery is at-least-once, and the receiver is idempotent on
+        the (`runID`, `attempt`) pair.
+
+        The order is mandatory: upload to storage first, then this call (P5).
+        A report announced before it became durable is an outcome the backend
+        will see without the contents.
+
+        Authentication is the `callback-token` from the per-run Secret. The
+        token is minted by the **controller**, not the backend: `callbackURL`
+        is cluster-local, and without a token any pod in the agent namespace
+        could send a forged completion for somebody else's run. The controller
+        checks three things: the token, the `runID` in the body, and the
+        `runID` the token is bound to.
+
+        Pod retries: up to 5 attempts with exponential backoff, no longer than
+        60 s in total. After that the pod gives up and exits with **its own**
+        code, not with a delivery error.
+      parameters:
+        - $ref: '#/components/parameters/RuntimeContract'
+        - $ref: '#/components/parameters/Traceparent'
+        - $ref: '#/components/parameters/IdempotencyKey'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: {$ref: '#/components/schemas/CompletionReport'}
+      responses:
+        '202':
+          description: |
+            Accepted by the controller. This does not mean the backend knows yet:
+            forwarding to `/ingest/completion` is asynchronous and survives the
+            backend being unavailable, because the controller holds the report
+            and sends it on later.
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/CompletionAck'}
+        '400':
+          description: The body does not pass the schema. The pod does not retry — a retry would give the same answer.
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/Error'}
+        '401':
+          description: The token is missing, does not match, or is bound to a different run.
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/Error'}
+        '409':
+          description: |
+            The `runID` in the body does not match the one the token was issued
+            for, or `attempt` is lower than one already accepted. The pod does
+            not retry.
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/Error'}
+        '413':
+          description: The body exceeds the limit. The pod truncates `summary` and retries once.
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/Error'}
+        '503':
+          description: |
+            The controller is restarting. The pod retries with backoff — this is
+            the very case the retries here exist for.
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/Error'}
+
+components:
+
+  securitySchemes:
+    callbackToken:
+      type: http
+      scheme: bearer
+      description: |
+        The `callback-token` from the per-run Secret mounted at
+        `/haliphron/secrets/`. It lives exactly as long as the AgentRun and is
+        garbage-collected along with it.
+
+  parameters:
+    RuntimeContract:
+      name: X-Haliphron-Contract
+      in: header
+      required: true
+      schema: {type: string, example: '1.0'}
+      description: |
+        The version of the runtime contract the image implements. The major
+        must match what the controller expects; a mismatch here means the
+        check at pod startup (`HALIPHRON_CONTRACT`) was bypassed.
+    Traceparent:
+      name: traceparent
+      in: header
+      required: false
+      schema: {type: string}
+      description: W3C trace context, the continuation of the attempt's span
+    IdempotencyKey:
+      name: Idempotency-Key
+      in: header
+      required: false
+      schema: {type: string, example: '01J8X4K2ZQ7YB3M9F0R5W6T8CD/1'}
+      description: |
+        `{runID}/{attempt}`. It duplicates what is already in the body, and it
+        is worth it: the controller drops a repeat without parsing the payload.
+
+  schemas:
+
+    ULID:
+      type: string
+      pattern: '^[0-9A-HJKMNP-TV-Z]{26}$'
+      maxLength: 26
+
+    MoneyUSD:
+      type: string
+      pattern: '^-?[0-9]{1,12}(\.[0-9]{1,6})?$'
+      maxLength: 32
+      description: Money as a string, not a float
+
+    AgentType:
+      type: string
+      enum: [claude-code, codex]
+      maxLength: 32
+
+    FailureClass:
+      type: string
+      enum: [none, infra, agent, git, config, budget]
+      description: |
+        The failure class is determined by the **pod**, not the controller: only
+        the pod has the cause rather than the effect. The controller may
+        reclassify only what it observes itself — OOMKill, eviction,
+        cancellation.
+
+    RuntimePhase:
+      type: string
+      enum: [init, validate, fetch, checkpoint, auth, clone, role, mcp-prepare,
+             mcp-verify, run, parse, output, persist, commit, push, pr,
+             finalize, notify]
+      description: An entrypoint phase. The names are contract, not logging.
+
+    PhaseOutcome:
+      type: string
+      enum: [ok, skipped, failed]
+
+    ObjectRef:
+      type: object
+      required: [bucket, key]
+      properties:
+        bucket: {type: string, minLength: 1, maxLength: 63}
+        key: {type: string, minLength: 1, maxLength: 1024}
+        sizeBytes: {type: integer, format: int64, minimum: 0}
+        sha256: {type: string, pattern: '^[a-f0-9]{64}$', maxLength: 64}
+        contentType: {type: string, maxLength: 128}
+
+    CompletionReport:
+      type: object
+      description: |
+        The report assembled by the pod. It leaves in two copies: as a webhook
+        to the controller, and as the `runs/{runID}/completion.json` object in
+        storage. The copies are byte-for-byte identical — either one may turn
+        out to be the one that survived.
+
+        The data is self-declared by the least trusted component in the system.
+        Cost and tokens are taken from the agent CLI's output and are not
+        unforgeable.
+      required: [runID, attempt, status, exitCode, agent]
+      properties:
+        runID: {$ref: '#/components/schemas/ULID'}
+        attempt: {type: integer, format: int32, minimum: 1}
+        status:
+          type: string
+          enum: [success, failure, timeout, cancelled]
+          description: |
+            Derivable from the exit code and sent all the same: cancellation is
+            indistinguishable from eviction by code, since both arrive as
+            signal 143.
+        exitCode: {type: integer, format: int32}
+        failureClass: {$ref: '#/components/schemas/FailureClass'}
+        failedPhase: {$ref: '#/components/schemas/RuntimePhase'}
+        reason:
+          type: string
+          maxLength: 128
+          description: |
+            A short CamelCase reason in the Kubernetes idiom —
+            `MCPServersUnavailable`, `PromptDigestMismatch`,
+            `PushRejected`. It ends up in the CR's `status.reason` and in the UI.
+          example: MCPServersUnavailable
+        message:
+          type: string
+          maxLength: 1024
+          description: |
+            A human-readable explanation. Without these three fields a "Failed,
+            config" outcome in the UI is indistinguishable from any other, and
+            the evidence exists exactly once — in the pod, at the moment of
+            failure.
+        agent: {$ref: '#/components/schemas/AgentType'}
+        model: {type: string, maxLength: 253}
+        runtime: {$ref: '#/components/schemas/RuntimeInfo'}
+        resultRef: {$ref: '#/components/schemas/ObjectRef'}
+        outputRef: {$ref: '#/components/schemas/ObjectRef'}
+        logRef: {$ref: '#/components/schemas/ObjectRef'}
+        stateRef: {$ref: '#/components/schemas/ObjectRef'}
+        summary:
+          type: string
+          maxLength: 65536
+          description: The first 64 KiB of `result.md` — the only content in this contract
+        repo: {$ref: '#/components/schemas/RepoResult'}
+        usage: {$ref: '#/components/schemas/Usage'}
+        phaseTimings:
+          type: array
+          maxItems: 64
+          description: |
+            Phase durations. A cheap substitute for tracing when OTLP is not
+            configured, and the only way to see that the time went into cloning
+            a monorepo rather than into the LLM.
+          items: {$ref: '#/components/schemas/PhaseTiming'}
+        childRunIDs:
+          type: array
+          maxItems: 64
+          description: Runs spawned by this one through the per-run MCP token
+          items: {$ref: '#/components/schemas/ULID'}
+
+    RuntimeInfo:
+      type: object
+      description: |
+        What exactly did the work. Without this, a behavior change across a
+        fleet of clusters running different image tags is diagnosed by guesswork.
+      properties:
+        image: {type: string, maxLength: 512}
+        imageVersion: {type: string, maxLength: 128}
+        contractVersion: {type: string, maxLength: 16}
+        agentVersion: {type: string, maxLength: 64}
+
+    RepoResult:
+      type: object
+      description: Absent for a run without a repository — which is a legal case
+      properties:
+        pushed: {type: boolean}
+        targetBranch: {type: string, maxLength: 255}
+        commitSHA: {type: string, maxLength: 64}
+        prURL: {type: string, maxLength: 512}
+        prNumber: {type: integer, format: int32}
+        prAction:
+          type: string
+          enum: [created, updated, none]
+          description: create-or-update — one of the converging side effects that make a retry safe
+
+    PhaseTiming:
+      type: object
+      required: [phase, durationMs]
+      properties:
+        phase: {$ref: '#/components/schemas/RuntimePhase'}
+        durationMs: {type: integer, format: int64}
+        outcome: {$ref: '#/components/schemas/PhaseOutcome'}
+
+    Usage:
+      type: object
+      properties:
+        durationMs: {type: integer, format: int64}
+        numTurns: {type: integer, format: int32}
+        totalCostUSD: {$ref: '#/components/schemas/MoneyUSD'}
+        inputTokens: {type: integer, format: int64}
+        outputTokens: {type: integer, format: int64}
+        cacheReadTokens: {type: integer, format: int64}
+        cacheWriteTokens: {type: integer, format: int64}
+        sessionID: {type: string, maxLength: 256}
+
+    CompletionAck:
+      type: object
+      required: [accepted]
+      properties:
+        accepted: {type: boolean}
+        duplicate:
+          type: boolean
+          description: A report for this (runID, attempt) pair has already been accepted; the repeat was ignored
+
+    Error:
+      type: object
+      required: [code, message]
+      properties:
+        code: {type: string, example: TokenMismatch}
+        message: {type: string}

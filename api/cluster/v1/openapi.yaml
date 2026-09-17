@@ -1,0 +1,1575 @@
+# Haliphron Cluster API v1
+#
+# The internal contract between haliphron-backend (the control plane) and
+# haliphron-controller (a target cluster). Not exposed externally:
+# a separate listener, :8082.
+#
+# OpenAPI 3.0.3 rather than 3.1: the main consumer is Go code generation
+# (oapi-codegen v2 / kin-openapi), where 3.1 is only partly supported.
+#
+# Naming convention: camelCase. The Cluster API and the AgentRun CRD share
+# the same set of schemas (see RenderedRunSpec), and the controller
+# translates a lease into a CR mechanically. The external REST API
+# (/api/v1) stays snake_case — that is a public contract with other rules.
+openapi: 3.0.3
+
+info:
+  title: Haliphron Cluster API
+  version: 1.0.0
+  description: |
+    A pull model: the backend never initiates a connection into a cluster.
+    The controller registers, leases work through a long poll, acknowledges
+    materialization, sends heartbeats and reports the result.
+
+    The semantics of the epoch, lease expiry, report monotonicity and the
+    taxonomy of errors are described in `docs/contracts/cluster-api.md`.
+    This file is the shape of the messages; that one is the rules.
+  contact:
+    name: Haliphron
+  license:
+    name: Proprietary
+
+servers:
+  - url: https://{backendHost}/cluster-api/v1
+    variables:
+      backendHost:
+        default: haliphron-backend.haliphron.svc:8082
+
+tags:
+  - name: registration
+    description: Cluster registration and configuration bootstrap
+  - name: lease
+    description: Leasing work, acknowledgement, renewal, presigned bundles
+  - name: heartbeat
+    description: Liveness, lease renewal, the downward command channel
+  - name: ingest
+    description: Lifecycle reports and reports on the result's contents
+
+security:
+  - clusterJWT: []
+
+paths:
+
+  /register:
+    post:
+      tags: [registration]
+      operationId: registerCluster
+      summary: Exchange a one-time bootstrap token for a clusterID
+      description: |
+        The only call authenticated by a bootstrap token rather than a JWT.
+
+        The controller generates an Ed25519 pair **inside the cluster** and
+        transmits only the public half. The private key never leaves the
+        cluster, and the backend cannot issue a token on the cluster's behalf.
+
+        Idempotent on the pair (bootstrapToken, publicKey.kid + publicKey.key):
+        a repeat with the same key returns the same clusterID and the same
+        response, even though the token has already been spent. This saves a
+        controller that crashed between a successful response and writing the
+        clusterID into its Secret.
+      security:
+        - bootstrapToken: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: {$ref: '#/components/schemas/RegisterRequest'}
+      responses:
+        '200':
+          description: The cluster is registered (or this is a repeat with the same key)
+          headers:
+            Cache-Control: {$ref: '#/components/headers/NoStore'}
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/RegisterResponse'}
+        '400': {$ref: '#/components/responses/BadRequest'}
+        '401':
+          description: |
+            The bootstrap token is unknown, expired, revoked, or was spent by a
+            different public key.
+            code=BootstrapTokenInvalid | BootstrapTokenConsumed.
+            action=fatal — the operator must issue a new token in the UI.
+          content:
+            application/problem+json:
+              schema: {$ref: '#/components/schemas/Problem'}
+        '409':
+          description: The cluster name is taken (code=ClusterNameTaken, action=fatal)
+          content:
+            application/problem+json:
+              schema: {$ref: '#/components/schemas/Problem'}
+        '422': {$ref: '#/components/responses/UnsupportedController'}
+        '429': {$ref: '#/components/responses/RateLimited'}
+        '500': {$ref: '#/components/responses/ServerError'}
+
+  /clusters/{clusterID}/leases:
+    post:
+      tags: [lease]
+      operationId: acquireLeases
+      summary: Long poll for work
+      description: |
+        The connection is held until work appears or until `waitSeconds`
+        elapses (for the maximum see `maxWaitSeconds` from /register, 30 by
+        default — the upper bound is set by the ingress's proxy_read_timeout,
+        see docs/architecture.md, section 16).
+
+        The response contains secret material in the clear: the backend cannot
+        create a Secret in the cluster, so the controller creates it. The
+        response body must not be logged or cached.
+
+        Several controller replicas polling at the same time are safe:
+        issuance goes through `FOR UPDATE SKIP LOCKED`, and one lease reaches
+        exactly one poller.
+      parameters:
+        - $ref: '#/components/parameters/ClusterID'
+        - $ref: '#/components/parameters/ControllerVersion'
+        - $ref: '#/components/parameters/Traceparent'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: {$ref: '#/components/schemas/LeaseRequest'}
+      responses:
+        '200':
+          description: One or more leases were issued
+          headers:
+            Cache-Control: {$ref: '#/components/headers/NoStore'}
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/LeaseResponse'}
+        '204':
+          description: |
+            There is no work and the long poll expired normally. The controller
+            polls again immediately, without backoff.
+        '400': {$ref: '#/components/responses/BadRequest'}
+        '401': {$ref: '#/components/responses/Unauthenticated'}
+        '403': {$ref: '#/components/responses/Forbidden'}
+        '422': {$ref: '#/components/responses/UnsupportedController'}
+        '429': {$ref: '#/components/responses/RateLimited'}
+        '500': {$ref: '#/components/responses/ServerError'}
+        '503': {$ref: '#/components/responses/Unavailable'}
+
+  /leases/{runID}/ack:
+    post:
+      tags: [lease]
+      operationId: ackLease
+      summary: Acknowledge that the lease has been materialized in the cluster
+      description: |
+        Called after the Secret, the ConfigMap and the `AgentRun` CR have been
+        created in the cluster — that is, after the work has become durable and
+        will survive a controller restart. The backend moves the run
+        `Leased → Dispatched`.
+
+        Before the ack, an `ackDeadline` expiry means the controller crashed
+        without managing to create anything and the work definitely did not
+        start. The backend raises the epoch and returns the run to `Queued`,
+        from where it may go to a different cluster.
+
+        Idempotent on (runID, epoch).
+      parameters:
+        - $ref: '#/components/parameters/RunID'
+        - $ref: '#/components/parameters/ControllerVersion'
+        - $ref: '#/components/parameters/Traceparent'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: {$ref: '#/components/schemas/AckRequest'}
+      responses:
+        '200':
+          description: Acknowledged (or a repeat — idempotent)
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/AckResponse'}
+        '400': {$ref: '#/components/responses/BadRequest'}
+        '401': {$ref: '#/components/responses/Unauthenticated'}
+        '403': {$ref: '#/components/responses/Forbidden'}
+        '404': {$ref: '#/components/responses/RunNotFound'}
+        '409': {$ref: '#/components/responses/EpochMismatch'}
+        '429': {$ref: '#/components/responses/RateLimited'}
+        '500': {$ref: '#/components/responses/ServerError'}
+
+  /leases/{runID}/artifacts:
+    post:
+      tags: [lease]
+      operationId: mintArtifactBundle
+      summary: Issue a fresh presigned bundle for an active lease
+      description: |
+        The presigned links issued together with the lease live for
+        `timeoutSeconds × 2`. A series of infrastructure retries
+        (`retry.maxInfraRetries`, 3 by default) can outlast that, and then the
+        pod cannot upload the result — a failure that looks like a lost result
+        on successful work by the agent.
+
+        Before creating the Job for attempt > 1 the controller is obliged to
+        check `expiresAt` and, if necessary, mint a new bundle and update the
+        per-run Secret. Requires an active lease with the current epoch.
+      parameters:
+        - $ref: '#/components/parameters/RunID'
+        - $ref: '#/components/parameters/ControllerVersion'
+        - $ref: '#/components/parameters/Traceparent'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: {$ref: '#/components/schemas/ArtifactBundleRequest'}
+      responses:
+        '200':
+          description: The new bundle
+          headers:
+            Cache-Control: {$ref: '#/components/headers/NoStore'}
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/ArtifactBundle'}
+        '400': {$ref: '#/components/responses/BadRequest'}
+        '401': {$ref: '#/components/responses/Unauthenticated'}
+        '403': {$ref: '#/components/responses/Forbidden'}
+        '404': {$ref: '#/components/responses/RunNotFound'}
+        '409': {$ref: '#/components/responses/EpochMismatch'}
+        '429': {$ref: '#/components/responses/RateLimited'}
+        '500': {$ref: '#/components/responses/ServerError'}
+
+  /clusters/{clusterID}/heartbeat:
+    post:
+      tags: [heartbeat]
+      operationId: heartbeat
+      summary: Liveness, lease renewal, receiving commands
+      description: |
+        Called every `heartbeatIntervalSeconds` (10 by default). It does four
+        things at once:
+
+        1. confirms the cluster is alive (`staleAfterSeconds` without a
+           heartbeat → the cluster becomes `Unreachable`);
+        2. renews the leases of every run listed;
+        3. **reconciles state**: with `reportComplete: true` the `runs` list is
+           taken as complete, and the backend can detect work the cluster lost
+           immediately rather than waiting for the lease to expire;
+        4. delivers commands top-down — the **only channel** in that direction.
+           Cancellation is asynchronous, with a delay of one interval.
+
+        The observations in `runs[]` are processed by the same monotonicity
+        rules as `/ingest/status`: a heartbeat is a batch of observations plus
+        a reconciliation.
+      parameters:
+        - $ref: '#/components/parameters/ClusterID'
+        - $ref: '#/components/parameters/ControllerVersion'
+        - $ref: '#/components/parameters/Traceparent'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: {$ref: '#/components/schemas/HeartbeatRequest'}
+      responses:
+        '200':
+          description: Accepted
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/HeartbeatResponse'}
+        '400': {$ref: '#/components/responses/BadRequest'}
+        '401': {$ref: '#/components/responses/Unauthenticated'}
+        '403': {$ref: '#/components/responses/Forbidden'}
+        '413': {$ref: '#/components/responses/PayloadTooLarge'}
+        '422': {$ref: '#/components/responses/UnsupportedController'}
+        '429': {$ref: '#/components/responses/RateLimited'}
+        '500': {$ref: '#/components/responses/ServerError'}
+        '503': {$ref: '#/components/responses/Unavailable'}
+
+  /ingest/status:
+    post:
+      tags: [ingest]
+      operationId: ingestStatus
+      summary: Lifecycle report (batched)
+      description: |
+        The low-latency path for a phase change. It duplicates the heartbeat's
+        observations and obeys the same rules: idempotency on
+        (runID, epoch, attempt, phase), monotonicity on (attempt, phaseRank),
+        and the first terminal phase wins.
+
+        Batched, because during a reconcile burst the controller receives dozens
+        of events per second, and N requests for N events are extra traffic and
+        extra chances of a partial failure.
+
+        Reports are applied row by row: partial success is normal. The response
+        carries the result for each row; a row with `accepted: false` is not
+        repeated by the controller unless `action` is `retry`.
+      parameters:
+        - $ref: '#/components/parameters/ControllerVersion'
+        - $ref: '#/components/parameters/Traceparent'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: {$ref: '#/components/schemas/StatusIngestRequest'}
+      responses:
+        '200':
+          description: Processed (see the per-item results)
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/StatusIngestResponse'}
+        '400': {$ref: '#/components/responses/BadRequest'}
+        '401': {$ref: '#/components/responses/Unauthenticated'}
+        '403': {$ref: '#/components/responses/Forbidden'}
+        '413': {$ref: '#/components/responses/PayloadTooLarge'}
+        '429': {$ref: '#/components/responses/RateLimited'}
+        '500': {$ref: '#/components/responses/ServerError'}
+        '503': {$ref: '#/components/responses/Unavailable'}
+
+  /ingest/completion:
+    post:
+      tags: [ingest]
+      operationId: ingestCompletion
+      summary: Report on the contents of the result
+      description: |
+        The forwarding of the pod's webhook (the image contract, section 13.5
+        of the architecture), wrapped in an envelope carrying the cluster
+        identity and epoch.
+
+        The payload is **references, not contents**, apart from a summary of up
+        to 64 KiB. The result is already in S3 by the time of the call
+        (ADR 15), so this call is an optimization, not a correctness condition:
+        if it did not arrive and the terminal status did, the backend marks the
+        run `CompletedWithoutResult` and restores the contents by reading
+        `runs/{runID}/` from S3.
+
+        Idempotent on (runID, attempt).
+      parameters:
+        - $ref: '#/components/parameters/ControllerVersion'
+        - $ref: '#/components/parameters/Traceparent'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: {$ref: '#/components/schemas/CompletionIngestRequest'}
+      responses:
+        '200':
+          description: Accepted (or a repeat — idempotent)
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/CompletionIngestResponse'}
+        '400': {$ref: '#/components/responses/BadRequest'}
+        '401': {$ref: '#/components/responses/Unauthenticated'}
+        '403': {$ref: '#/components/responses/Forbidden'}
+        '404': {$ref: '#/components/responses/RunNotFound'}
+        '409': {$ref: '#/components/responses/EpochMismatch'}
+        '413': {$ref: '#/components/responses/PayloadTooLarge'}
+        '429': {$ref: '#/components/responses/RateLimited'}
+        '500': {$ref: '#/components/responses/ServerError'}
+        '503': {$ref: '#/components/responses/Unavailable'}
+
+components:
+
+  securitySchemes:
+    clusterJWT:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT
+      description: |
+        A short-lived JWT signed with the **controller's private key**
+        (EdDSA / Ed25519). The backend stores only the public half, received at
+        registration, and is incapable of issuing a token on the cluster's
+        behalf.
+
+        Mandatory claims: `iss` = `sub` = clusterID (ULID),
+        `aud` = `haliphron-cluster-api`, `iat`, `exp` (≤ 300 s),
+        `jti` (unique). The header carries `kid`.
+
+        Backend checks: the signature by `kid`, `aud`, `exp` with a 60 s clock
+        skew tolerance, the cluster's status (`Revoked` → 401), and that `sub`
+        matches the `clusterID` in the path (otherwise 403).
+    bootstrapToken:
+      type: http
+      scheme: bearer
+      description: |
+        A one-time token with a TTL, issued by an operator in the UI. The
+        `hlb_` prefix is how the handler tells it from a JWT. It is spent after
+        use. Accepted only on `/register`.
+
+  headers:
+    NoStore:
+      description: The body contains secret material. Do not cache, do not log.
+      schema: {type: string, enum: ['no-store']}
+    RetryAfter:
+      description: Seconds until the next attempt
+      schema: {type: integer, format: int32, minimum: 0}
+
+  parameters:
+    ClusterID:
+      name: clusterID
+      in: path
+      required: true
+      description: Must match `sub` in the JWT, otherwise 403
+      schema: {$ref: '#/components/schemas/ULID'}
+    RunID:
+      name: runID
+      in: path
+      required: true
+      schema: {$ref: '#/components/schemas/ULID'}
+    ControllerVersion:
+      name: X-Haliphron-Controller-Version
+      in: header
+      required: true
+      description: |
+        The controller's SemVer. The control plane and the `haliphron-runtime`
+        chart are upgraded independently, so a version divergence is normal
+        rather than a fault. The backend supports the range returned by
+        `/register`; outside that range it answers 422
+        `UnsupportedControllerVersion`.
+      schema: {type: string, example: '1.2.0'}
+    Traceparent:
+      name: traceparent
+      in: header
+      required: false
+      description: W3C Trace Context. A workflow instance is a trace, a run attempt is a span.
+      schema: {type: string}
+
+  responses:
+    BadRequest:
+      description: The body or the parameters failed validation (code=InvalidRequest, action=fatal)
+      content:
+        application/problem+json:
+          schema: {$ref: '#/components/schemas/Problem'}
+    Unauthenticated:
+      description: |
+        The token is missing or expired, the signature does not verify, or the
+        cluster is revoked. code=Unauthenticated | ClusterRevoked.
+        On `ClusterRevoked`, action=fatal: the controller stops polling and
+        records an event for the operator, since repeats are pointless.
+      content:
+        application/problem+json:
+          schema: {$ref: '#/components/schemas/Problem'}
+    Forbidden:
+      description: |
+        The token is valid but grants no right to the object: `sub` does not
+        match the `clusterID` in the path, or the run is leased by another
+        cluster.
+        code=ClusterMismatch | RunLeasedByAnotherCluster, action=abandon.
+      content:
+        application/problem+json:
+          schema: {$ref: '#/components/schemas/Problem'}
+    RunNotFound:
+      description: |
+        The run is unknown to the backend — for example, the control plane was
+        restored from a backup older than the run. code=RunNotFound,
+        action=abandon: the controller cancels the Job and deletes the CR.
+      content:
+        application/problem+json:
+          schema: {$ref: '#/components/schemas/Problem'}
+    EpochMismatch:
+      description: |
+        The epoch is stale: the lease expired and the work was reassigned, or
+        this is a "zombie" controller returning after a disconnect.
+        code=EpochMismatch, action=abandon. `currentEpoch`/`currentStatus`
+        carry the actual state, so the controller can tell a reassignment from
+        its own desynchronization.
+      content:
+        application/problem+json:
+          schema: {$ref: '#/components/schemas/Problem'}
+    PayloadTooLarge:
+      description: The body exceeds 1 MiB (code=PayloadTooLarge, action=fatal)
+      content:
+        application/problem+json:
+          schema: {$ref: '#/components/schemas/Problem'}
+    UnsupportedController:
+      description: |
+        The controller's version is outside the supported range
+        (code=UnsupportedControllerVersion, action=fatal). The
+        `haliphron-runtime` chart or the control plane must be upgraded.
+      content:
+        application/problem+json:
+          schema: {$ref: '#/components/schemas/Problem'}
+    RateLimited:
+      description: Too frequent (code=RateLimited, action=backoff)
+      headers:
+        Retry-After: {$ref: '#/components/headers/RetryAfter'}
+      content:
+        application/problem+json:
+          schema: {$ref: '#/components/schemas/Problem'}
+    ServerError:
+      description: An internal error (code=Internal, action=retry)
+      content:
+        application/problem+json:
+          schema: {$ref: '#/components/schemas/Problem'}
+    Unavailable:
+      description: |
+        The backend is in maintenance, database migrations are running, or
+        there is no connection to Postgres (code=Unavailable, action=backoff).
+        The controller keeps executing the work it already took — availability
+        decoupling (principle P4).
+      headers:
+        Retry-After: {$ref: '#/components/headers/RetryAfter'}
+      content:
+        application/problem+json:
+          schema: {$ref: '#/components/schemas/Problem'}
+
+  schemas:
+
+    # ---------- primitives ----------
+
+    ULID:
+      type: string
+      maxLength: 26
+      pattern: '^[0-9A-HJKMNP-TV-Z]{26}$'
+      example: 01J8X4K2ZQ7YB3M9F0R5W6T8CD
+
+    Epoch:
+      type: integer
+      format: int64
+      minimum: 1
+      description: |
+        The lease's fencing token. It grows on every new issuance of the same
+        run. The backend rejects any message whose epoch is lower than the
+        current one. Not to be confused with `attempt`: the epoch is about
+        ownership of the work, the attempt is about attempts within one
+        ownership.
+
+    Attempt:
+      type: integer
+      format: int32
+      minimum: 1
+      description: |
+        The attempt number within a lease. It grows on an infrastructure retry,
+        which the controller performs locally without asking the backend.
+        Monotonic: a report with a lower attempt is rejected.
+
+    MoneyUSD:
+      type: string
+      maxLength: 32
+      pattern: '^-?[0-9]{1,12}(\.[0-9]{1,6})?$'
+      description: A decimal string, not a float — money is not counted in doubles
+      example: '0.4231'
+
+    Phase:
+      type: string
+      description: |
+        The `AgentRun.status.phase` phase — what the controller observes in the
+        cluster. The `Queued`/`Leased`/`Dispatched`/`Unknown` statuses belong to
+        the backend and are never reported by the controller.
+
+        The ordering (phaseRank): Pending 10 → Starting 20 → Running 30 →
+        terminal 40. A regression is rejected.
+      enum: [Pending, Starting, Running, Succeeded, Failed, TimedOut, Cancelled]
+
+    FailureClass:
+      type: string
+      description: |
+        The failure class. It determines whether the run is retried
+        automatically: `infra` and `git` are, the rest are not (section 12.2 of
+        the architecture).
+
+        The class is determined by the **pod**: the controller sees only the
+        exit code, while the cause — the only instance of the evidence — exists
+        solely inside the pod at the moment of failure. The controller
+        reclassifies only what it observes itself: OOM, eviction, cancellation.
+      enum: [none, infra, agent, git, config, budget]
+
+    AgentType:
+      type: string
+      maxLength: 32
+      enum: [claude-code, codex]
+      description: opencode is deferred (closed question 6), but the value is an extension point
+
+    ObjectRef:
+      type: object
+      description: A reference to an object in S3. No contents are transmitted under this contract.
+      required: [bucket, key]
+      properties:
+        bucket: {type: string, minLength: 1, maxLength: 63}
+        key: {type: string, minLength: 1, maxLength: 1024, example: 'runs/01J8X4K2ZQ7YB3M9F0R5W6T8CD/result.md'}
+        sizeBytes: {type: integer, format: int64, minimum: 0}
+        sha256: {type: string, maxLength: 64, pattern: '^[a-f0-9]{64}$'}
+        contentType: {type: string, maxLength: 128}
+
+    Problem:
+      type: object
+      description: RFC 9457. The `code` and `action` fields are haliphron extensions.
+      required: [type, title, status, code, action]
+      properties:
+        type: {type: string, format: uri, example: 'https://haliphron.io/problems/epoch-mismatch'}
+        title: {type: string}
+        status: {type: integer, format: int32}
+        detail: {type: string}
+        instance: {type: string}
+        code:
+          type: string
+          description: A machine-readable cause. Stable, unlike `title`.
+          enum:
+            - InvalidRequest
+            - Unauthenticated
+            - ClusterRevoked
+            - ClusterMismatch
+            - ClusterNameTaken
+            - BootstrapTokenInvalid
+            - BootstrapTokenConsumed
+            - UnsupportedControllerVersion
+            - RunNotFound
+            - EpochMismatch
+            - RunLeasedByAnotherCluster
+            - RunTerminal
+            - PhaseRegression
+            - AttemptRegression
+            - LeaseExpired
+            - PayloadTooLarge
+            - RateLimited
+            - Unavailable
+            - Internal
+        action:
+          type: string
+          description: |
+            An instruction to the controller. It removes the need to infer
+            behavior from the response code — the most common cause of
+            divergence between two independently written sides.
+
+            `retry` — repeat with exponential backoff and jitter;
+            `backoff` — the same, but respecting `Retry-After`;
+            `abandon` — the work is no longer ours: cancel the Job, delete the
+            CR, repeat nothing;
+            `resync` — re-read the state with a full heartbeat
+            (`reportComplete: true`);
+            `reregister` — the credential is unusable, re-registration is needed;
+            `fatal` — a defect or an incompatibility; a human is required.
+          enum: [retry, backoff, abandon, resync, reregister, fatal]
+        retryAfterSeconds: {type: integer, format: int32, minimum: 0}
+        runID: {$ref: '#/components/schemas/ULID'}
+        clusterID: {$ref: '#/components/schemas/ULID'}
+        currentEpoch: {$ref: '#/components/schemas/Epoch'}
+        currentStatus: {type: string, description: The run's state on the backend side}
+        traceID: {type: string, description: For searching the control plane's logs}
+
+    # ---------- registration ----------
+
+    RegisterRequest:
+      type: object
+      required: [name, publicKey, controllerVersion, agentNamespace]
+      properties:
+        name:
+          type: string
+          maxLength: 63
+          pattern: '^[a-z0-9]([-a-z0-9]*[a-z0-9])?$'
+          description: A unique human-readable name. Shown in the UI, used in selectors.
+          example: prod-eu-west
+        labels:
+          type: object
+          additionalProperties: {type: string}
+          description: Labels for a role's `clusterSelector`
+          example: {env: prod, region: eu-west-1}
+        publicKey: {$ref: '#/components/schemas/PublicKey'}
+        controllerVersion: {type: string, example: '1.2.0'}
+        agentNamespace:
+          type: string
+          description: The namespace in which the controller will create agent Jobs
+          example: haliphron-agents
+        k8sVersion: {type: string, example: v1.31.4}
+        runtimes:
+          type: array
+          description: Which agent runtimes the cluster is prepared to execute. Used in the placement filter.
+          items: {$ref: '#/components/schemas/AgentType'}
+        capacitySlots:
+          type: integer
+          format: int32
+          minimum: 0
+          description: |
+            How many concurrent runs the cluster agrees to hold. The upper bound
+            is set by the agent namespace's ResourceQuota; this is a value
+            declared by the controller, not a computed one.
+        crdVersions:
+          type: array
+          description: The installed versions of the AgentRun CRD. Lets the backend tell whether the cluster is ready for a new spec shape.
+          items: {type: string, example: v1alpha1}
+
+    PublicKey:
+      type: object
+      required: [kid, alg, key]
+      properties:
+        kid: {type: string, maxLength: 64, description: "The key identifier, which goes into the JWT header"}
+        alg: {type: string, enum: [Ed25519]}
+        key:
+          type: string
+          description: The public key, base64url without padding (raw, 32 bytes)
+          pattern: '^[A-Za-z0-9_-]{43}$'
+
+    RegisterResponse:
+      type: object
+      description: |
+        A dual purpose: confirming the registration and bootstrapping the
+        operational parameters. The intervals are set by the control plane
+        rather than the cluster's values.yaml — otherwise they drift across
+        installations and nobody knows what `staleAfter` actually is.
+      required: [clusterID, name, tokenAudience, timings, supportedControllerVersions, serverTime]
+      properties:
+        clusterID: {$ref: '#/components/schemas/ULID'}
+        name: {type: string}
+        keyID: {type: string, description: "An echo of `publicKey.kid` — confirmation of which key was accepted"}
+        tokenAudience: {type: string, example: haliphron-cluster-api}
+        tokenMaxTTLSeconds: {type: integer, format: int32, example: 300}
+        timings: {$ref: '#/components/schemas/Timings'}
+        supportedControllerVersions:
+          type: object
+          required: [min, max]
+          properties:
+            min: {type: string, example: '1.0.0'}
+            max: {type: string, example: '1.4.0'}
+        serverTime:
+          type: string
+          format: date-time
+          description: |
+            For estimating clock skew. A controller whose divergence exceeds the
+            JWT tolerance is obliged to log it at startup rather than find out
+            through a 401 in production.
+
+    Timings:
+      type: object
+      required: [heartbeatIntervalSeconds, staleAfterSeconds, leaseTTLSeconds, ackTimeoutSeconds, maxWaitSeconds, maxLeasesPerPoll]
+      properties:
+        heartbeatIntervalSeconds: {type: integer, format: int32, default: 10}
+        staleAfterSeconds:
+          type: integer
+          format: int32
+          default: 90
+          description: Without a heartbeat for longer than this, the cluster is marked `Unreachable`
+        leaseTTLSeconds:
+          type: integer
+          format: int32
+          default: 120
+          description: By how much a heartbeat extends each run's `leaseDeadline`
+        ackTimeoutSeconds:
+          type: integer
+          format: int32
+          default: 60
+          description: |
+            The window for materializing and acknowledging. Separate from
+            `leaseTTLSeconds` and deliberately short: before the ack the work is
+            guaranteed not to have started, so it can be reassigned safely and
+            quickly.
+        maxWaitSeconds: {type: integer, format: int32, default: 30, description: The long poll ceiling}
+        maxLeasesPerPoll: {type: integer, format: int32, default: 10}
+        artifactTTLMultiplier:
+          type: number
+          format: float
+          default: 2
+          description: The TTL of presigned links = timeoutSeconds × this multiplier
+
+    # ---------- lease ----------
+
+    LeaseRequest:
+      type: object
+      required: [freeSlots]
+      properties:
+        freeSlots:
+          type: integer
+          format: int32
+          minimum: 0
+          description: |
+            How many runs the controller is ready to accept right now. The
+            backend will issue no more than `min(freeSlots, maxLeasesPerPoll)`.
+            Zero is a legal request: the controller keeps hanging on the long
+            poll so as not to lose the channel, but will receive no work.
+        runtimes:
+          type: array
+          description: Restrict issuance to these runtimes (for example, during an image rollback)
+          items: {$ref: '#/components/schemas/AgentType'}
+        waitSeconds:
+          type: integer
+          format: int32
+          minimum: 0
+          default: 30
+          description: How long to hold the connection when there is no work. Clamped to `maxWaitSeconds`.
+        capacitySlots: {type: integer, format: int32, minimum: 0, description: An update to the declared capacity}
+
+    LeaseResponse:
+      type: object
+      required: [leases, serverTime]
+      properties:
+        leases:
+          type: array
+          items: {$ref: '#/components/schemas/Lease'}
+        serverTime: {type: string, format: date-time}
+
+    Lease:
+      type: object
+      description: |
+        A unit of transferred work. It contains everything needed to execute
+        without calling the backend (principle P4): the rendered specification,
+        the secrets and capability links to S3.
+      required: [runID, epoch, attempt, ackDeadline, leaseDeadline, spec, secrets, artifacts]
+      properties:
+        runID: {$ref: '#/components/schemas/ULID'}
+        epoch: {$ref: '#/components/schemas/Epoch'}
+        attempt: {$ref: '#/components/schemas/Attempt'}
+        ackDeadline:
+          type: string
+          format: date-time
+          description: Fail to materialize and acknowledge in time and the epoch is raised, returning the work to `Queued`
+        leaseDeadline:
+          type: string
+          format: date-time
+          description: |
+            Up to which moment the backend considers the work to belong to this
+            cluster. Extended by the heartbeat. Expiry does **not** oblige the
+            controller to stop working: it plays the work out and sends the
+            result later with its own epoch (ADR 5, 6).
+        priority: {type: integer, format: int32, description: From the queue; for scheduling on the cluster side}
+        spec: {$ref: '#/components/schemas/RenderedRunSpec'}
+        secrets:
+          type: object
+          description: |
+            Secret material in the clear. The controller materializes it into a
+            single per-run Secret with an `ownerReference` to the CR — when the
+            CR is deleted it is garbage-collected, and no long-lived secrets
+            remain in the agent namespace.
+
+            The invariant: **no value from here ends up in the CR's `spec`**,
+            only references. This is checked by the controller's admission
+            policy.
+
+            Known keys: `git-token`, `llm-api-key`, `mcp.json`,
+            `presigned.json`. Others are passed through as they are.
+
+            The prompt is deliberately not here: a k8s Secret is hard-capped at
+            1 MiB across all keys together, and the prompt is the only quantity
+            with no natural ceiling (a workflow step's context absorbs the
+            output of the previous ones). It travels through S3, see
+            `RenderedRunSpec.prompt`.
+          additionalProperties: {type: string}
+        roleConfig:
+          type: object
+          description: |
+            The role's fallback configs — the contents of the future ConfigMap.
+            The backend renders them in advance: the third and fourth steps of
+            the resolution chain (section 10) require files that do not exist
+            before the clone, but the fallback does not depend on the cluster.
+            The key is the name of the file mounted into `/haliphron/role/`.
+
+            It sits next to `spec` rather than inside it: it is **material**,
+            like `secrets` and `artifacts`. The controller turns it into a
+            ConfigMap and puts only the name into the CR. The rule is
+            mechanical: whatever the controller materializes never goes into
+            `spec`.
+          additionalProperties: {type: string}
+        artifacts: {$ref: '#/components/schemas/ArtifactBundle'}
+
+    RenderedRunSpec:
+      type: object
+      description: |
+        The fully rendered specification of a run: the role is resolved, the
+        policies are applied, and there are no references that would require
+        calling the backend.
+
+        **The same schema serves as the `spec` of the `AgentRun` CRD** — the
+        controller adds `runID`, `leaseEpoch`, `materials` (the names of the
+        Secret and ConfigMap it created) and its own cluster-local
+        `callbackURL`. One schema, two carriers.
+
+        Synchrony is not on trust: the Go types in `api/run/v1` are the source,
+        the CRD is generated from them, and the
+        `TestOpenAPIAndCRDAgreeOnRenderedRunSpec` test compares this document
+        against them across every key that affects whether a value is accepted.
+        The length bounds here are not decorative: a divergence in `maxLength`
+        means a lease the backend issued and the controller cannot materialize.
+      required: [agent, prompt, model, image, repo, runtime]
+      properties:
+        agent: {$ref: '#/components/schemas/AgentType'}
+        prompt:
+          allOf:
+            - $ref: '#/components/schemas/ObjectRef'
+          description: |
+            A reference to `runs/{runID}/prompt.txt`, placed there by the
+            backend during admission. The pod reads it with a presigned GET
+            from `artifacts.get['prompt.txt']`.
+
+            Through S3 rather than through the Secret: the prompt has no natural
+            ceiling, and a Secret is capped at 1 MiB. In addition, the `sha256`
+            here lets the pod verify that it is executing exactly what the
+            backend supplied.
+        model:
+          type: string
+          minLength: 1
+          maxLength: 253
+          description: A provider-qualified model identifier
+          example: anthropic/claude-opus-5
+        role: {type: string, maxLength: 253, description: The role name; empty is allowed}
+        image:
+          type: string
+          minLength: 1
+          maxLength: 512
+          description: |
+            The agent image, preferably by digest: reproducibility of a retry
+            matters more than the convenience of a tag.
+          example: ghcr.io/automagicops/agent-runtime@sha256:...
+        imagePullPolicy: {type: string, enum: [Always, IfNotPresent]}
+        imagePullSecrets:
+          type: array
+          maxItems: 8
+          items: {type: string, maxLength: 253}
+        repo: {$ref: '#/components/schemas/RepoSpec'}
+        runtime: {$ref: '#/components/schemas/RuntimeSpec'}
+        toolPolicy: {$ref: '#/components/schemas/ToolPolicy'}
+        budget: {$ref: '#/components/schemas/BudgetSpec'}
+        retry: {$ref: '#/components/schemas/RetrySpec'}
+        observability: {$ref: '#/components/schemas/ObservabilitySpec'}
+        ttlSecondsAfterFinished:
+          type: integer
+          format: int32
+          minimum: 0
+          default: 86400
+          description: How long after a terminal state to delete the CR (the Job, Pod, Secret and ConfigMap go with it by ownerReference)
+
+    RepoSpec:
+      type: object
+      properties:
+        url: {type: string, maxLength: 2048, description: An empty string means a run without a repository (a legal case)}
+        provider: {$ref: '#/components/schemas/GitProvider'}
+        baseBranch: {type: string, maxLength: 255, default: main}
+        targetBranch:
+          type: string
+          maxLength: 255
+          description: |
+            Always set and always generated by the backend deterministically
+            from the `runID` (ADR 23). A name invented by the agent produces a
+            second PR on the second attempt.
+          example: haliphron/01j8x4k2-add-rds
+        cloneDepth: {type: integer, format: int32, minimum: 0, description: 0 means a full clone}
+        submodules: {type: boolean}
+        lfs: {type: boolean}
+        createPR: {type: boolean, default: true}
+
+    GitProvider:
+      type: string
+      maxLength: 16
+      enum: [github, gitlab, none]
+
+    RuntimeSpec:
+      type: object
+      required: [timeoutSeconds]
+      properties:
+        timeoutSeconds:
+          type: integer
+          format: int32
+          minimum: 60
+          maximum: 86400
+          default: 3600
+          description: |
+            The agent's own budget, enforced by the entrypoint: on overrun it
+            exits with code 11. The Job's `activeDeadlineSeconds` is derived
+            from this and is deliberately larger — otherwise the normal timeout
+            has no time to upload the partial result.
+        maxTurns: {type: integer, format: int32, minimum: 1}
+        permissionMode: {$ref: '#/components/schemas/PermissionMode'}
+        env:
+          type: array
+          maxItems: 64
+          description: Non-secret variables only. Secrets arrive through envFrom from the per-run Secret.
+          items: {$ref: '#/components/schemas/EnvVar'}
+        resources: {$ref: '#/components/schemas/Resources'}
+        nodeSelector:
+          type: object
+          maxProperties: 16
+          additionalProperties: {type: string, maxLength: 63, pattern: '^(|[A-Za-z0-9]([-A-Za-z0-9_.]{0,61}[A-Za-z0-9])?)$'}
+        tolerations:
+          type: array
+          maxItems: 16
+          description: |
+            An explicit schema, not "a k8s object as is". Free form would mean
+            `x-kubernetes-preserve-unknown-fields` in the CRD, that is, giving
+            up the structural schema for the sake of five fields.
+          items: {$ref: '#/components/schemas/Toleration'}
+        mcpServers:
+          type: array
+          maxItems: 32
+          description: Rendered descriptions of MCP servers. Headers carrying tokens are moved out into `secrets['mcp.json']`.
+          items: {$ref: '#/components/schemas/MCPServer'}
+
+    PermissionMode:
+      type: string
+      maxLength: 32
+      enum: [default, acceptEdits, bypassPermissions, plan]
+
+    EnvVar:
+      type: object
+      required: [name, value]
+      properties:
+        name: {type: string, maxLength: 128, pattern: '^[A-Za-z_][A-Za-z0-9_]*$'}
+        value: {type: string, maxLength: 4096}
+
+    Toleration:
+      type: object
+      properties:
+        key: {type: string, maxLength: 253}
+        operator: {type: string, maxLength: 16, enum: [Exists, Equal]}
+        value: {type: string, maxLength: 253}
+        effect: {type: string, maxLength: 32, enum: [NoSchedule, PreferNoSchedule, NoExecute]}
+        tolerationSeconds: {type: integer, format: int64}
+
+    MCPServer:
+      type: object
+      required: [name, transport]
+      properties:
+        name: {type: string, minLength: 1, maxLength: 128}
+        transport: {type: string, maxLength: 16, enum: [stdio, http, sse]}
+        url: {type: string, maxLength: 2048}
+        command: {type: string, maxLength: 512}
+        args:
+          type: array
+          maxItems: 64
+          items: {type: string, maxLength: 1024}
+
+    Resources:
+      type: object
+      description: |
+        The container's limits. The controller sets requests equal to the
+        limits: QoS class Guaranteed, because an agent evicted halfway costs an
+        hour of work and a second bill for the model.
+      properties:
+        cpu: {type: string, maxLength: 32, pattern: '^[0-9]+(\.[0-9]+)?(m)?$', example: '2'}
+        memory: {type: string, maxLength: 32, pattern: '^[0-9]+(\.[0-9]+)?(Ki|Mi|Gi|Ti|k|M|G|T)?$', example: 4Gi}
+        ephemeralStorage:
+          type: string
+          maxLength: 32
+          pattern: '^[0-9]+(\.[0-9]+)?(Ki|Mi|Gi|Ti|k|M|G|T)?$'
+          example: 20Gi
+          description: |
+            Not a decorative limit: the repository clone plus dependencies plus
+            logs will knock out the node if ephemeral-storage is unbounded, and
+            it looks like the eviction of random pods.
+
+    ToolPolicy:
+      type: object
+      description: Already reconciled with the policy ceiling (section 10). The controller does not recompute it.
+      properties:
+        allow:
+          type: array
+          maxItems: 256
+          items: {type: string, maxLength: 256}
+        deny:
+          type: array
+          maxItems: 256
+          items: {type: string, maxLength: 256}
+
+    BudgetSpec:
+      type: object
+      properties:
+        maxCostUSD: {$ref: '#/components/schemas/MoneyUSD'}
+
+    RetrySpec:
+      type: object
+      properties:
+        maxInfraRetries:
+          type: integer
+          format: int32
+          minimum: 0
+          maximum: 10
+          default: 3
+          description: |
+            How many times the controller repeats locally without asking the
+            backend. Only the `infra` and `git` classes are repeated. The
+            idempotency of a repeat is provided by the
+            `runs/{runID}/state.json` checkpoint: a `run` phase already passed
+            does not call the LLM a second time (ADR 19).
+
+    ObservabilitySpec:
+      type: object
+      properties:
+        otlpEndpoint: {type: string, maxLength: 2048, description: Where the pod emits the entrypoint's phase spans}
+        traceparent: {type: string, maxLength: 256, description: "The parent context: workflow instance → step → attempt"}
+        logChunkIntervalSeconds: {type: integer, format: int32, minimum: 1, default: 5}
+
+    # ---------- the presigned bundle ----------
+
+    ArtifactBundleRequest:
+      type: object
+      required: [epoch, attempt]
+      properties:
+        epoch: {$ref: '#/components/schemas/Epoch'}
+        attempt: {$ref: '#/components/schemas/Attempt'}
+
+    ArtifactBundle:
+      type: object
+      description: |
+        The pod's capability access to S3 without storage credentials (ADR 14).
+        A compromised pod writes only into its own prefix and cannot read other
+        runs. The bundle is secret material: it goes into the per-run Secret,
+        not into the CR's `spec`.
+      required: [bucket, keyPrefix, put, expiresAt]
+      properties:
+        bucket: {type: string}
+        region: {type: string}
+        endpoint: {type: string, description: For MinIO and S3-compatible stores}
+        keyPrefix: {type: string, example: 'runs/01J8X4K2ZQ7YB3M9F0R5W6T8CD/'}
+        put:
+          type: object
+          description: |
+            Presigned PUTs to keys known in advance: `output.json`, `result.md`,
+            `state.json`, `completion.json`, `logs/agent.log`.
+
+            `completion.json` is the same report that goes to the controller as
+            a webhook. The webhook and the forwarding to `/ingest/completion`
+            live in the controller's memory: if it crashes between them the
+            report is lost, and without a copy in storage the backend will never
+            learn the cost or the PR link — `result.md` and `output.json` do not
+            contain them. The copy costs one PUT and makes the loss recoverable.
+          additionalProperties: {$ref: '#/components/schemas/PresignedURL'}
+        get:
+          type: object
+          description: |
+            Presigned GETs. Two mandatory keys:
+
+            `prompt.txt` — without it the pod will not get its task;
+
+            `state.json` — without reading the checkpoint, an idempotent retry
+            (ADR 19) is unachievable: the pod will not learn that the `run`
+            phase is already past, and will pay for the LLM a second time. On
+            the first attempt the object does not exist yet, and a 404 on this
+            link is a normal answer rather than a failure.
+
+            An extension point for the input artifacts of workflow steps
+            (phase 3).
+          additionalProperties: {$ref: '#/components/schemas/PresignedURL'}
+        post:
+          type: array
+          description: POST policies for prefixes with names not known in advance — artifacts and log chunks.
+          items: {$ref: '#/components/schemas/PresignedPostPolicy'}
+        expiresAt:
+          type: string
+          format: date-time
+          description: |
+            The minimum over the expiries of all the links. Before creating the
+            Job for attempt > 1 the controller compares it with the expected
+            duration and, if it falls short, mints a new bundle through
+            `POST /leases/{runID}/artifacts`.
+
+    PresignedURL:
+      type: object
+      required: [url, method, expiresAt]
+      properties:
+        url: {type: string}
+        method: {type: string, enum: [PUT, GET]}
+        headers:
+          type: object
+          additionalProperties: {type: string}
+          description: Headers that must be sent, or the signature will not verify
+        expiresAt: {type: string, format: date-time}
+
+    PresignedPostPolicy:
+      type: object
+      required: [prefix, url, fields, expiresAt]
+      properties:
+        prefix: {type: string, example: 'runs/01J8X4K2ZQ7YB3M9F0R5W6T8CD/logs/chunks/'}
+        url: {type: string}
+        fields: {type: object, additionalProperties: {type: string}}
+        maxSizeBytes: {type: integer, format: int64}
+        expiresAt: {type: string, format: date-time}
+
+    # ---------- ack ----------
+
+    AckRequest:
+      type: object
+      required: [clusterID, epoch]
+      properties:
+        clusterID: {$ref: '#/components/schemas/ULID'}
+        epoch: {$ref: '#/components/schemas/Epoch'}
+        accepted:
+          type: boolean
+          default: true
+          description: |
+            `false` — the controller could not materialize the lease and never
+            started the work. Without a negative ack the only way to say "I
+            cannot" is to burn the run: create the Job, let it fail and report
+            `Failed`. The causes are real and all detectable before the Job: the
+            spec failed the controller's validation, the cluster's CRD is older
+            and pruned fields, the ResourceQuota is exhausted, the image is not
+            permitted by policy.
+
+            The backend raises the epoch, returns the run to `Queued` and
+            excludes this cluster from selection for it. If there are no other
+            clusters — `Failed` with class `config` and an intelligible reason
+            in the UI, rather than an endless queue.
+        rejection:
+          type: object
+          description: "Present when `accepted: false`"
+          required: [code, message]
+          properties:
+            code:
+              type: string
+              enum: [InvalidSpec, SpecFieldsPruned, QuotaExhausted, ImageNotAllowed, MaterializationFailed]
+            message: {type: string, maxLength: 1024}
+            fields:
+              type: array
+              description: The paths of the spec fields that caused the rejection — for example `runtime.resources.memory`
+              items: {type: string}
+        crName: {type: string, description: The name of the created AgentRun — for debugging and log correlation}
+        namespace: {type: string}
+
+    AckResponse:
+      type: object
+      required: [runID, epoch, status, leaseDeadline]
+      properties:
+        runID: {$ref: '#/components/schemas/ULID'}
+        epoch: {$ref: '#/components/schemas/Epoch'}
+        status: {type: string, example: Dispatched}
+        leaseDeadline: {type: string, format: date-time}
+        commands:
+          type: array
+          description: |
+            Commands that accumulated during materialization. A cancellation
+            that arrived between the lease being issued and the ack would
+            otherwise wait a full heartbeat interval, having started a Job that
+            must immediately be killed.
+          items: {$ref: '#/components/schemas/Command'}
+
+    # ---------- heartbeat ----------
+
+    HeartbeatRequest:
+      type: object
+      required: [freeSlots, reportComplete, runs]
+      properties:
+        freeSlots: {type: integer, format: int32, minimum: 0}
+        capacitySlots: {type: integer, format: int32, minimum: 0}
+        reportComplete:
+          type: boolean
+          description: |
+            `true` — `runs` contains **all** the non-terminal runs the cluster
+            owns. The backend may then consider an unmentioned run lost and act
+            immediately rather than wait for the lease to expire.
+
+            `false` — a partial report (the controller has just come up and has
+            not finished the initial CR list, or the report is paginated). The
+            backend draws no conclusions from a missing entry.
+
+            Without this flag two situations are indistinguishable: "I do not
+            have this run" and "I have not told you about it yet". The first
+            requires a reaction, the second silence.
+        runs:
+          type: array
+          maxItems: 500
+          items: {$ref: '#/components/schemas/RunObservation'}
+        controller: {$ref: '#/components/schemas/ControllerHealth'}
+        cluster: {$ref: '#/components/schemas/ClusterFacts'}
+
+    RunObservation:
+      type: object
+      description: The state as observed by the controller. Never contains the result text and never the logs.
+      required: [runID, epoch, attempt, phase]
+      properties:
+        runID: {$ref: '#/components/schemas/ULID'}
+        epoch: {$ref: '#/components/schemas/Epoch'}
+        attempt: {$ref: '#/components/schemas/Attempt'}
+        phase: {$ref: '#/components/schemas/Phase'}
+        reason:
+          type: string
+          description: A short k8s-style reason — `ImagePullBackOff`, `OOMKilled`, `DeadlineExceeded`
+        message: {type: string, maxLength: 1024}
+        jobName: {type: string}
+        podName: {type: string}
+        nodeName: {type: string}
+        startedAt: {type: string, format: date-time}
+        finishedAt: {type: string, format: date-time}
+        exitCode: {type: integer, format: int32}
+        failureClass: {$ref: '#/components/schemas/FailureClass'}
+        observedAt:
+          type: string
+          format: date-time
+          description: |
+            The time by the cluster's clock. A diagnostic detail, **not** a basis
+            for ordering: the order is determined by `(attempt, phaseRank)`,
+            because cluster clocks are not synchronized.
+
+    ControllerHealth:
+      type: object
+      properties:
+        version: {type: string}
+        uptimeSeconds: {type: integer, format: int64}
+        backendUnreachableSeconds:
+          type: integer
+          format: int64
+          description: |
+            The accumulated time spent working blind. The
+            `haliphron_backend_unreachable_seconds_total` metric, reported from
+            below: otherwise the only side that knows about the disconnect is
+            the one that is unreachable for metric collection at the time.
+        leaseQueueDepth: {type: integer, format: int32}
+        reconcileErrorsTotal: {type: integer, format: int64}
+
+    ClusterFacts:
+      type: object
+      description: Drift in the facts about the cluster — a node upgrade, an added CRD. Sent on change, not every time.
+      properties:
+        k8sVersion: {type: string}
+        nodeCount: {type: integer, format: int32}
+        runtimes: {type: array, items: {$ref: '#/components/schemas/AgentType'}}
+        crdVersions: {type: array, items: {type: string}}
+        quotaExhausted:
+          type: boolean
+          description: |
+            The agent namespace's ResourceQuota is exhausted. The backend stops
+            assigning work here rather than waiting for a series of `Failed`s
+            with the reason `forbidden: exceeded quota`.
+
+    HeartbeatResponse:
+      type: object
+      required: [serverTime, leases, commands]
+      properties:
+        serverTime: {type: string, format: date-time}
+        leases:
+          type: array
+          description: The renewed leases. A run that is not here is no longer considered by the backend to belong to this cluster.
+          items:
+            type: object
+            required: [runID, epoch, leaseDeadline]
+            properties:
+              runID: {$ref: '#/components/schemas/ULID'}
+              epoch: {$ref: '#/components/schemas/Epoch'}
+              leaseDeadline: {type: string, format: date-time}
+        commands:
+          type: array
+          items: {$ref: '#/components/schemas/Command'}
+        unknownRuns:
+          type: array
+          description: |
+            Runs the backend considers active on this cluster and the controller
+            did not mention under `reportComplete: true`. The controller is
+            obliged to check: if the CR really is gone, it must report a terminal
+            phase or explicitly acknowledge the loss — then the backend moves the
+            run to `Unknown` at once rather than after `staleAfter`.
+          items: {$ref: '#/components/schemas/ULID'}
+        timings:
+          $ref: '#/components/schemas/Timings'
+        observations:
+          type: array
+          description: The result of applying the observations from the request. Present only if something was rejected.
+          items: {$ref: '#/components/schemas/StatusIngestResult'}
+
+    Command:
+      type: object
+      description: |
+        A top-down command. Delivery is idempotent and repeated until the
+        observed state reflects the result — the commands deliberately have no
+        acknowledgements: an acknowledgement would have to be stored and to
+        expire, while repeating `cancel` for an already cancelled run is
+        harmless.
+      required: [type, runID]
+      properties:
+        type:
+          type: string
+          description: |
+            `cancel` — stop execution, drive the run to `Cancelled`, and report
+            the result anyway if there is one.
+
+            `abandon` — the work no longer belongs to the cluster (it has been
+            reassigned, or the run was deleted): remove the Job and the CR, and
+            **report nothing**.
+
+            The controller is obliged to ignore an unknown type rather than
+            crash: the control plane may be newer (see the compatibility rule).
+          enum: [cancel, abandon]
+        runID: {$ref: '#/components/schemas/ULID'}
+        epoch: {$ref: '#/components/schemas/Epoch'}
+        reason: {type: string}
+        issuedAt: {type: string, format: date-time}
+        gracePeriodSeconds:
+          type: integer
+          format: int32
+          description: How long to give the pod to upload the partial result before SIGKILL
+
+    # ---------- ingest ----------
+
+    StatusIngestRequest:
+      type: object
+      required: [clusterID, reports]
+      properties:
+        clusterID: {$ref: '#/components/schemas/ULID'}
+        reports:
+          type: array
+          minItems: 1
+          maxItems: 100
+          items: {$ref: '#/components/schemas/RunObservation'}
+
+    StatusIngestResponse:
+      type: object
+      required: [results]
+      properties:
+        results:
+          type: array
+          items: {$ref: '#/components/schemas/StatusIngestResult'}
+
+    StatusIngestResult:
+      type: object
+      required: [runID, accepted]
+      properties:
+        runID: {$ref: '#/components/schemas/ULID'}
+        accepted: {type: boolean}
+        appliedStatus: {type: string, description: The run's state after application}
+        code:
+          type: string
+          description: "The reason for rejection, if `accepted: false`. The values come from `Problem.code`."
+        action: {type: string, enum: [retry, backoff, abandon, resync, reregister, fatal]}
+        currentEpoch: {$ref: '#/components/schemas/Epoch'}
+
+    CompletionIngestRequest:
+      type: object
+      required: [clusterID, runID, epoch, attempt, completion]
+      properties:
+        clusterID: {$ref: '#/components/schemas/ULID'}
+        runID: {$ref: '#/components/schemas/ULID'}
+        epoch: {$ref: '#/components/schemas/Epoch'}
+        attempt: {$ref: '#/components/schemas/Attempt'}
+        receivedAt:
+          type: string
+          format: date-time
+          description: When the controller accepted the webhook from the pod
+        completion: {$ref: '#/components/schemas/CompletionReport'}
+
+    CompletionReport:
+      type: object
+      description: |
+        The report assembled by the **pod** and passed to the controller inside
+        the cluster (the pod needs neither egress to the control plane nor a
+        backend token — ADR 16). The controller forwards it unchanged.
+
+        The shape belongs to the agent image's runtime contract
+        (`docs/contracts/agent-runtime.md`, `api/runtime/v1/openapi.yaml`); it
+        is repeated here because the backend reads this document rather than
+        that one. The match is held by the
+        `TestRuntimeAndClusterAPIAgreeOnCompletionReport` test, not by
+        agreement.
+
+        The data is self-declared by the least trusted component. Cost and
+        tokens come from the agent CLI's output and cannot be treated as
+        unforgeable; the backend compares `usage.durationMs` against the
+        observed Job duration and flags a divergence in the audit log.
+      required: [runID, attempt, status, exitCode, agent]
+      properties:
+        runID:
+          allOf:
+            - $ref: '#/components/schemas/ULID'
+          description: |
+            Deliberately duplicates the envelope's `runID`: the same report sits
+            in storage as `completion.json` and is read from there **without**
+            an envelope when the controller died between the webhook and the
+            forwarding. A report that cannot name its own run is not a backup
+            copy. The controller compares both values.
+        attempt: {$ref: '#/components/schemas/Attempt'}
+        status:
+          type: string
+          enum: [success, failure, timeout, cancelled]
+          description: |
+            Derivable from the exit code and sent all the same: cancellation is
+            indistinguishable from eviction by code, since both arrive as
+            signal 143.
+        exitCode: {type: integer, format: int32}
+        failureClass: {$ref: '#/components/schemas/FailureClass'}
+        failedPhase: {$ref: '#/components/schemas/RuntimePhase'}
+        reason:
+          type: string
+          maxLength: 128
+          description: A short CamelCase reason in the Kubernetes idiom
+          example: MCPServersUnavailable
+        message:
+          type: string
+          maxLength: 1024
+          description: |
+            A human-readable explanation. Without `failedPhase`, `reason` and
+            `message`, a "Failed, config" outcome in the UI is indistinguishable
+            from any other, and the evidence exists exactly once — in the pod,
+            at the moment of failure.
+        agent: {$ref: '#/components/schemas/AgentType'}
+        model: {type: string, maxLength: 253}
+        runtime: {$ref: '#/components/schemas/RuntimeInfo'}
+        resultRef: {$ref: '#/components/schemas/ObjectRef'}
+        outputRef: {$ref: '#/components/schemas/ObjectRef'}
+        logRef: {$ref: '#/components/schemas/ObjectRef'}
+        stateRef: {$ref: '#/components/schemas/ObjectRef'}
+        summary:
+          type: string
+          maxLength: 65536
+          description: |
+            The first 64 KiB of `result.md` — the only content in this contract.
+            Duplicated into `runs.result_summary` so that the run list in the UI
+            does not hit S3 for every row.
+        repo: {$ref: '#/components/schemas/RepoResult'}
+        usage: {$ref: '#/components/schemas/Usage'}
+        phaseTimings:
+          type: array
+          maxItems: 64
+          description: |
+            The durations of the entrypoint's phases. A cheap substitute for
+            tracing when OTLP is not configured, and the only way to see that the
+            time went into cloning a monorepo rather than into the LLM.
+          items: {$ref: '#/components/schemas/PhaseTiming'}
+        childRunIDs:
+          type: array
+          maxItems: 64
+          description: Runs spawned by this one through the per-run MCP token. For reconciling depth and cost accounting.
+          items: {$ref: '#/components/schemas/ULID'}
+
+    RuntimeInfo:
+      type: object
+      description: |
+        What exactly did the work: the image tag, the runtime contract version,
+        the agent CLI version. Without this, a behavior change across a fleet of
+        clusters on different tags is diagnosed by guesswork.
+      properties:
+        image: {type: string, maxLength: 512}
+        imageVersion: {type: string, maxLength: 128}
+        contractVersion: {type: string, maxLength: 16}
+        agentVersion: {type: string, maxLength: 64}
+
+    RepoResult:
+      type: object
+      description: Absent for a run without a repository — which is a legal case
+      properties:
+        pushed: {type: boolean}
+        targetBranch: {type: string, maxLength: 255}
+        commitSHA: {type: string, maxLength: 64}
+        prURL: {type: string, maxLength: 512}
+        prNumber: {type: integer, format: int32}
+        prAction:
+          type: string
+          enum: [created, updated, none]
+          description: create-or-update — part of the converging side effects (ADR 6)
+
+    RuntimePhase:
+      type: string
+      enum: [init, validate, fetch, checkpoint, auth, clone, role, mcp-prepare,
+             mcp-verify, run, parse, output, persist, commit, push, pr,
+             finalize, notify]
+      description: |
+        A phase of the image's entrypoint. Not to be confused with `Phase`: that
+        one is about what the controller observes in the cluster, this one about
+        where inside itself the pod is.
+
+    PhaseOutcome:
+      type: string
+      enum: [ok, skipped, failed]
+
+    PhaseTiming:
+      type: object
+      required: [phase, durationMs]
+      properties:
+        phase: {$ref: '#/components/schemas/RuntimePhase'}
+        durationMs: {type: integer, format: int64}
+        outcome: {$ref: '#/components/schemas/PhaseOutcome'}
+
+    Usage:
+      type: object
+      properties:
+        durationMs: {type: integer, format: int64}
+        numTurns: {type: integer, format: int32}
+        totalCostUSD: {$ref: '#/components/schemas/MoneyUSD'}
+        inputTokens: {type: integer, format: int64}
+        outputTokens: {type: integer, format: int64}
+        cacheReadTokens: {type: integer, format: int64}
+        cacheWriteTokens: {type: integer, format: int64}
+        sessionID: {type: string, maxLength: 256}
+
+    CompletionIngestResponse:
+      type: object
+      required: [runID, accepted]
+      properties:
+        runID: {$ref: '#/components/schemas/ULID'}
+        accepted: {type: boolean}
+        duplicate:
+          type: boolean
+          description: A report for this (runID, attempt) pair has already been accepted; the repeat was ignored
+        appliedStatus: {type: string}
+        commands:
+          type: array
+          description: Incidental commands — for example, an `abandon` for an already reassigned run
+          items: {$ref: '#/components/schemas/Command'}
