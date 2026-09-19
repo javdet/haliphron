@@ -7,6 +7,7 @@ ENVTEST_K8S   ?= 1.34.x
 AGENT_IMAGE   ?= haliphron/agent:dev
 AGENT_VERSION ?= dev
 CONTROLLER_VERSION ?= 0.1.0
+BACKEND_VERSION    ?= 0.1.0
 PG_CONTAINER   = haliphron-contract-pg
 PG_NETWORK     = haliphron-contract-net
 DOCKER_RUN     = docker run --rm -e GOMAXPROCS=2 \
@@ -16,7 +17,7 @@ DOCKER_RUN     = docker run --rm -e GOMAXPROCS=2 \
                  -v haliphron-envtest:/envtest \
                  -v $(PWD):/w -w /w $(GO_IMAGE)
 
-.PHONY: generate test db-test fake-test image-test image-build controller-test controller-build verify
+.PHONY: generate test db-test fake-test image-test image-build controller-test controller-build backend-test backend-build verify
 
 ## generate: deepcopy functions and the AgentRun CRD, from the Go types
 generate:
@@ -45,6 +46,24 @@ controller-test:
 ## controller-build: the controller binary
 controller-build:
 	$(DOCKER_RUN) sh -c 'cd /w/controller && CGO_ENABLED=0 go build -ldflags "-X github.com/automagicops/haliphron/controller/version.Version=$(CONTROLLER_VERSION)" -o /w/bin/haliphron-controller ./cmd/haliphron-controller'
+
+## backend-test: the backend's tests, and the contract tests against FakeController
+##               and a real PostgreSQL
+backend-test:
+	@docker network create $(PG_NETWORK) 2>/dev/null || true
+	@docker rm -f $(PG_CONTAINER) >/dev/null 2>&1 || true
+	docker run -d --name $(PG_CONTAINER) --network $(PG_NETWORK) \
+	  -e POSTGRES_PASSWORD=haliphron -e POSTGRES_DB=postgres $(PG_IMAGE) >/dev/null
+	@trap 'docker rm -f $(PG_CONTAINER) >/dev/null 2>&1; docker network rm $(PG_NETWORK) >/dev/null 2>&1' EXIT; \
+	docker run --rm --network $(PG_NETWORK) -e GOMAXPROCS=2 \
+	  -e HALIPHRON_TEST_DSN=postgres://postgres:haliphron@$(PG_CONTAINER):5432/postgres?sslmode=disable \
+	  -v haliphron-gomod:/go/pkg/mod \
+	  -v haliphron-gocache:/root/.cache/go-build \
+	  -v $(PWD):/w -w /w $(GO_IMAGE) sh /w/hack/backendtest.sh
+
+## backend-build: the control plane binary
+backend-build:
+	$(DOCKER_RUN) sh -c 'cd /w/backend && CGO_ENABLED=0 go build -ldflags "-X github.com/automagicops/haliphron/backend/version.Version=$(BACKEND_VERSION)" -o /w/bin/haliphron-backend ./cmd/haliphron-backend'
 
 ## db-test: store contract tests against a real PostgreSQL
 db-test:

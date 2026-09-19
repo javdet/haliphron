@@ -407,26 +407,37 @@ it says, and what to look at during review.
 Written before either side is implemented, and run against a fake of the other
 side.
 
-**Backend, against a fake controller:**
+**Backend, against a fake controller** — implemented in
+[test/backend](../../test/backend), run by `make backend-test` against
+`FakeController` and a real PostgreSQL:
 
-- [ ] a repeat `/register` with the same key → the same `clusterID`; with a different key → 401
-- [ ] `/leases` on an empty queue → 204 after exactly `waitSeconds`
-- [ ] two concurrent leases for one cluster never hand out the same `runID` twice
-- [ ] `ackDeadline` expiry → epoch +1, `Queued`, the work goes to another cluster
-- [ ] `leaseDeadline` expiry in `Running` → `Unknown`, **not** `Queued`
-- [ ] a report with a stale epoch → 409 `abandon`, the run's state unchanged
-- [ ] `Running` after `Succeeded` → `PhaseRegression`, the run stays terminal
-- [ ] two different terminal phases → the first wins, the second goes to the audit log
-- [ ] `attempt` +1 resets phaseRank and creates a `run_attempts` row
-- [ ] a repeat `/ingest/completion` → `duplicate: true`, the cost is charged once
-- [ ] a terminal status without a completion → `CompletedWithoutResult`, the contents lifted from S3
-- [ ] `reportComplete: true` without a known run → it appears in `unknownRuns`
-- [ ] `reportComplete: false` without a known run → `unknownRuns` is empty
-- [ ] `cancel` is redelivered until the phase is terminal
-- [ ] the `/leases` response body is absent from the logs at debug level
-- [ ] `ack {accepted: false}` → epoch +1, `Queued`, this cluster excluded from selection for this run
-- [ ] `ack {accepted: false}` with only one cluster → `Failed`, class `config`, the reason visible in the UI
-- [ ] a terminal status without a completion but with `completion.json` in storage → the cost and `prURL` are lifted from it
+- [x] a repeat `/register` with the same key → the same `clusterID`; with a different key → 401
+- [x] `/leases` on an empty queue → 204 after exactly `waitSeconds`
+- [x] two concurrent leases for one cluster never hand out the same `runID` twice
+- [x] `ackDeadline` expiry → epoch +1, `Queued`, the work is offered again **on the same cluster**
+- [x] `leaseDeadline` expiry in `Running` → `Unknown`, **not** `Queued`
+- [x] a report with a stale epoch → 409 `abandon`, the run's state unchanged
+- [x] `Running` after `Succeeded` → `PhaseRegression`, the run stays terminal
+- [x] two different terminal phases → the first wins, the second goes to the audit log
+- [x] `attempt` +1 resets phaseRank and creates a `run_attempts` row
+- [x] a repeat `/ingest/completion` → `duplicate: true`, the cost is charged once
+- [x] a terminal status without a completion → `CompletedWithoutResult`, the contents lifted from S3
+- [x] `reportComplete: true` without a known run → it appears in `unknownRuns`
+- [x] `reportComplete: false` without a known run → `unknownRuns` is empty
+- [x] `cancel` is redelivered until the phase is terminal
+- [x] the `/leases` response body is absent from the logs at debug level
+- [x] `ack {accepted: false}` → epoch +1, `Queued`, this cluster excluded from selection for this run
+- [x] `ack {accepted: false}` with only one cluster → `Failed`, class `config`, the reason visible in the UI
+- [x] a terminal status without a completion but with `completion.json` in storage → the cost and `prURL` are lifted from it
+
+Row 4 is the one that changed while it was being implemented. It read "the work
+goes to another cluster"; `expire_ack.sql` keeps the assignment instead, and
+the store contract states why: the ordinary cause of a missed ack is a
+controller that was restarting, and sending every one of those through
+re-placement moves work away from a healthy cluster on the strength of a
+rolling update. Reassignment is still what a negative ack and an operator's
+retry do — both consult the exclusion table — but it is not what a timeout
+means. The test asserts the assignment is kept.
 
 **Controller, against a fake backend** — implemented in
 [test/controller](../../test/controller), run by `make controller-test`:

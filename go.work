@@ -2,10 +2,12 @@ go 1.25.0
 
 use (
 	./api
+	./backend
 	./controller
 	./db
 	./fake
 	./image
+	./test/backend
 	./test/contract
 	./test/controller
 	./test/image

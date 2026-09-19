@@ -421,8 +421,19 @@ real PostgreSQL — generated columns, domains, partial indexes,
 - [x] every contract query `PREPARE`s against the schema it ships with
 
 Not covered, and cannot be covered here: the decision table in section 5 of the
-Cluster API. It lives in the backend and is tested against `FakeController` — the
-schema only checks that its conclusions do not produce impossible states.
+Cluster API. It lives in the backend
+([backend/run/report.go](../../backend/run/report.go)) and is tested against
+`FakeController` in [test/backend](../../test/backend) — the schema only checks
+that its conclusions do not produce impossible states.
+
+One thing the backend does that this schema cannot express, and which is worth
+finding here rather than in the code: `CompletedWithoutResult` is not a value of
+the `run_status` domain and never will be. A terminal run whose report has not
+arrived is stored as the terminal status it observed, with
+`completion_received_at` still NULL, and the composite name is derived on the
+way out. It is the absence of a collected result, not a state of the run, and
+giving it a value of its own would put a run into a status no phase maps back
+from.
 
 ---
 
