@@ -1,0 +1,60 @@
+{{ .Chart.Name }} {{ .Chart.Version }} is installed as {{ .Release.Name }}.
+
+  cluster name     {{ .Values.cluster.name }}
+  control plane    {{ .Values.backend.url }}
+  controller in    {{ .Release.Namespace }}
+  agents in        {{ include "haliphron-runtime.agentNamespace" . }}
+  capacity         {{ .Values.cluster.capacitySlots }} concurrent runs, runtimes: {{ join ", " .Values.cluster.runtimes }}
+
+1. Registration happens once, at startup, and the result is a key pair kept in
+   the Secret {{ .Values.identity.secretName }} in {{ .Release.Namespace }}. Watch it happen:
+
+   kubectl -n {{ .Release.Namespace }} logs -l app.kubernetes.io/instance={{ .Release.Name }} -f
+
+   A rejected bootstrap token is fatal and says so. Issue a new one from the
+   control plane and `helm upgrade` with it.
+
+2. Confirm the control plane sees the cluster:
+
+   curl -s {{ .Values.backend.url }}/../v1/clusters -H "Authorization: Bearer $ADMIN_TOKEN"
+
+   It should be Ready within one heartbeat interval.
+
+3. Nothing connects into this cluster. If the controller cannot reach the
+   control plane, the runs it already took still finish and their statuses are
+   sent later with backoff.
+
+{{- if eq (include "haliphron-runtime.agentNamespace" .) .Release.Namespace }}
+
+WARNING: the agents share this release's namespace. The ResourceQuota, the
+LimitRange and the default-deny NetworkPolicy then apply to the controller as
+well — the quota can refuse to schedule it, and the policy will cut it off from
+the control plane. Set agents.namespace to a namespace of its own.
+{{- end }}
+
+{{- if .Values.backend.bootstrapToken }}
+
+NOTE: the bootstrap token was passed as a value, so it is in the release's own
+Secret and in `helm get values`. It is spent after the first registration, but
+prefer backend.bootstrapTokenExistingSecret next time.
+{{- end }}
+
+{{- if not .Values.agents.networkPolicy.enabled }}
+
+WARNING: the agents' NetworkPolicy is off. The agent pod runs commands a model
+wrote against a repository that may contain prompt injection, and with no
+policy it can reach everything this cluster can reach — including the API
+server and every internal service.
+{{- end }}
+
+{{- if not .Values.agents.resourceQuota.enabled }}
+
+WARNING: the agents' ResourceQuota is off. It is the only thing that stops a
+burst of runs from taking this cluster down.
+{{- end }}
+
+{{- if not .Values.crd.install }}
+
+NOTE: crd.install is false. The controller will fail to start unless
+agentruns.haliphron.io is already present at a compatible version.
+{{- end }}

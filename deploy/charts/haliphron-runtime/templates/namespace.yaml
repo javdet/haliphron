@@ -1,0 +1,23 @@
+{{- include "haliphron-runtime.validate" . -}}
+{{- $ns := include "haliphron-runtime.agentNamespace" . -}}
+{{- if and .Values.agents.createNamespace (ne $ns .Release.Namespace) }}
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: {{ $ns }}
+  labels:
+    {{- include "haliphron-runtime.labels" . | nindent 4 }}
+    app.kubernetes.io/component: agents
+    kubernetes.io/metadata.name: {{ $ns }}
+    # Pod Security admission at "restricted": the agent pod is untrusted code
+    # by design, and this is the cheapest control that says so to the cluster
+    # rather than only to the reader of a document.
+    pod-security.kubernetes.io/enforce: restricted
+    pod-security.kubernetes.io/enforce-version: latest
+    pod-security.kubernetes.io/audit: restricted
+    pod-security.kubernetes.io/warn: restricted
+  annotations:
+    # The namespace outlives the release: deleting it would delete every
+    # running agent Job with it.
+    helm.sh/resource-policy: keep
+{{- end }}

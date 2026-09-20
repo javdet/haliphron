@@ -1,0 +1,28 @@
+{{- if .Values.controller.networkPolicy.enabled }}
+{{/*
+Off by default: a policy on the controller that is wrong stops it reaching the
+control plane, and that looks exactly like the control plane being down.
+Turn it on once you know the egress your cluster needs.
+*/}}
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: {{ include "haliphron-runtime.fullname" . }}
+  namespace: {{ .Release.Namespace }}
+  labels: {{- include "haliphron-runtime.labels" . | nindent 4 }}
+spec:
+  podSelector:
+    matchLabels: {{- include "haliphron-runtime.selectorLabels" . | nindent 6 }}
+  policyTypes: [Ingress]
+  ingress:
+    # Only the agents' namespace, and only the callback port. Metrics are
+    # scraped over the other Service, which this policy does not open: add an
+    # entry for your monitoring namespace if you scrape them.
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: {{ include "haliphron-runtime.agentNamespace" . }}
+      ports:
+        - port: {{ .Values.controller.callbackPort }}
+          protocol: TCP
+{{- end }}

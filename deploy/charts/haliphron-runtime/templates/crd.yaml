@@ -1,0 +1,905 @@
+{{/*
+GENERATED from config/crd/bases/haliphron.io_agentruns.yaml by hack/chartgen.sh.
+Do not edit: change the Go types in api/agentrun/v1alpha1, run `make generate`,
+then `make chart-gen`.
+*/}}
+{{- if .Values.crd.install }}
+---
+apiVersion: apiextensions.k8s.io/v1
+kind: CustomResourceDefinition
+metadata:
+  annotations:
+    controller-gen.kubebuilder.io/version: v0.19.0
+    helm.sh/resource-policy: keep
+    {{- if .Values.crd.conversionWebhook.enabled }}
+    cert-manager.io/inject-ca-from: {{ .Release.Namespace }}/{{ include "haliphron-runtime.fullname" . }}-serving-cert
+    {{- end }}
+  name: agentruns.haliphron.io
+spec:
+  group: haliphron.io
+  names:
+    categories:
+    - haliphron
+    kind: AgentRun
+    listKind: AgentRunList
+    plural: agentruns
+    shortNames:
+    - ar
+    singular: agentrun
+  scope: Namespaced
+  versions:
+  - additionalPrinterColumns:
+    - jsonPath: .status.phase
+      name: Phase
+      type: string
+    - jsonPath: .spec.agent
+      name: Agent
+      type: string
+    - jsonPath: .status.attempt
+      name: Attempt
+      type: integer
+    - jsonPath: .status.failureClass
+      name: Class
+      type: string
+    - jsonPath: .metadata.creationTimestamp
+      name: Age
+      type: date
+    - jsonPath: .spec.leaseEpoch
+      name: Epoch
+      priority: 1
+      type: integer
+    - jsonPath: .status.jobName
+      name: Job
+      priority: 1
+      type: string
+    - jsonPath: .status.prURL
+      name: PR
+      priority: 1
+      type: string
+    name: v1alpha1
+    schema:
+      openAPIV3Schema:
+        description: |-
+          AgentRun is one leased execution of one agent, as seen from inside the
+          cluster that runs it.
+        properties:
+          apiVersion:
+            description: |-
+              APIVersion defines the versioned schema of this representation of an object.
+              Servers should convert recognized schemas to the latest internal value, and
+              may reject unrecognized values.
+              More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#resources
+            type: string
+          kind:
+            description: |-
+              Kind is a string value representing the REST resource this object represents.
+              Servers may infer this from the endpoint the client submits requests to.
+              Cannot be updated.
+              In CamelCase.
+              More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#types-kinds
+            type: string
+          metadata:
+            type: object
+          spec:
+            description: |-
+              AgentRunSpec is the lease, materialised. It is RenderedRunSpec verbatim plus
+              exactly four things the backend cannot know: the identity of the run, the
+              fencing epoch it was handed out under, the names of the objects the
+              controller created for it, and a callback URL that only makes sense inside
+              this cluster.
+
+              The spec is immutable in practice: the controller writes it once at creation
+              and never again, and a new epoch produces a new AgentRun rather than an edit.
+              The transition rules below pin the fields whose change would make the status
+              describe a different run than the one that started.
+            properties:
+              agent:
+                description: |-
+                  AgentType selects the runtime inside the agent image. One image serves both;
+                  the variable switches authentication, MCP config rendering, the command line
+                  and the output parser.
+                enum:
+                - claude-code
+                - codex
+                maxLength: 32
+                type: string
+              budget:
+                properties:
+                  maxCostUSD:
+                    description: |-
+                      MoneyUSD is a decimal string. Money is never a float64 here, and never a
+                      Kubernetes Quantity either: Quantity would round 0.4231 into a form nobody
+                      expects to see in a bill.
+                    maxLength: 32
+                    pattern: ^-?[0-9]{1,12}(\.[0-9]{1,6})?$
+                    type: string
+                type: object
+              callbackURL:
+                description: |-
+                  CallbackURL is where the pod posts its completion report. The value is
+                  cluster-local — a Service in the controller's namespace — so the backend
+                  cannot supply it and the controller fills it in.
+                maxLength: 512
+                pattern: ^https?://
+                type: string
+              image:
+                description: |-
+                  Image should be pinned by digest: reproducing attempt 2 matters more
+                  than the convenience of a moving tag.
+                maxLength: 512
+                minLength: 1
+                type: string
+              imagePullPolicy:
+                enum:
+                - Always
+                - IfNotPresent
+                type: string
+              imagePullSecrets:
+                items:
+                  maxLength: 253
+                  type: string
+                maxItems: 8
+                type: array
+              leaseEpoch:
+                description: |-
+                  LeaseEpoch is the fencing token this work was handed out under. The
+                  backend rejects any report carrying a stale epoch, which is what stops a
+                  controller that lost connectivity and came back from writing into a run
+                  that has since been reassigned.
+
+                  It is immutable here because a new epoch means new ownership: the
+                  controller deletes this AgentRun and creates a fresh one, so that a
+                  second epoch can never inherit the first one's status.
+                format: int64
+                minimum: 1
+                type: integer
+                x-kubernetes-validations:
+                - message: leaseEpoch is immutable; a new epoch gets a new AgentRun
+                  rule: self == oldSelf
+              materials:
+                description: |-
+                  Materials names the Secret and ConfigMap the controller built from the
+                  lease. Names only: the values stay in the objects, where RBAC applies to
+                  them. A reader with `get agentruns` learns that a git token exists, not
+                  what it is.
+                properties:
+                  configMapName:
+                    description: |-
+                      ConfigMapName holds the role's fallback config files, mounted at
+                      /haliphron/role/. Absent when the role contributed no files.
+                    maxLength: 253
+                    type: string
+                  secretName:
+                    description: |-
+                      SecretName holds git-token, llm-api-key, mcp.json, presigned.json and the
+                      controller-minted callback-token.
+                    maxLength: 253
+                    type: string
+                required:
+                - secretName
+                type: object
+              model:
+                description: Model is a provider-qualified identifier, e.g. anthropic/claude-opus-5.
+                maxLength: 253
+                minLength: 1
+                type: string
+              observability:
+                properties:
+                  logChunkIntervalSeconds:
+                    default: 5
+                    format: int32
+                    minimum: 1
+                    type: integer
+                  otlpEndpoint:
+                    maxLength: 2048
+                    type: string
+                  traceparent:
+                    description: 'Traceparent is the W3C parent context: workflow
+                      instance to step to attempt.'
+                    maxLength: 256
+                    type: string
+                type: object
+              prompt:
+                description: |-
+                  Prompt points at runs/{runID}/prompt.txt, written by the backend at
+                  admission. It travels through object storage rather than the Secret
+                  because a workflow step's prompt absorbs the output of previous steps
+                  and has no natural ceiling, while a Secret is capped at 1 MiB for all
+                  keys together. The digest lets the pod verify it is executing exactly
+                  what the backend posted.
+                properties:
+                  bucket:
+                    maxLength: 63
+                    minLength: 1
+                    type: string
+                  contentType:
+                    maxLength: 128
+                    type: string
+                  key:
+                    maxLength: 1024
+                    minLength: 1
+                    type: string
+                  sha256:
+                    maxLength: 64
+                    pattern: ^[a-f0-9]{64}$
+                    type: string
+                  sizeBytes:
+                    format: int64
+                    minimum: 0
+                    type: integer
+                required:
+                - bucket
+                - key
+                type: object
+              repo:
+                description: |-
+                  RepoSpec describes the repository the agent works in. An empty URL means a
+                  run without a repository, which is legal.
+                properties:
+                  baseBranch:
+                    default: main
+                    maxLength: 255
+                    type: string
+                  cloneDepth:
+                    description: CloneDepth 0 means a full clone.
+                    format: int32
+                    minimum: 0
+                    type: integer
+                  createPR:
+                    default: true
+                    type: boolean
+                  lfs:
+                    type: boolean
+                  provider:
+                    description: |-
+                      GitProvider selects the hosting API used for the pull request. "none" is a
+                      legitimate case: a run without a repository.
+                    enum:
+                    - github
+                    - gitlab
+                    - none
+                    maxLength: 16
+                    type: string
+                  submodules:
+                    type: boolean
+                  targetBranch:
+                    description: |-
+                      TargetBranch is always generated by the backend, deterministically from
+                      the runID. A name invented by the agent produces a second branch and a
+                      second PR on the second attempt, which is exactly the idempotency the
+                      retry path depends on.
+                    maxLength: 255
+                    type: string
+                  url:
+                    maxLength: 2048
+                    type: string
+                type: object
+              retry:
+                properties:
+                  maxInfraRetries:
+                    default: 3
+                    description: |-
+                      MaxInfraRetries is how many extra attempts the controller starts on its
+                      own, without asking the backend. Only infra and git classes are retried,
+                      and the retry is idempotent thanks to runs/{runID}/state.json: a run that
+                      already finished the agent phase resumes at push, and does not pay for
+                      the model twice.
+                    format: int32
+                    maximum: 10
+                    minimum: 0
+                    type: integer
+                type: object
+              role:
+                description: |-
+                  Role is the platform-level role name. Informational for the controller;
+                  the role has already been resolved into runtime, toolPolicy and the role
+                  config files.
+                maxLength: 253
+                type: string
+              runID:
+                description: |-
+                  RunID matches runs.id in the backend. It is the correlation key for every
+                  report, log line and metric about this run.
+                maxLength: 26
+                pattern: ^[0-9A-HJKMNP-TV-Z]{26}$
+                type: string
+                x-kubernetes-validations:
+                - message: runID is immutable
+                  rule: self == oldSelf
+              runtime:
+                description: RuntimeSpec is everything that shapes the pod.
+                properties:
+                  env:
+                    description: |-
+                      Env carries non-secret variables only. Secrets arrive through envFrom on
+                      the per-run Secret, which is why this list is safe to read with
+                      `kubectl get agentrun`.
+                    items:
+                      properties:
+                        name:
+                          maxLength: 128
+                          pattern: ^[A-Za-z_][A-Za-z0-9_]*$
+                          type: string
+                        value:
+                          maxLength: 4096
+                          type: string
+                      required:
+                      - name
+                      - value
+                      type: object
+                    maxItems: 64
+                    type: array
+                  maxTurns:
+                    format: int32
+                    minimum: 1
+                    type: integer
+                  mcpServers:
+                    description: |-
+                      MCPServers are rendered server descriptions. Headers carrying tokens are
+                      not here; they live in the mcp.json key of the per-run Secret.
+                    items:
+                      properties:
+                        args:
+                          items:
+                            maxLength: 1024
+                            type: string
+                          maxItems: 64
+                          type: array
+                        command:
+                          maxLength: 512
+                          type: string
+                        name:
+                          maxLength: 128
+                          minLength: 1
+                          type: string
+                        transport:
+                          enum:
+                          - stdio
+                          - http
+                          - sse
+                          maxLength: 16
+                          type: string
+                        url:
+                          maxLength: 2048
+                          type: string
+                      required:
+                      - name
+                      - transport
+                      type: object
+                    maxItems: 32
+                    type: array
+                  nodeSelector:
+                    additionalProperties:
+                      description: |-
+                        LabelValue is a Kubernetes label value. It is a named type only so that the
+                        schema can bound it: an unbounded map is the one shape whose comparison cost
+                        the API server cannot estimate, and the immutability rule on the spec is
+                        priced against exactly that estimate.
+                      maxLength: 63
+                      pattern: ^(|[A-Za-z0-9]([-A-Za-z0-9_.]{0,61}[A-Za-z0-9])?)$
+                      type: string
+                    maxProperties: 16
+                    type: object
+                  permissionMode:
+                    description: |-
+                      PermissionMode is the agent CLI permission level, already reconciled with the
+                      policy ceiling by the backend. The controller does not recompute it.
+                    enum:
+                    - default
+                    - acceptEdits
+                    - bypassPermissions
+                    - plan
+                    maxLength: 32
+                    type: string
+                  resources:
+                    description: |-
+                      Resources are container limits. The controller sets requests equal to limits,
+                      which puts the pod in the Guaranteed QoS class: an agent evicted halfway
+                      through under node pressure costs an hour of work and a second LLM bill, and
+                      Burstable buys nothing in return.
+
+                      The values are Kubernetes quantity strings, kept as strings so that this
+                      package stays free of apimachinery. The controller parses them; a malformed
+                      value is a config failure, reported before the Job is created.
+                    properties:
+                      cpu:
+                        maxLength: 32
+                        pattern: ^[0-9]+(\.[0-9]+)?(m)?$
+                        type: string
+                      ephemeralStorage:
+                        description: |-
+                          EphemeralStorage is not decorative. A clone plus dependencies plus logs
+                          fills the node's disk, and an unbounded agent pod shows up as random
+                          other pods being evicted.
+                        maxLength: 32
+                        pattern: ^[0-9]+(\.[0-9]+)?(Ki|Mi|Gi|Ti|k|M|G|T)?$
+                        type: string
+                      memory:
+                        maxLength: 32
+                        pattern: ^[0-9]+(\.[0-9]+)?(Ki|Mi|Gi|Ti|k|M|G|T)?$
+                        type: string
+                    type: object
+                  timeoutSeconds:
+                    default: 3600
+                    description: |-
+                      TimeoutSeconds is the agent's own budget, enforced by the entrypoint,
+                      which exits 11 when it is exceeded. The Job's activeDeadlineSeconds is
+                      derived from it as a backstop and is deliberately larger, so that a
+                      normal timeout still gets to upload its partial result.
+                    format: int32
+                    maximum: 86400
+                    minimum: 60
+                    type: integer
+                  tolerations:
+                    items:
+                      description: |-
+                        Toleration mirrors the Kubernetes toleration rather than importing it: k8s.io/api
+                        is a large dependency to hand the backend for five fields, and an explicit
+                        struct keeps the CRD schema structural instead of preserve-unknown-fields.
+                      properties:
+                        effect:
+                          enum:
+                          - NoSchedule
+                          - PreferNoSchedule
+                          - NoExecute
+                          maxLength: 32
+                          type: string
+                        key:
+                          maxLength: 253
+                          type: string
+                        operator:
+                          enum:
+                          - Exists
+                          - Equal
+                          maxLength: 16
+                          type: string
+                        tolerationSeconds:
+                          format: int64
+                          type: integer
+                        value:
+                          maxLength: 253
+                          type: string
+                      type: object
+                    maxItems: 16
+                    type: array
+                required:
+                - timeoutSeconds
+                type: object
+              toolPolicy:
+                description: |-
+                  ToolPolicy is already intersected with the policy ceiling. The controller
+                  passes it through and never recomputes it.
+                properties:
+                  allow:
+                    items:
+                      maxLength: 256
+                      type: string
+                    maxItems: 256
+                    type: array
+                  deny:
+                    items:
+                      maxLength: 256
+                      type: string
+                    maxItems: 256
+                    type: array
+                type: object
+              ttlSecondsAfterFinished:
+                default: 86400
+                description: |-
+                  TTLSecondsAfterFinished is how long the AgentRun survives its terminal
+                  phase. The owned Job, pod, Secret and ConfigMap go with it.
+                format: int32
+                minimum: 0
+                type: integer
+            required:
+            - agent
+            - callbackURL
+            - image
+            - leaseEpoch
+            - materials
+            - model
+            - prompt
+            - repo
+            - runID
+            - runtime
+            type: object
+            x-kubernetes-validations:
+            - message: the rendered spec is immutable
+              rule: self == oldSelf
+          status:
+            description: |-
+              AgentRunStatus is what the controller observes, and nothing else. It holds no
+              business state: no result text, no logs, no workflow context. Pointers and
+              counters only, so that the object stays small enough to update often and
+              never becomes a second place where the truth about a run lives.
+            properties:
+              attempt:
+                description: |-
+                  Attempt is the current attempt within this lease. It starts at the value
+                  the lease carried and is incremented only by the controller, only when it
+                  starts another Job after a retriable failure. The backend accepts it as
+                  monotonically increasing and resets the phase rank when it grows.
+                format: int32
+                minimum: 1
+                type: integer
+              conditions:
+                description: |-
+                  Conditions carry the reconcile steps: Validated, JobCreated, Completed,
+                  ResultReported. Phase answers "where is it"; conditions answer "what has
+                  the controller managed to do about it".
+                items:
+                  description: Condition contains details for one aspect of the current
+                    state of this API Resource.
+                  properties:
+                    lastTransitionTime:
+                      description: |-
+                        lastTransitionTime is the last time the condition transitioned from one status to another.
+                        This should be when the underlying condition changed.  If that is not known, then using the time when the API field changed is acceptable.
+                      format: date-time
+                      type: string
+                    message:
+                      description: |-
+                        message is a human readable message indicating details about the transition.
+                        This may be an empty string.
+                      maxLength: 32768
+                      type: string
+                    observedGeneration:
+                      description: |-
+                        observedGeneration represents the .metadata.generation that the condition was set based upon.
+                        For instance, if .metadata.generation is currently 12, but the .status.conditions[x].observedGeneration is 9, the condition is out of date
+                        with respect to the current state of the instance.
+                      format: int64
+                      minimum: 0
+                      type: integer
+                    reason:
+                      description: |-
+                        reason contains a programmatic identifier indicating the reason for the condition's last transition.
+                        Producers of specific condition types may define expected values and meanings for this field,
+                        and whether the values are considered a guaranteed API.
+                        The value should be a CamelCase string.
+                        This field may not be empty.
+                      maxLength: 1024
+                      minLength: 1
+                      pattern: ^[A-Za-z]([A-Za-z0-9_,:]*[A-Za-z0-9_])?$
+                      type: string
+                    status:
+                      description: status of the condition, one of True, False, Unknown.
+                      enum:
+                      - "True"
+                      - "False"
+                      - Unknown
+                      type: string
+                    type:
+                      description: type of condition in CamelCase or in foo.example.com/CamelCase.
+                      maxLength: 316
+                      pattern: ^([a-z0-9]([-a-z0-9]*[a-z0-9])?(\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*/)?(([A-Za-z0-9][-A-Za-z0-9_.]*)?[A-Za-z0-9])$
+                      type: string
+                  required:
+                  - lastTransitionTime
+                  - message
+                  - reason
+                  - status
+                  - type
+                  type: object
+                type: array
+                x-kubernetes-list-map-keys:
+                - type
+                x-kubernetes-list-type: map
+              exitCode:
+                format: int32
+                type: integer
+              failureClass:
+                description: |-
+                  FailureClass decides whether the controller retries on its own. Only infra
+                  and git are retried: replaying an agent that already pushed a branch and
+                  opened a PR spends the budget twice and can produce conflicting commits.
+                enum:
+                - none
+                - infra
+                - agent
+                - git
+                - config
+                - budget
+                type: string
+              finishedAt:
+                format: date-time
+                type: string
+              jobName:
+                maxLength: 253
+                type: string
+              message:
+                maxLength: 1024
+                type: string
+              nodeName:
+                maxLength: 253
+                type: string
+              observedGeneration:
+                description: ObservedGeneration is the spec generation this status
+                  was computed from.
+                format: int64
+                type: integer
+              phase:
+                description: |-
+                  Phase is derived from the Job and pod, never set directly by anything
+                  outside the controller. It is monotonic within an attempt: a late
+                  observation cannot move it backwards, and the first terminal phase wins.
+                enum:
+                - Pending
+                - Starting
+                - Running
+                - Succeeded
+                - Failed
+                - TimedOut
+                - Cancelled
+                type: string
+              podName:
+                maxLength: 253
+                type: string
+              prURL:
+                maxLength: 512
+                type: string
+              reason:
+                description: |-
+                  Reason is a short CamelCase cause in the Kubernetes idiom —
+                  ImagePullBackOff, OOMKilled, DeadlineExceeded, Unschedulable.
+                maxLength: 128
+                type: string
+              reported:
+                description: |-
+                  Reported is the delivery bookkeeping the controller needs to survive a
+                  restart: what it has already got the backend to accept. Without it, a
+                  controller that restarts after a terminal phase either re-sends
+                  everything forever or drops the TTL guard that keeps the CR alive until
+                  the backend has heard the outcome.
+                properties:
+                  attempt:
+                    format: int32
+                    minimum: 1
+                    type: integer
+                  completionDelivered:
+                    description: |-
+                      CompletionDelivered means /ingest/completion returned accepted or
+                      duplicate. Only then may the TTL reaper remove this AgentRun.
+                    type: boolean
+                  lastDeliveredAt:
+                    format: date-time
+                    type: string
+                  phase:
+                    description: Phase is the last phase the backend accepted for
+                      Attempt.
+                    enum:
+                    - Pending
+                    - Starting
+                    - Running
+                    - Succeeded
+                    - Failed
+                    - TimedOut
+                    - Cancelled
+                    type: string
+                type: object
+              result:
+                description: |-
+                  Result points at what the pod uploaded. Pointers only — the result text
+                  belongs in object storage, and a 64 KiB summary in etcd would be read on
+                  every reconcile of every run.
+                properties:
+                  completion:
+                    description: |-
+                      Completion is the full report, also written to storage by the pod. It is
+                      the reason a controller crash between the callback and the ingest costs
+                      nothing: the backend reads the same report from the bucket.
+                    properties:
+                      bucket:
+                        maxLength: 63
+                        minLength: 1
+                        type: string
+                      contentType:
+                        maxLength: 128
+                        type: string
+                      key:
+                        maxLength: 1024
+                        minLength: 1
+                        type: string
+                      sha256:
+                        maxLength: 64
+                        pattern: ^[a-f0-9]{64}$
+                        type: string
+                      sizeBytes:
+                        format: int64
+                        minimum: 0
+                        type: integer
+                    required:
+                    - bucket
+                    - key
+                    type: object
+                  log:
+                    description: |-
+                      ObjectRef points at an object in shared storage. Content never travels
+                      through these contracts; only the pointer does.
+                    properties:
+                      bucket:
+                        maxLength: 63
+                        minLength: 1
+                        type: string
+                      contentType:
+                        maxLength: 128
+                        type: string
+                      key:
+                        maxLength: 1024
+                        minLength: 1
+                        type: string
+                      sha256:
+                        maxLength: 64
+                        pattern: ^[a-f0-9]{64}$
+                        type: string
+                      sizeBytes:
+                        format: int64
+                        minimum: 0
+                        type: integer
+                    required:
+                    - bucket
+                    - key
+                    type: object
+                  output:
+                    description: |-
+                      ObjectRef points at an object in shared storage. Content never travels
+                      through these contracts; only the pointer does.
+                    properties:
+                      bucket:
+                        maxLength: 63
+                        minLength: 1
+                        type: string
+                      contentType:
+                        maxLength: 128
+                        type: string
+                      key:
+                        maxLength: 1024
+                        minLength: 1
+                        type: string
+                      sha256:
+                        maxLength: 64
+                        pattern: ^[a-f0-9]{64}$
+                        type: string
+                      sizeBytes:
+                        format: int64
+                        minimum: 0
+                        type: integer
+                    required:
+                    - bucket
+                    - key
+                    type: object
+                  result:
+                    description: |-
+                      ObjectRef points at an object in shared storage. Content never travels
+                      through these contracts; only the pointer does.
+                    properties:
+                      bucket:
+                        maxLength: 63
+                        minLength: 1
+                        type: string
+                      contentType:
+                        maxLength: 128
+                        type: string
+                      key:
+                        maxLength: 1024
+                        minLength: 1
+                        type: string
+                      sha256:
+                        maxLength: 64
+                        pattern: ^[a-f0-9]{64}$
+                        type: string
+                      sizeBytes:
+                        format: int64
+                        minimum: 0
+                        type: integer
+                    required:
+                    - bucket
+                    - key
+                    type: object
+                  state:
+                    description: |-
+                      ObjectRef points at an object in shared storage. Content never travels
+                      through these contracts; only the pointer does.
+                    properties:
+                      bucket:
+                        maxLength: 63
+                        minLength: 1
+                        type: string
+                      contentType:
+                        maxLength: 128
+                        type: string
+                      key:
+                        maxLength: 1024
+                        minLength: 1
+                        type: string
+                      sha256:
+                        maxLength: 64
+                        pattern: ^[a-f0-9]{64}$
+                        type: string
+                      sizeBytes:
+                        format: int64
+                        minimum: 0
+                        type: integer
+                    required:
+                    - bucket
+                    - key
+                    type: object
+                type: object
+              retry:
+                description: |-
+                  Retry records the controller's local retry budget. It is here rather than
+                  in memory so that a controller restart does not hand a failing run a
+                  fresh set of attempts.
+                properties:
+                  infraRetries:
+                    format: int32
+                    minimum: 0
+                    type: integer
+                  nextAttemptAt:
+                    description: |-
+                      NextAttemptAt is when the next Job may be created. Backoff is exponential
+                      with jitter; an ImagePullBackOff on a bad node otherwise turns into a
+                      tight create/fail loop against the API server.
+                    format: date-time
+                    type: string
+                type: object
+              startedAt:
+                format: date-time
+                type: string
+              usage:
+                description: |-
+                  Usage is what the pod declared it spent. Self-reported and therefore not
+                  authoritative; it is here for `kubectl` and for the backend's
+                  cross-check against the observed Job duration.
+                properties:
+                  cacheReadTokens:
+                    format: int64
+                    type: integer
+                  cacheWriteTokens:
+                    format: int64
+                    type: integer
+                  durationMs:
+                    format: int64
+                    type: integer
+                  inputTokens:
+                    format: int64
+                    type: integer
+                  numTurns:
+                    format: int32
+                    type: integer
+                  outputTokens:
+                    format: int64
+                    type: integer
+                  sessionID:
+                    maxLength: 256
+                    type: string
+                  totalCostUSD:
+                    description: |-
+                      MoneyUSD is a decimal string. Money is never a float64 here, and never a
+                      Kubernetes Quantity either: Quantity would round 0.4231 into a form nobody
+                      expects to see in a bill.
+                    maxLength: 32
+                    pattern: ^-?[0-9]{1,12}(\.[0-9]{1,6})?$
+                    type: string
+                type: object
+            type: object
+        required:
+        - spec
+        type: object
+    served: true
+    storage: true
+    subresources:
+      status: {}
+  {{- if .Values.crd.conversionWebhook.enabled }}
+  conversion:
+    strategy: Webhook
+    webhook:
+      conversionReviewVersions: ["v1"]
+      clientConfig:
+        service:
+          namespace: {{ .Release.Namespace }}
+          name: {{ include "haliphron-runtime.fullname" . }}-webhook
+          path: /convert
+          port: 443
+  {{- end }}
+{{- end }}

@@ -1,0 +1,264 @@
+# The Haliphron runtime, installed into every target cluster.
+#
+# Three values have no default and the chart refuses to render without them:
+# the cluster's name, the control plane's Cluster API URL, and a bootstrap
+# token. Everything else has an answer that is right for most clusters.
+#
+#   helm install haliphron-runtime . \
+#     --namespace haliphron-system --create-namespace \
+#     --set cluster.name=eu-prod \
+#     --set backend.url=https://clusters.haliphron.example.com \
+#     --set backend.bootstrapTokenExistingSecret=haliphron-bootstrap
+
+# -----------------------------------------------------------------------------
+# Image
+# -----------------------------------------------------------------------------
+image:
+  registry: ghcr.io
+  repository: automagicops/haliphron-controller
+  tag: ""       # empty means .Chart.AppVersion
+  digest: ""    # wins over tag; the only one of the two that is reproducible
+  pullPolicy: IfNotPresent
+
+imagePullSecrets: []
+
+nameOverride: ""
+fullnameOverride: ""
+
+# -----------------------------------------------------------------------------
+# Who this cluster is
+# -----------------------------------------------------------------------------
+cluster:
+  # Required. The name the control plane knows this cluster by. It is part of
+  # the identity the controller registers once and keeps in a Secret, so
+  # renaming it after registration registers a second cluster.
+  name: ""
+
+  # Free-form labels the control plane assigns work by: region, tier, whatever
+  # the scheduler is told to match on.
+  labels: {}
+  #  region: eu-central-1
+  #  tier: production
+
+  # How many runs may be in flight here at once. It is a promise to the
+  # control plane, not a limit the cluster enforces — that is what the agents'
+  # ResourceQuota is for.
+  capacitySlots: 8
+
+  # The runtimes this cluster will accept work for.
+  runtimes:
+    - claude-code
+    - codex
+
+# -----------------------------------------------------------------------------
+# The control plane
+# -----------------------------------------------------------------------------
+backend:
+  # Required. The Cluster API as seen from inside this cluster. Nothing
+  # connects the other way: the control plane has no route in here, which is
+  # the property the whole design exists to preserve.
+  url: ""
+
+  # A one-time token that registers this cluster and is then exchanged for a
+  # key pair the controller keeps. Prefer the Secret: the literal ends up in
+  # the release, and this is the one credential that can register a cluster.
+  bootstrapToken: ""
+  bootstrapTokenExistingSecret: ""
+  bootstrapTokenExistingSecretKey: token
+
+# Where the controller keeps the identity it registered with. The private key
+# never leaves this cluster, and a lost Secret means reinstalling with a fresh
+# bootstrap token.
+identity:
+  secretName: haliphron-cluster-identity
+
+# -----------------------------------------------------------------------------
+# The agents' namespace
+# -----------------------------------------------------------------------------
+#
+# Separate from the controller's, and not negotiable in practice: the agent pod
+# runs commands a model wrote, in a repository whose contents may contain
+# prompt injection. It is untrusted code. The quota, the LimitRange and the
+# default-deny policy below are what keep it from being the cluster's problem,
+# and none of them can be scoped to a namespace that also holds the controller.
+agents:
+  namespace: haliphron-agents
+  createNamespace: true
+
+  serviceAccount:
+    create: true
+    name: haliphron-agent
+    # Not one RBAC rule is bound to it, and no token is mounted. An agent pod
+    # that reaches the API server has already gone wrong.
+    annotations: {}
+
+  # The only thing that stops a burst of runs from taking the cluster down.
+  resourceQuota:
+    enabled: true
+    hard:
+      pods: "50"
+      requests.cpu: "20"
+      requests.memory: 64Gi
+      limits.cpu: "40"
+      limits.memory: 128Gi
+
+  # A run that asks for nothing still gets something, and a run that asks for
+  # everything does not get it.
+  limitRange:
+    enabled: true
+    default:
+      cpu: "1"
+      memory: 2Gi
+    defaultRequest:
+      cpu: 250m
+      memory: 512Mi
+    max:
+      cpu: "8"
+      memory: 32Gi
+
+  # Ingress is denied entirely; egress is allowed to DNS, to the controller's
+  # callback, and to the CIDRs listed here. There is no filtering by domain —
+  # NetworkPolicy works on addresses, and FQDN policies are not available on
+  # every CNI. An agent that can reach a permitted CIDR can reach any host in
+  # it, and that is a deliberate, documented limitation.
+  networkPolicy:
+    enabled: true
+    # Defaults to "the internet, minus RFC1918". Narrow it if you can: this is
+    # what lets the pod reach the LLM provider, git hosting and the MCP servers.
+    allowedCIDRs:
+      - 0.0.0.0/0
+    exceptCIDRs:
+      - 10.0.0.0/8
+      - 172.16.0.0/12
+      - 192.168.0.0/16
+      - 169.254.0.0/16
+    ports:
+      - port: 443
+        protocol: TCP
+      - port: 80
+        protocol: TCP
+
+# -----------------------------------------------------------------------------
+# The controller
+# -----------------------------------------------------------------------------
+controller:
+  # One is enough, and more is safe: leader election means the extra replicas
+  # stand by rather than duplicate the work. Raise it where a node drain must
+  # not pause reconciliation.
+  replicaCount: 1
+
+  # Where the agent pods post their completion report. Cluster-local by
+  # nature, which is why no part of it can come from the control plane. Empty
+  # derives it from the Service this chart installs.
+  callbackURL: ""
+
+  # Ports. The callback is the only one an agent pod may reach.
+  callbackPort: 8083
+  healthPort: 8081
+  metricsPort: 9090
+
+  # A link back to the run in the UI, handed to the pod so a PR description can
+  # point at it. One %s, which the controller replaces with the run id:
+  #   runURLTemplate: https://haliphron.example.com/runs/%s
+  runURLTemplate: ""
+
+  # How long a pod is given to shut down after its deadline, and how much
+  # slack the Job's activeDeadlineSeconds gets over the run's own timeout, so
+  # that the controller — not the Job controller — is the one that ends a run.
+  graceSeconds: 60
+  deadlineSlackSeconds: 600
+
+  # How long a pod may spend unschedulable or pulling before the attempt is
+  # called an infrastructure failure and retried.
+  startupDeadlineSeconds: 600
+
+  # A one-pod preflight before the real run, which catches an unpullable image
+  # or a missing secret while it is still cheap.
+  preflightJob: true
+
+  logLevel: info
+
+  terminationGracePeriodSeconds: 60
+
+  extraEnv: []
+  extraEnvFrom: []
+
+  resources:
+    requests:
+      cpu: 50m
+      memory: 128Mi
+    limits:
+      memory: 512Mi
+
+  podAnnotations: {}
+  podLabels: {}
+  nodeSelector: {}
+  tolerations: []
+  affinity: {}
+  priorityClassName: ""
+
+  podSecurityContext:
+    runAsNonRoot: true
+    runAsUser: 65532
+    runAsGroup: 65532
+    seccompProfile:
+      type: RuntimeDefault
+
+  securityContext:
+    allowPrivilegeEscalation: false
+    privileged: false
+    readOnlyRootFilesystem: true
+    capabilities:
+      drop: ["ALL"]
+
+  # Who may reach the callback endpoint. Off by default; when on, only the
+  # agents' namespace is allowed in and only to the callback port.
+  networkPolicy:
+    enabled: false
+
+serviceAccount:
+  create: true
+  name: ""
+  annotations: {}
+
+# -----------------------------------------------------------------------------
+# RBAC
+# -----------------------------------------------------------------------------
+rbac:
+  create: true
+  # namespaced | cluster
+  #
+  # Every resource the controller touches is namespaced and its cache watches
+  # exactly two namespaces, so the default binds the ClusterRole with two
+  # RoleBindings instead of granting it the cluster. Use "cluster" only if you
+  # have a reason the RoleBindings cannot express.
+  scope: namespaced
+
+# -----------------------------------------------------------------------------
+# The CRD
+# -----------------------------------------------------------------------------
+crd:
+  # Installed as a template with helm.sh/resource-policy: keep, so it upgrades
+  # with the release and an uninstall does not take every AgentRun with it.
+  install: true
+
+  # Off, and deliberately: the controller does not serve /convert yet. Turning
+  # this on points the API server at a webhook that is not there, and every
+  # read of an AgentRun then fails. The wiring ships early because adding the
+  # Service, the certificate and the CA injection to a running installation is
+  # the expensive part — not the handler. Turn it on with v1, not before.
+  conversionWebhook:
+    enabled: false
+    # Requires cert-manager.
+    issuerRef: {}
+
+# -----------------------------------------------------------------------------
+# Observability
+# -----------------------------------------------------------------------------
+metrics:
+  serviceMonitor:
+    enabled: false
+    namespace: ""
+    interval: 30s
+    scrapeTimeout: 10s
+    labels: {}

@@ -1,0 +1,16 @@
+# The controller's build context: controller/ and api/, and nothing else.
+#
+# BuildKit uses this file in preference to the repository's .dockerignore
+# because it sits beside the Dockerfile it belongs to. The point is not build
+# speed: it is that the component holding a customer's git tokens cannot
+# accidentally acquire the fakes, the test harness or the agent image, and that
+# this stops depending on nobody writing the wrong COPY.
+*
+!api/
+!controller/
+
+# Not even from the two directories that are in.
+**/.git
+**/node_modules
+**/.DS_Store
+controller/Dockerfile*

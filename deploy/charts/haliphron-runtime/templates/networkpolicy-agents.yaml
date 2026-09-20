@@ -1,0 +1,66 @@
+{{- $ns := include "haliphron-runtime.agentNamespace" . -}}
+{{- if .Values.agents.networkPolicy.enabled }}
+{{/*
+The agent pod runs commands a model wrote, against a repository whose contents
+may contain prompt injection. This is the policy that treats it that way.
+
+Ingress is denied entirely — nothing in the cluster has a reason to call into
+an agent pod. Egress is allowed to DNS, to the controller's callback, and to
+the CIDRs named in values, which in practice means the internet minus the
+cluster's own private ranges. In particular it does not include
+kubernetes.default: a pod that reaches the API server has already gone wrong,
+and it carries no token to use there anyway.
+
+There is no filtering by hostname, and there cannot be: NetworkPolicy matches
+addresses, and FQDN policies are not available on every CNI. An agent that
+reaches a permitted CIDR can reach any host inside it. That is a known,
+accepted limitation rather than an oversight.
+*/}}
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: {{ printf "%s-agents" (include "haliphron-runtime.fullname" .) }}
+  namespace: {{ $ns }}
+  labels:
+    {{- include "haliphron-runtime.labels" . | nindent 4 }}
+    app.kubernetes.io/component: agents
+spec:
+  # Every pod in the namespace, not only the ones this release knows about.
+  podSelector: {}
+  policyTypes: [Ingress, Egress]
+  ingress: []
+  egress:
+    - to:
+        - namespaceSelector: {}
+          podSelector:
+            matchLabels:
+              k8s-app: kube-dns
+      ports:
+        - port: 53
+          protocol: UDP
+        - port: 53
+          protocol: TCP
+    # The completion report. Without this the run finishes, the result is
+    # already durable in object storage, and the controller learns about it
+    # only from the Job — which is the CompletedWithoutResult path.
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: {{ .Release.Namespace }}
+          podSelector:
+            matchLabels: {{- include "haliphron-runtime.selectorLabels" . | nindent 14 }}
+      ports:
+        - port: {{ .Values.controller.callbackPort }}
+          protocol: TCP
+    {{- with .Values.agents.networkPolicy.allowedCIDRs }}
+    - to:
+        {{- range . }}
+        - ipBlock:
+            cidr: {{ . }}
+            {{- with $.Values.agents.networkPolicy.exceptCIDRs }}
+            except: {{- toYaml . | nindent 14 }}
+            {{- end }}
+        {{- end }}
+      ports: {{- toYaml $.Values.agents.networkPolicy.ports | nindent 8 }}
+    {{- end }}
+{{- end }}

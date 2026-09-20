@@ -1,0 +1,46 @@
+{{/*
+One Ingress per entrypoint. They are separate objects because they are separate
+decisions: who may reach the UI, who may reach MCP, and who may reach the
+Cluster API are three different answers in most installations, and only the
+last one needs a read timeout longer than a lease poll.
+
+An entrypoint whose listener this mode does not run is skipped rather than
+pointed at a port that is not there.
+*/}}
+{{- $root := . -}}
+{{- $full := include "haliphron.fullname" . -}}
+{{- range $entry := list
+      (dict "name" "api" "helper" "haliphron.servesAPI")
+      (dict "name" "mcp" "helper" "haliphron.servesMCP")
+      (dict "name" "cluster" "helper" "haliphron.servesCluster") }}
+{{- $cfg := index $root.Values.ingress $entry.name }}
+{{- if and $cfg.enabled (include $entry.helper $root) }}
+---
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: {{ printf "%s-%s" $full $entry.name }}
+  labels: {{- include "haliphron.labels" $root | nindent 4 }}
+  {{- with $cfg.annotations }}
+  annotations: {{- toYaml . | nindent 4 }}
+  {{- end }}
+spec:
+  {{- with $cfg.className }}
+  ingressClassName: {{ . }}
+  {{- end }}
+  {{- with $cfg.tls }}
+  tls: {{- toYaml . | nindent 4 }}
+  {{- end }}
+  rules:
+    - host: {{ $cfg.host | quote }}
+      http:
+        paths:
+          - path: {{ $cfg.path }}
+            pathType: {{ $cfg.pathType }}
+            backend:
+              service:
+                name: {{ $full }}
+                port:
+                  name: {{ $entry.name }}
+{{- end }}
+{{- end }}

@@ -1,0 +1,437 @@
+# The Haliphron control plane.
+#
+# Four values have no default and the chart refuses to render without them:
+# the database DSN, the two object-storage credentials and the agent image.
+# Everything else has an answer that is right for most installations.
+
+# -----------------------------------------------------------------------------
+# Image
+# -----------------------------------------------------------------------------
+image:
+  registry: ghcr.io
+  repository: automagicops/haliphron-backend
+  # Empty means .Chart.AppVersion, so that a chart upgrade moves the image with
+  # it. Pin a digest here for an installation that must not drift:
+  #   tag: "sha256:..."  is not a tag; use image.digest instead.
+  tag: ""
+  digest: ""
+  pullPolicy: IfNotPresent
+
+imagePullSecrets: []
+
+nameOverride: ""
+fullnameOverride: ""
+
+# -----------------------------------------------------------------------------
+# The backend process
+# -----------------------------------------------------------------------------
+backend:
+  # all | api | mcp | cluster. "all" runs every listener in one Deployment.
+  #
+  # The split exists for the installation where MCP must be reachable from
+  # outside while REST stays inside the perimeter. It is done by installing
+  # this chart twice against the same database — once with mode=api and once
+  # with mode=mcp — not by a second Deployment in one release, because the two
+  # halves then scale, roll and fail independently, which is the entire point.
+  mode: all
+
+  replicaCount: 2
+
+  # Every replica applies the schema at startup under an advisory lock, so a
+  # rollout waits for its migration instead of starting against half of one.
+  # Set false only where migrations are applied by hand, and then apply them
+  # before the rollout rather than after.
+  migrate: true
+
+  logLevel: info   # debug | info | warn | error
+  logFormat: json  # json | text
+
+  # How often the sweeper expires overdue leases and acks, and how often the
+  # reaper deletes runs past their TTL.
+  sweepInterval: 5s
+  reapInterval: 1h
+
+  terminationGracePeriodSeconds: 60
+
+  extraEnv: []
+  #  - name: HTTPS_PROXY
+  #    value: http://proxy.internal:3128
+  extraEnvFrom: []
+  #  - secretRef:
+  #      name: haliphron-extra
+
+  extraVolumes: []
+  extraVolumeMounts: []
+
+# -----------------------------------------------------------------------------
+# PostgreSQL — the system of record
+# -----------------------------------------------------------------------------
+database:
+  # A DSN in values ends up in the release Secret, which is readable by anyone
+  # who can read Secrets in this namespace and is stored in the release's own
+  # Secret besides. existingSecret is the right answer anywhere it exists.
+  dsn: ""
+  existingSecret: ""
+  existingSecretKey: dsn
+
+  # The pool is sized for real work, not for the number of clusters: a long
+  # poll sleeps on a notifier rather than holding a connection.
+  maxConns: 16
+  idleConns: 4
+  connLifetime: 1h
+
+# -----------------------------------------------------------------------------
+# Object storage — results, logs, artifacts
+# -----------------------------------------------------------------------------
+objectStorage:
+  bucket: haliphron
+  region: us-east-1
+  # Empty means AWS S3. Set it for MinIO or any other S3-compatible endpoint.
+  endpoint: ""
+  # MinIO and most on-prem gateways need path-style addressing; AWS does not.
+  pathStyle: false
+
+  accessKey: ""
+  secretKey: ""
+  sessionToken: ""
+  existingSecret: ""
+  existingSecretAccessKeyKey: accessKey
+  existingSecretSecretKeyKey: secretKey
+
+# -----------------------------------------------------------------------------
+# The key encryption key for managed secrets
+# -----------------------------------------------------------------------------
+#
+# It wraps the per-secret data keys and never enters the database: that is the
+# whole property, and it is why a database dump is not a credential leak. With
+# no key the backend starts and says so, referenced secrets keep working, and
+# managed secrets are unavailable.
+#
+# The key is mounted as a file rather than passed as a variable, because a
+# variable is visible in `kubectl describe pod` and in every crash dump.
+encryption:
+  keyId: default
+  # 32 bytes, base64 or hex. Anything else of 16 characters or more is treated
+  # as a passphrase and hashed into a key.
+  key: ""
+  existingSecret: ""
+  existingSecretKey: kek
+
+# -----------------------------------------------------------------------------
+# What the runs default to
+# -----------------------------------------------------------------------------
+agent:
+  # Required. There is no default: the image decides what every run executes,
+  # and a tag chosen by a chart would decide it silently. Pin by digest.
+  #   image: ghcr.io/automagicops/haliphron-agent@sha256:...
+  image: ""
+  imagePullPolicy: IfNotPresent
+
+  defaultModel: anthropic/claude-opus-5
+  defaultAgentType: claude-code   # claude-code | codex
+
+  timeoutSeconds: 3600    # how long a single run may take
+  ttlSeconds: 86400       # how long a finished run is kept
+  maxInfraRetries: 3
+  maxRunDepth: 4
+  maxPromptBytes: 0       # 0 keeps the backend's own limit
+  logChunkIntervalSeconds: 5
+
+  # Where the agent pods send traces. Empty disables tracing.
+  otlpEndpoint: ""
+
+  # The policy ceiling. A deny here cannot be lifted by a role, which is what
+  # makes it a ceiling rather than a default.
+  toolPolicy:
+    allow: []
+    deny: []
+
+# The names of the managed secrets the backend looks for in its own store —
+# not Kubernetes Secrets.
+secretNames:
+  llmApiKey: llm-api-key
+  gitToken: git-token
+
+# -----------------------------------------------------------------------------
+# The protocol the clusters are handed at registration
+# -----------------------------------------------------------------------------
+#
+# These are handed out rather than configured per cluster, because a value that
+# drifts between installations means no two clusters agree on what "stale"
+# means. Leave them alone unless you are changing the contract.
+clusterProtocol:
+  timings:
+    heartbeatIntervalSeconds: 0   # 0 keeps the contract's default
+    staleAfterSeconds: 0
+    leaseTTLSeconds: 0
+    ackTimeoutSeconds: 0
+    # The ceiling is 30. Every proxy in front of the Cluster API must have a
+    # read timeout greater than this, or an expired long poll reaches the
+    # controller as a dropped connection and reads as network instability.
+    maxWaitSeconds: 0
+    maxLeasesPerPoll: 0
+    artifactTTLMultiplier: 0
+  # The controller versions this control plane will register. Keep at least
+  # N-1 minor, so that rolling out the control plane does not lock out the
+  # controllers of the previous release.
+  minControllerVersion: "0.1.0"
+  maxControllerVersion: "99.0.0"
+
+# The externally reachable MCP URL, handed to agents that call back in. Empty
+# means the backend does not advertise one.
+mcpEndpoint: ""
+
+# How long a per-run token outlives the run it belongs to, and how long an
+# idempotency key is remembered.
+limits:
+  runTokenTTLMultiplier: 2
+  idempotencyTTL: 24h
+
+# -----------------------------------------------------------------------------
+# Service and ingress
+# -----------------------------------------------------------------------------
+service:
+  type: ClusterIP
+  annotations: {}
+  ports:
+    api: 8080
+    mcp: 8081
+    cluster: 8082
+    health: 9090
+
+# One Ingress per entrypoint rather than one with three rules: their audiences,
+# their annotations and their TLS differ, and the Cluster API's read timeout is
+# not a setting the UI's ingress should inherit.
+ingress:
+  api:
+    enabled: false
+    className: nginx
+    annotations: {}
+    host: haliphron.example.com
+    path: /
+    pathType: Prefix
+    tls: []
+    #  - secretName: haliphron-api-tls
+    #    hosts: [haliphron.example.com]
+  mcp:
+    enabled: false
+    className: nginx
+    annotations: {}
+    host: mcp.haliphron.example.com
+    path: /
+    pathType: Prefix
+    tls: []
+  cluster:
+    enabled: false
+    className: nginx
+    # The long poll hangs for up to clusterProtocol.timings.maxWaitSeconds.
+    # A proxy read timeout below it turns every idle poll into a disconnect,
+    # so the chart sets 120s here and fails the render if the two disagree.
+    annotations:
+      nginx.ingress.kubernetes.io/proxy-read-timeout: "120"
+      nginx.ingress.kubernetes.io/proxy-send-timeout: "120"
+    host: clusters.haliphron.example.com
+    path: /
+    pathType: Prefix
+    tls: []
+
+# The Gateway API alternative to the Ingresses above. Same three entrypoints,
+# same reason for keeping them apart, and mutually exclusive with `ingress` per
+# entrypoint rather than chart-wide — migrating one route at a time is the
+# normal way to move off an Ingress controller.
+#
+# An HTTPRoute is not a Gateway. This chart writes routes and attaches them to
+# a Gateway that already exists, because a Gateway is cluster infrastructure
+# with an address, a certificate and a listener policy, and it outlives every
+# application that attaches to it.
+httpRoute:
+  # gateway.networking.k8s.io/v1 is the GA version. Set v1beta1 only for a
+  # cluster still on Gateway API 0.x.
+  apiVersion: gateway.networking.k8s.io/v1
+
+  api:
+    enabled: false
+    annotations: {}
+    labels: {}
+    # Required when enabled. A namespace other than the release's needs a
+    # ReferenceGrant on the Gateway's side, or the route is rejected with
+    # NotAllowedByListeners.
+    parentRefs: []
+    #  - name: external
+    #    namespace: gateway-system
+    #    sectionName: https
+    hostnames:
+      - haliphron.example.com
+    matches:
+      - path:
+          type: PathPrefix
+          value: /
+    # Gateway API request timeouts. Empty leaves it to the implementation.
+    timeouts: {}
+    #  request: 30s
+    filters: []
+
+  mcp:
+    enabled: false
+    annotations: {}
+    labels: {}
+    parentRefs: []
+    hostnames:
+      - mcp.haliphron.example.com
+    matches:
+      - path:
+          type: PathPrefix
+          value: /
+    timeouts: {}
+    filters: []
+
+  cluster:
+    enabled: false
+    annotations: {}
+    labels: {}
+    parentRefs: []
+    hostnames:
+      - clusters.haliphron.example.com
+    matches:
+      - path:
+          type: PathPrefix
+          value: /
+    # The same hazard as the Ingress's proxy-read-timeout, in the field
+    # Gateway API gives for it. A lease poll hangs for up to
+    # clusterProtocol.timings.maxWaitSeconds, and the chart refuses to render
+    # if this is shorter. "0s" means no timeout, which is also accepted.
+    #
+    # Several implementations still default to 15s or 30s and ignore nothing,
+    # so leaving this empty is how a long poll quietly becomes a disconnect.
+    timeouts:
+      request: 120s
+      backendRequest: 120s
+    filters: []
+
+# -----------------------------------------------------------------------------
+# Workload shape
+# -----------------------------------------------------------------------------
+resources:
+  requests:
+    cpu: 100m
+    memory: 256Mi
+  limits:
+    # No CPU limit on purpose: throttling a request handler to hit a quota
+    # costs latency and buys nothing that a request does not already buy.
+    memory: 1Gi
+
+autoscaling:
+  enabled: false
+  minReplicas: 2
+  maxReplicas: 10
+  targetCPUUtilizationPercentage: 70
+  targetMemoryUtilizationPercentage: ""
+
+podDisruptionBudget:
+  enabled: true
+  minAvailable: 1
+  maxUnavailable: ""
+
+serviceAccount:
+  create: true
+  name: ""
+  annotations: {}
+  # The backend talks to Postgres and S3 and never to the API server.
+  automountServiceAccountToken: false
+
+podSecurityContext:
+  runAsNonRoot: true
+  runAsUser: 65532
+  runAsGroup: 65532
+  fsGroup: 65532
+  seccompProfile:
+    type: RuntimeDefault
+
+securityContext:
+  allowPrivilegeEscalation: false
+  privileged: false
+  readOnlyRootFilesystem: true
+  capabilities:
+    drop: ["ALL"]
+
+podAnnotations: {}
+podLabels: {}
+
+nodeSelector: {}
+tolerations: []
+affinity: {}
+
+# Spread the replicas across nodes. ScheduleAnyway rather than DoNotSchedule:
+# a single-node cluster should still be able to run two replicas.
+topologySpreadConstraints:
+  - maxSkew: 1
+    topologyKey: kubernetes.io/hostname
+    whenUnsatisfiable: ScheduleAnyway
+    labelSelector:
+      matchLabels: {}   # filled in by the chart
+
+priorityClassName: ""
+
+# -----------------------------------------------------------------------------
+# Observability
+# -----------------------------------------------------------------------------
+metrics:
+  serviceMonitor:
+    # Off, and it has to be: the backend serves /healthz, /readyz and /version
+    # on the health port and does not serve /metrics yet. Enabling this points
+    # Prometheus at a 404. The template ships so that the day the endpoint
+    # lands, turning it on is a value and not a chart change.
+    enabled: false
+    # Empty installs it beside the release.
+    namespace: ""
+    interval: 30s
+    scrapeTimeout: 10s
+    labels: {}
+    relabelings: []
+
+# -----------------------------------------------------------------------------
+# Network policy
+# -----------------------------------------------------------------------------
+#
+# Off by default because a policy that is wrong is worse than none: it takes
+# the control plane off the network in a way that looks like a database
+# outage. Turn it on once the egress list below matches your environment.
+networkPolicy:
+  enabled: false
+  # Who may reach the four listeners. Empty means anyone in the cluster.
+  ingressFrom: []
+  #  - namespaceSelector:
+  #      matchLabels:
+  #        kubernetes.io/metadata.name: ingress-nginx
+  # Where the backend may go. DNS is always allowed.
+  egressTo: []
+  #  - to:
+  #      - ipBlock:
+  #          cidr: 10.0.0.0/8
+  #    ports:
+  #      - port: 5432
+  #        protocol: TCP
+
+# -----------------------------------------------------------------------------
+# Optional dependencies (evaluation only — see Chart.yaml)
+# -----------------------------------------------------------------------------
+postgresql:
+  enabled: false
+  auth:
+    username: haliphron
+    password: ""
+    database: haliphron
+  primary:
+    persistence:
+      enabled: true
+      size: 20Gi
+
+minio:
+  enabled: false
+  auth:
+    rootUser: haliphron
+    rootPassword: ""
+  defaultBuckets: haliphron
+  persistence:
+    enabled: true
+    size: 50Gi

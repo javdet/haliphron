@@ -1,0 +1,42 @@
+apiVersion: v2
+name: haliphron
+description: |
+  The Haliphron control plane: the backend (REST, MCP, Cluster API and the
+  expiry scanners), its PostgreSQL system of record and its object storage.
+  Installed once. The target clusters get haliphron-runtime instead.
+type: application
+
+# The chart's own version. It moves when the templates move.
+version: 0.1.0
+# The backend it is written against. `helm upgrade` does not imply an image
+# bump: image.tag overrides this.
+appVersion: "0.1.0"
+
+keywords:
+  - agents
+  - orchestration
+  - control-plane
+home: https://github.com/automagicops/haliphron
+sources:
+  - https://github.com/automagicops/haliphron
+maintainers:
+  - name: automagicops
+
+# Both dependencies are off by default, and deliberately so. The architecture
+# calls them "subchart or BYO", and BYO is the production answer: a database
+# that holds the system of record wants the backup, failover and upgrade policy
+# the operator already has, and neither subchart pins an image tag that is safe
+# to run unattended. Turn them on for an evaluation, not for an installation
+# that has to survive a year.
+#
+# Either way `helm dependency build` has to run before install, because Helm
+# resolves declared dependencies whether or not their condition is met.
+dependencies:
+  - name: postgresql
+    version: "18.11.5"
+    repository: https://charts.bitnami.com/bitnami
+    condition: postgresql.enabled
+  - name: minio
+    version: "17.0.21"
+    repository: https://charts.bitnami.com/bitnami
+    condition: minio.enabled

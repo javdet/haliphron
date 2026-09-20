@@ -1,0 +1,38 @@
+{{- if .Values.networkPolicy.enabled }}
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: {{ include "haliphron.fullname" . }}
+  labels: {{- include "haliphron.labels" . | nindent 4 }}
+spec:
+  podSelector:
+    matchLabels: {{- include "haliphron.selectorLabels" . | nindent 6 }}
+  policyTypes: [Ingress, Egress]
+  ingress:
+    - {{ if .Values.networkPolicy.ingressFrom }}from: {{- toYaml .Values.networkPolicy.ingressFrom | nindent 8 }}{{ end }}
+      ports:
+        - port: {{ .Values.service.ports.api }}
+          protocol: TCP
+        - port: {{ .Values.service.ports.mcp }}
+          protocol: TCP
+        - port: {{ .Values.service.ports.cluster }}
+          protocol: TCP
+        - port: {{ .Values.service.ports.health }}
+          protocol: TCP
+  egress:
+    # DNS first and unconditionally. A policy that forgets it fails in a way
+    # that looks like every dependency being down at once.
+    - to:
+        - namespaceSelector: {}
+          podSelector:
+            matchLabels:
+              k8s-app: kube-dns
+      ports:
+        - port: 53
+          protocol: UDP
+        - port: 53
+          protocol: TCP
+    {{- with .Values.networkPolicy.egressTo }}
+    {{- toYaml . | nindent 4 }}
+    {{- end }}
+{{- end }}

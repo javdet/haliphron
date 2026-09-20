@@ -1,0 +1,22 @@
+apiVersion: v2
+name: haliphron-runtime
+description: |
+  The Haliphron controller and everything an agent run needs inside a target
+  cluster: the AgentRun CRD, the agents' namespace with its quota and its
+  default-deny network policy, and the RBAC for both. Installed once per
+  cluster. It holds no database, no UI and no engine — only a controller that
+  fetches work from the control plane and reports back.
+type: application
+
+version: 0.1.0
+appVersion: "0.1.0"
+
+keywords:
+  - agents
+  - kubernetes
+  - controller
+home: https://github.com/automagicops/haliphron
+sources:
+  - https://github.com/automagicops/haliphron
+maintainers:
+  - name: automagicops

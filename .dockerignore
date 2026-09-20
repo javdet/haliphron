@@ -1,0 +1,34 @@
+# What no image build needs to see. A smaller context is a faster build, but
+# the reason this file exists is correctness: go.work below is excluded so that
+# a build inside the context cannot silently resolve a module through the
+# workspace instead of through the module's own go.sum.
+
+.git
+.gitignore
+.dockerignore
+.claude
+.cursor
+.mcp.json
+
+# The workspace. Every Dockerfile here builds in module mode; see backend/Dockerfile.
+go.work
+go.work.sum
+
+# Build output, test modules, generator scripts, docs, charts.
+bin/
+test/
+fake/
+hack/
+docs/
+deploy/
+config/
+*.md
+
+# Local state that must never reach a layer.
+.env
+data/
+pgdata/
+logs/
+dump/
+**/node_modules
+**/.DS_Store

@@ -1,0 +1,95 @@
+{{- if .Values.rbac.create }}
+{{- $full := include "haliphron-runtime.fullname" . -}}
+{{- $sa := include "haliphron-runtime.serviceAccountName" . -}}
+{{- $agentNS := include "haliphron-runtime.agentNamespace" . -}}
+{{/*
+The rules are in rbac-controller.yaml, generated from the kubebuilder markers.
+What is decided here is how far they reach.
+
+Every resource in them is namespaced, and the controller's cache watches
+exactly two namespaces, so the default binds the ClusterRole with a RoleBinding
+in each. A ClusterRoleBinding would hand a controller that reads two namespaces
+the right to read Secrets in all of them.
+*/}}
+{{- if eq .Values.rbac.scope "cluster" }}
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: {{ $full }}
+  labels: {{- include "haliphron-runtime.labels" . | nindent 4 }}
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: {{ $full }}
+subjects:
+  - kind: ServiceAccount
+    name: {{ $sa }}
+    namespace: {{ .Release.Namespace }}
+{{- else }}
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: {{ $full }}
+  namespace: {{ .Release.Namespace }}
+  labels: {{- include "haliphron-runtime.labels" . | nindent 4 }}
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: {{ $full }}
+subjects:
+  - kind: ServiceAccount
+    name: {{ $sa }}
+    namespace: {{ .Release.Namespace }}
+{{- if ne $agentNS .Release.Namespace }}
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: {{ $full }}
+  namespace: {{ $agentNS }}
+  labels: {{- include "haliphron-runtime.labels" . | nindent 4 }}
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: {{ $full }}
+subjects:
+  - kind: ServiceAccount
+    name: {{ $sa }}
+    namespace: {{ .Release.Namespace }}
+{{- end }}
+{{- end }}
+---
+{{/*
+Leader election, which the generated rules do not cover: controller-runtime
+takes a Lease in the controller's own namespace, and without this the manager
+fails to start rather than degrading to a single replica.
+*/}}
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: {{ printf "%s-leader-election" $full }}
+  namespace: {{ .Release.Namespace }}
+  labels: {{- include "haliphron-runtime.labels" . | nindent 4 }}
+rules:
+  - apiGroups: ["coordination.k8s.io"]
+    resources: ["leases"]
+    verbs: ["create", "get", "list", "watch", "update", "patch", "delete"]
+  - apiGroups: [""]
+    resources: ["events"]
+    verbs: ["create", "patch"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: {{ printf "%s-leader-election" $full }}
+  namespace: {{ .Release.Namespace }}
+  labels: {{- include "haliphron-runtime.labels" . | nindent 4 }}
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: {{ printf "%s-leader-election" $full }}
+subjects:
+  - kind: ServiceAccount
+    name: {{ $sa }}
+    namespace: {{ .Release.Namespace }}
+{{- end }}

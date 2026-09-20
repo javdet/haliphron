@@ -1,0 +1,38 @@
+{{- $ns := include "haliphron-runtime.agentNamespace" . -}}
+{{- if .Values.agents.resourceQuota.enabled }}
+{{/*
+The only thing that stops a burst of runs from taking the cluster down. On by
+default, because the failure it prevents is a cluster-wide one and the failure
+it causes is a queued run.
+*/}}
+apiVersion: v1
+kind: ResourceQuota
+metadata:
+  name: {{ printf "%s-agents" (include "haliphron-runtime.fullname" .) }}
+  namespace: {{ $ns }}
+  labels:
+    {{- include "haliphron-runtime.labels" . | nindent 4 }}
+    app.kubernetes.io/component: agents
+spec:
+  hard: {{- toYaml .Values.agents.resourceQuota.hard | nindent 4 }}
+{{- end }}
+---
+{{- if .Values.agents.limitRange.enabled }}
+apiVersion: v1
+kind: LimitRange
+metadata:
+  name: {{ printf "%s-agents" (include "haliphron-runtime.fullname" .) }}
+  namespace: {{ $ns }}
+  labels:
+    {{- include "haliphron-runtime.labels" . | nindent 4 }}
+    app.kubernetes.io/component: agents
+spec:
+  limits:
+    - type: Container
+      # A quota with requests.cpu in it rejects any pod that does not state
+      # one, so the default is not a nicety: without it a run whose spec omits
+      # resources is refused at admission rather than scheduled.
+      default: {{- toYaml .Values.agents.limitRange.default | nindent 8 }}
+      defaultRequest: {{- toYaml .Values.agents.limitRange.defaultRequest | nindent 8 }}
+      max: {{- toYaml .Values.agents.limitRange.max | nindent 8 }}
+{{- end }}

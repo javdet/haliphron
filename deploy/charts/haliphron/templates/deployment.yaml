@@ -1,0 +1,145 @@
+{{- include "haliphron.validate" . -}}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "haliphron.fullname" . }}
+  labels: {{- include "haliphron.labels" . | nindent 4 }}
+spec:
+  {{- if not .Values.autoscaling.enabled }}
+  replicas: {{ .Values.backend.replicaCount }}
+  {{- end }}
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxSurge: 1
+      # Zero, because a rollout that takes the last replica down takes the
+      # Cluster API with it, and every controller's long poll fails at once.
+      maxUnavailable: 0
+  selector:
+    matchLabels: {{- include "haliphron.selectorLabels" . | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- include "haliphron.selectorLabels" . | nindent 8 }}
+        {{- with .Values.podLabels }}{{- toYaml . | nindent 8 }}{{- end }}
+      annotations:
+        # A changed credential is a changed pod. Without this the Secret is
+        # updated and every replica keeps using what it read at startup.
+        checksum/credentials: {{ include (print $.Template.BasePath "/secret.yaml") . | sha256sum }}
+        {{- with .Values.podAnnotations }}{{- toYaml . | nindent 8 }}{{- end }}
+    spec:
+      serviceAccountName: {{ include "haliphron.serviceAccountName" . }}
+      automountServiceAccountToken: {{ .Values.serviceAccount.automountServiceAccountToken }}
+      {{- with .Values.imagePullSecrets }}
+      imagePullSecrets: {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.priorityClassName }}
+      priorityClassName: {{ . }}
+      {{- end }}
+      securityContext: {{- toYaml .Values.podSecurityContext | nindent 8 }}
+      # Longer than the 40s the process allows itself to drain a long poll, so
+      # that a rollout ends in a closed connection rather than a killed one.
+      terminationGracePeriodSeconds: {{ .Values.backend.terminationGracePeriodSeconds }}
+      containers:
+        - name: backend
+          image: {{ include "haliphron.image" . }}
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          securityContext: {{- toYaml .Values.securityContext | nindent 12 }}
+          env: {{- include "haliphron.env" . | nindent 12 }}
+          {{- with .Values.backend.extraEnvFrom }}
+          envFrom: {{- toYaml . | nindent 12 }}
+          {{- end }}
+          ports:
+            {{- if (include "haliphron.servesAPI" .) }}
+            - name: api
+              containerPort: {{ .Values.service.ports.api }}
+              protocol: TCP
+            {{- end }}
+            {{- if (include "haliphron.servesMCP" .) }}
+            - name: mcp
+              containerPort: {{ .Values.service.ports.mcp }}
+              protocol: TCP
+            {{- end }}
+            {{- if (include "haliphron.servesCluster" .) }}
+            - name: cluster
+              containerPort: {{ .Values.service.ports.cluster }}
+              protocol: TCP
+            {{- end }}
+            - name: health
+              containerPort: {{ .Values.service.ports.health }}
+              protocol: TCP
+          # The listeners do not bind until the schema has been applied, so on
+          # a first install or a long migration the port is not merely
+          # unhealthy — it is not there. The startup probe is what buys that
+          # time without a liveness probe restarting the migration halfway.
+          startupProbe:
+            httpGet:
+              path: /healthz
+              port: health
+            periodSeconds: 5
+            failureThreshold: 60
+          livenessProbe:
+            # /healthz and not /readyz: liveness must not depend on the
+            # database, or a failover restarts every replica and turns a blip
+            # into an outage.
+            httpGet:
+              path: /healthz
+              port: health
+            periodSeconds: 10
+            timeoutSeconds: 3
+            failureThreshold: 3
+          readinessProbe:
+            httpGet:
+              path: /readyz
+              port: health
+            periodSeconds: 10
+            timeoutSeconds: 3
+            failureThreshold: 3
+          resources: {{- toYaml .Values.resources | nindent 12 }}
+          volumeMounts:
+            # readOnlyRootFilesystem is on; this is the only writable path the
+            # process has, and it is emptyDir rather than a host path.
+            - name: tmp
+              mountPath: /tmp
+            {{- if (include "haliphron.kekEnabled" .) }}
+            - name: kek
+              mountPath: /haliphron/kek
+              readOnly: true
+            {{- end }}
+            {{- with .Values.backend.extraVolumeMounts }}
+            {{- toYaml . | nindent 12 }}
+            {{- end }}
+      volumes:
+        - name: tmp
+          emptyDir: {}
+        {{- if (include "haliphron.kekEnabled" .) }}
+        - name: kek
+          secret:
+            secretName: {{ include "haliphron.kekSecretName" . }}
+            defaultMode: 0400
+            items:
+              - key: {{ include "haliphron.kekSecretKey" . }}
+                path: {{ include "haliphron.kekSecretKey" . }}
+        {{- end }}
+        {{- with .Values.backend.extraVolumes }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
+      {{- with .Values.nodeSelector }}
+      nodeSelector: {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.tolerations }}
+      tolerations: {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.affinity }}
+      affinity: {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.topologySpreadConstraints }}
+      topologySpreadConstraints:
+        {{- range . }}
+        - maxSkew: {{ .maxSkew }}
+          topologyKey: {{ .topologyKey }}
+          whenUnsatisfiable: {{ .whenUnsatisfiable }}
+          labelSelector:
+            matchLabels: {{- include "haliphron.selectorLabels" $ | nindent 14 }}
+        {{- end }}
+      {{- end }}

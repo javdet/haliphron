@@ -1,0 +1,14 @@
+# The minimum that satisfies the chart's own validation. See values.yaml.
+cluster:
+  name: lint
+  labels:
+    region: lint
+backend:
+  url: https://clusters.haliphron.example.com
+  bootstrapTokenExistingSecret: haliphron-bootstrap
+metrics:
+  serviceMonitor:
+    enabled: true
+controller:
+  networkPolicy:
+    enabled: true

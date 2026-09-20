@@ -30,3 +30,6 @@ searxng/
 # Built binaries (built into images, never committed)
 bin/
 
+
+# Helm dependencies are vendored by `make chart-deps`, never committed.
+deploy/charts/*/charts/

@@ -1,0 +1,11 @@
+# The backend's build context: backend/, api/ and db/, and nothing else. See
+# controller/Dockerfile.dockerignore for why each image states its own.
+*
+!api/
+!db/
+!backend/
+
+**/.git
+**/node_modules
+**/.DS_Store
+backend/Dockerfile*

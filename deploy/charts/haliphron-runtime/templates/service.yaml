@@ -1,0 +1,42 @@
+{{/*
+Two Services because they have two audiences. The callback is the only
+endpoint an agent pod may reach, and keeping it on its own object is what lets
+a NetworkPolicy say so without also opening the metrics port to untrusted code.
+*/}}
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "haliphron-runtime.callbackServiceName" . }}
+  namespace: {{ .Release.Namespace }}
+  labels: {{- include "haliphron-runtime.labels" . | nindent 4 }}
+spec:
+  type: ClusterIP
+  selector: {{- include "haliphron-runtime.selectorLabels" . | nindent 4 }}
+  ports:
+    - name: callback
+      port: {{ .Values.controller.callbackPort }}
+      targetPort: callback
+      protocol: TCP
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ printf "%s-metrics" (include "haliphron-runtime.fullname" .) }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "haliphron-runtime.labels" . | nindent 4 }}
+    # What the ServiceMonitor selects on. Both Services carry the same app
+    # labels, and a monitor that matched both would half-target the callback.
+    haliphron.io/service: metrics
+spec:
+  type: ClusterIP
+  selector: {{- include "haliphron-runtime.selectorLabels" . | nindent 4 }}
+  ports:
+    - name: metrics
+      port: {{ .Values.controller.metricsPort }}
+      targetPort: metrics
+      protocol: TCP
+    - name: health
+      port: {{ .Values.controller.healthPort }}
+      targetPort: health
+      protocol: TCP

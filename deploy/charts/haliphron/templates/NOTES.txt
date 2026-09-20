@@ -1,0 +1,84 @@
+{{ .Chart.Name }} {{ .Chart.Version }} is installed as {{ .Release.Name }} in {{ .Release.Namespace }}, running mode {{ .Values.backend.mode }}.
+
+Listeners in this mode:
+{{- if (include "haliphron.servesAPI" .) }}
+  REST + BFF   {{ include "haliphron.fullname" . }}:{{ .Values.service.ports.api }}
+{{- end }}
+{{- if (include "haliphron.servesMCP" .) }}
+  MCP          {{ include "haliphron.fullname" . }}:{{ .Values.service.ports.mcp }}
+{{- end }}
+{{- if (include "haliphron.servesCluster" .) }}
+  Cluster API  {{ include "haliphron.fullname" . }}:{{ .Values.service.ports.cluster }}
+{{- end }}
+  health       {{ include "haliphron.fullname" . }}:{{ .Values.service.ports.health }}  (/healthz, /readyz, /version)
+
+1. Watch it come up. The first start applies the schema before it binds a
+   port, so a fresh install is not ready immediately:
+
+   kubectl -n {{ .Release.Namespace }} rollout status deploy/{{ include "haliphron.fullname" . }}
+
+2. Connect a cluster. Every target cluster needs a bootstrap token, issued by
+   the admin API and used exactly once:
+
+   kubectl -n {{ .Release.Namespace }} port-forward svc/{{ include "haliphron.fullname" . }} {{ .Values.service.ports.api }}:{{ .Values.service.ports.api }}
+   curl -sX POST localhost:{{ .Values.service.ports.api }}/v1/clusters/bootstrap-tokens \
+     -H "Authorization: Bearer $ADMIN_TOKEN" -H 'Content-Type: application/json' -d '{}'
+
+   Then install haliphron-runtime into that cluster with the token and the
+   Cluster API's URL as seen from inside it.
+
+{{- if not (include "haliphron.kekEnabled" .) }}
+
+3. No key encryption key is configured, so managed secrets are unavailable and
+   the backend says so at startup. Secrets referenced from an external manager
+   keep working. To enable them:
+
+   kubectl -n {{ .Release.Namespace }} create secret generic haliphron-kek \
+     --from-literal=kek="$(openssl rand -base64 32)"
+   helm upgrade ... --set encryption.existingSecret=haliphron-kek
+
+   Back the key up before you store anything under it. Losing it loses every
+   managed secret, because the key is deliberately not in the database.
+{{- end }}
+
+{{- if .Values.ingress.cluster.enabled }}
+
+   The Cluster API is exposed by an Ingress at https://{{ .Values.ingress.cluster.host }}.
+   Every proxy in front of it must allow a read to hang for longer than a lease
+   poll — the chart checks its own annotation, not the load balancer in front
+   of your ingress controller.
+{{- end }}
+
+{{- if .Values.httpRoute.cluster.enabled }}
+
+   The Cluster API is exposed by an HTTPRoute at {{ join ", " .Values.httpRoute.cluster.hostnames }},
+   attached to Gateway {{ (first .Values.httpRoute.cluster.parentRefs).name }}. The route's own
+   request timeout is checked; the Gateway's listener and whatever fronts it
+   are not. Confirm the route is accepted:
+
+   kubectl -n {{ .Release.Namespace }} get httproute {{ include "haliphron.fullname" . }}-cluster -o jsonpath='{.status.parents[*].conditions[*]}'
+
+   A route in a namespace the Gateway does not allow is Accepted=False with
+   NotAllowedByListeners, and needs a ReferenceGrant on the Gateway's side.
+{{- end }}
+
+{{- range $name := list "api" "mcp" "cluster" }}
+{{- if and (index $.Values.ingress $name).enabled (index $.Values.httpRoute $name).enabled }}
+
+   NOTE: the {{ $name }} entrypoint has both an Ingress and an HTTPRoute. That is
+   the right state mid-migration and a surprise otherwise — it is reachable by
+   two paths with two sets of timeouts and two TLS configurations.
+{{- end }}
+{{- end }}
+
+{{- if .Values.postgresql.enabled }}
+
+   WARNING: the bundled PostgreSQL is on. It is meant for an evaluation: it
+   does not pin an image tag you can reproduce, and the system of record is
+   living in a subchart's PVC. Move to a managed database before this
+   installation matters.
+{{- end }}
+{{- if .Values.minio.enabled }}
+
+   WARNING: the bundled MinIO is on, with the same caveat.
+{{- end }}

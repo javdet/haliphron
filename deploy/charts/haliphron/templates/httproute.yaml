@@ -1,0 +1,68 @@
+{{/*
+The Gateway API alternative to ingress.yaml, one HTTPRoute per entrypoint and
+for the same reasons: the three have different audiences, and only the Cluster
+API needs a request timeout longer than a lease poll.
+
+No Gateway is created here. A Gateway owns an address, a certificate and a
+listener policy, it is shared by everything that attaches to it, and a chart
+that installed one per release would be installing a load balancer per release.
+The route attaches to a Gateway you already run, named in parentRefs.
+
+An entrypoint whose listener this mode does not run is skipped rather than
+pointed at a port that is not there.
+*/}}
+{{- $root := . -}}
+{{- $full := include "haliphron.fullname" . -}}
+{{- range $entry := list
+      (dict "name" "api" "helper" "haliphron.servesAPI")
+      (dict "name" "mcp" "helper" "haliphron.servesMCP")
+      (dict "name" "cluster" "helper" "haliphron.servesCluster") }}
+{{- $cfg := index $root.Values.httpRoute $entry.name }}
+{{- if and $cfg.enabled (include $entry.helper $root) }}
+---
+apiVersion: {{ $root.Values.httpRoute.apiVersion }}
+kind: HTTPRoute
+metadata:
+  name: {{ printf "%s-%s" $full $entry.name }}
+  labels:
+    {{- include "haliphron.labels" $root | nindent 4 }}
+    {{- with $cfg.labels }}{{- toYaml . | nindent 4 }}{{- end }}
+  {{- with $cfg.annotations }}
+  annotations: {{- toYaml . | nindent 4 }}
+  {{- end }}
+spec:
+  parentRefs:
+    {{- range $cfg.parentRefs }}
+    - name: {{ .name }}
+      {{- with .namespace }}
+      namespace: {{ . }}
+      {{- end }}
+      {{- with .sectionName }}
+      sectionName: {{ . }}
+      {{- end }}
+      {{- with .port }}
+      port: {{ . }}
+      {{- end }}
+      {{- with .kind }}
+      kind: {{ . }}
+      {{- end }}
+      {{- with .group }}
+      group: {{ . }}
+      {{- end }}
+    {{- end }}
+  {{- with $cfg.hostnames }}
+  hostnames: {{- toYaml . | nindent 4 }}
+  {{- end }}
+  rules:
+    - matches: {{- toYaml $cfg.matches | nindent 8 }}
+      {{- with $cfg.filters }}
+      filters: {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with $cfg.timeouts }}
+      timeouts: {{- toYaml . | nindent 8 }}
+      {{- end }}
+      backendRefs:
+        - name: {{ $full }}
+          port: {{ index $root.Values.service.ports $entry.name }}
+{{- end }}
+{{- end }}

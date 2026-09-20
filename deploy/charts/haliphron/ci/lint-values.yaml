@@ -1,0 +1,37 @@
+# The minimum that satisfies the chart's own validation, so that `helm lint`
+# exercises the templates rather than stopping at the first required value.
+# Not an example installation: see values.yaml for what these should be.
+agent:
+  image: ghcr.io/automagicops/haliphron-agent@sha256:0000000000000000000000000000000000000000000000000000000000000000
+database:
+  existingSecret: haliphron-database
+objectStorage:
+  existingSecret: haliphron-object-storage
+encryption:
+  existingSecret: haliphron-kek
+ingress:
+  api:
+    enabled: true
+  mcp:
+    enabled: true
+  cluster:
+    enabled: true
+# The Gateway API alternative, on the two entrypoints the Ingresses above do
+# not claim, so lint renders both templates without also rendering the
+# both-enabled warning three times.
+httpRoute:
+  api:
+    enabled: true
+    parentRefs:
+      - name: external
+        namespace: gateway-system
+        sectionName: https
+metrics:
+  serviceMonitor:
+    # Rendered in lint so the template is exercised. See values.yaml: the
+    # backend has no /metrics endpoint yet, so this stays off in real values.
+    enabled: true
+networkPolicy:
+  enabled: true
+autoscaling:
+  enabled: true
