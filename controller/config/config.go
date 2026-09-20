@@ -41,6 +41,8 @@ const (
 	EnvServiceAccount   = "HALIPHRON_AGENT_SERVICE_ACCOUNT"
 	EnvCallbackURL      = "HALIPHRON_CALLBACK_URL"
 	EnvCallbackAddr     = "HALIPHRON_CALLBACK_ADDR"
+	EnvSpoolPath        = "HALIPHRON_SPOOL_PATH"
+	EnvMaxArtifactBytes = "HALIPHRON_ARTIFACT_MAX_BYTES_PER_RUN"
 	EnvRunURLTemplate   = "HALIPHRON_RUN_URL_TEMPLATE"
 	EnvGraceSeconds     = "HALIPHRON_GRACE_SECONDS"
 	EnvDeadlineSlack    = "HALIPHRON_DEADLINE_SLACK_SECONDS"
@@ -72,6 +74,20 @@ type Config struct {
 	CallbackURL  string
 	CallbackAddr string
 
+	// SpoolPath is where relayed artifacts wait for the control plane.
+	//
+	// An emptyDir works and a PVC is the better answer: with an emptyDir a
+	// controller restart loses whatever had not been forwarded yet, which turns
+	// an upload this controller told a pod was safe into a lost result. The
+	// chart defaults to a PVC for that reason and lets an operator choose
+	// otherwise.
+	SpoolPath string
+
+	// MaxArtifactBytesPerRun is the fallback when a lease does not state one.
+	// The backend normally does; this covers a controller newer than its
+	// control plane.
+	MaxArtifactBytesPerRun int64
+
 	RunURLTemplate string
 
 	GraceSeconds    int64
@@ -93,15 +109,18 @@ func Load(getenv func(string) string) (Config, error) {
 		getenv = os.Getenv
 	}
 	c := Config{
-		BackendURL:      strings.TrimRight(getenv(EnvBackendURL), "/"),
-		ClusterName:     getenv(EnvClusterName),
-		ClusterLabels:   parseLabels(getenv(EnvClusterLabels)),
-		AgentNamespace:  getenv(EnvAgentNamespace),
-		OwnNamespace:    getenv(EnvOwnNamespace),
-		IdentitySecret:  getenv(EnvIdentitySecret),
-		ServiceAccount:  getenv(EnvServiceAccount),
-		CallbackURL:     getenv(EnvCallbackURL),
-		CallbackAddr:    orDefault(getenv(EnvCallbackAddr), ":8083"),
+		BackendURL:     strings.TrimRight(getenv(EnvBackendURL), "/"),
+		ClusterName:    getenv(EnvClusterName),
+		ClusterLabels:  parseLabels(getenv(EnvClusterLabels)),
+		AgentNamespace: getenv(EnvAgentNamespace),
+		OwnNamespace:   getenv(EnvOwnNamespace),
+		IdentitySecret: getenv(EnvIdentitySecret),
+		ServiceAccount: getenv(EnvServiceAccount),
+		CallbackURL:    getenv(EnvCallbackURL),
+		CallbackAddr:   orDefault(getenv(EnvCallbackAddr), ":8083"),
+		SpoolPath:      orDefault(getenv(EnvSpoolPath), "/var/lib/haliphron/spool"),
+		MaxArtifactBytesPerRun: int64(intOr(getenv(EnvMaxArtifactBytes),
+			clusterv1.DefaultMaxBytesPerRun)),
 		RunURLTemplate:  getenv(EnvRunURLTemplate),
 		MetricsAddr:     orDefault(getenv(EnvMetricsAddr), ":9090"),
 		HealthAddr:      orDefault(getenv(EnvHealthAddr), ":8081"),

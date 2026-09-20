@@ -36,6 +36,26 @@ encryption key is not even that: it is a file, because a variable is visible in
 - name: HALIPHRON_MIGRATE
   value: {{ .Values.backend.migrate | quote }}
 
+- name: HALIPHRON_ARTIFACT_MODE
+  value: {{ .Values.artifacts.mode | quote }}
+- name: HALIPHRON_ARTIFACT_PATH
+  value: {{ .Values.artifacts.mountPath | quote }}
+- name: HALIPHRON_ARTIFACT_MAX_BYTES_PER_RUN
+  value: {{ include "haliphron.artifactMaxBytes" . | quote }}
+- name: HALIPHRON_ARTIFACT_RETAIN_LOGS
+  value: {{ .Values.artifacts.retention.logs | quote }}
+- name: HALIPHRON_ARTIFACT_RETAIN_RESULTS
+  value: {{ .Values.artifacts.retention.results | quote }}
+- name: HALIPHRON_ARTIFACT_RETAIN_ARTIFACTS
+  value: {{ .Values.artifacts.retention.artifacts | quote }}
+
+{{- if (include "haliphron.objectStore" .) }}
+{{- /*
+  Object-store mode only. In relay mode none of these are set — not even as
+  empty strings — because the backend refuses object-store mode without
+  credentials, and a chart that always supplied blank ones would turn that
+  refusal into a run that fails its upload an hour later.
+*/}}
 - name: HALIPHRON_S3_BUCKET
   value: {{ .Values.objectStorage.bucket | quote }}
 - name: HALIPHRON_S3_REGION
@@ -62,6 +82,7 @@ encryption key is not even that: it is a file, because a variable is visible in
     secretKeyRef:
       name: {{ include "haliphron.secretName" . }}
       key: sessionToken
+{{- end }}
 {{- end }}
 
 {{- if (include "haliphron.kekEnabled" .) }}

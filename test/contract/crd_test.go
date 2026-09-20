@@ -85,15 +85,11 @@ func sampleRun(name string) *agentrunv1alpha1.AgentRun {
 			RunID:      testRunID,
 			LeaseEpoch: 1,
 			RenderedRunSpec: runv1.RenderedRunSpec{
-				Agent: runv1.AgentClaudeCode,
-				Prompt: runv1.ObjectRef{
-					Bucket: "haliphron",
-					Key:    "runs/01J8X4K2ZQ7YB3M9F0R5W6T8CD/prompt.txt",
-					SHA256: "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
-				},
-				Model: "anthropic/claude-opus-5",
-				Role:  "coder",
-				Image: "ghcr.io/automagicops/agent-runtime@sha256:abc",
+				Agent:        runv1.AgentClaudeCode,
+				PromptSHA256: "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+				Model:        "anthropic/claude-opus-5",
+				Role:         "coder",
+				Image:        "ghcr.io/automagicops/agent-runtime@sha256:abc",
 				Repo: runv1.RepoSpec{
 					URL:          "https://github.com/org/repo.git",
 					Provider:     runv1.GitProviderGitHub,
@@ -185,16 +181,16 @@ func TestUnknownSpecFieldIsPruned(t *testing.T) {
 	obj.SetNamespace(testNamespace)
 	obj.SetName("ar-pruned")
 	spec := map[string]any{
-		"runID":      string(testRunID),
-		"leaseEpoch": int64(1),
-		"agent":      "claude-code",
-		"prompt":     map[string]any{"bucket": "haliphron", "key": "runs/x/prompt.txt"},
-		"model":      "anthropic/claude-opus-5",
-		"image":      "ghcr.io/automagicops/agent-runtime:1",
-		"repo":       map[string]any{},
-		"runtime":    map[string]any{"timeoutSeconds": int64(3600)},
-		"materials":  map[string]any{"secretName": "ar-x-s"},
-		"callbackURL": "http://haliphron-controller:8080/completion",
+		"runID":        string(testRunID),
+		"leaseEpoch":   int64(1),
+		"agent":        "claude-code",
+		"promptSHA256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+		"model":        "anthropic/claude-opus-5",
+		"image":        "ghcr.io/automagicops/agent-runtime:1",
+		"repo":         map[string]any{},
+		"runtime":      map[string]any{"timeoutSeconds": int64(3600)},
+		"materials":    map[string]any{"secretName": "ar-x-s"},
+		"callbackURL":  "http://haliphron-controller:8080",
 		// A field from a future version of the contract.
 		"sandboxProfile": "strict",
 	}
@@ -228,16 +224,16 @@ func TestDefaultsApply(t *testing.T) {
 	obj.SetNamespace(testNamespace)
 	obj.SetName("ar-defaults")
 	spec := map[string]any{
-		"runID":       string(testRunID),
-		"leaseEpoch":  int64(1),
-		"agent":       "codex",
-		"prompt":      map[string]any{"bucket": "haliphron", "key": "runs/x/prompt.txt"},
-		"model":       "openai/gpt-5",
-		"image":       "ghcr.io/automagicops/agent-runtime:1",
-		"repo":        map[string]any{},
-		"runtime":     map[string]any{},
-		"materials":   map[string]any{"secretName": "ar-x-s"},
-		"callbackURL": "http://haliphron-controller:8080/completion",
+		"runID":        string(testRunID),
+		"leaseEpoch":   int64(1),
+		"agent":        "codex",
+		"promptSHA256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+		"model":        "openai/gpt-5",
+		"image":        "ghcr.io/automagicops/agent-runtime:1",
+		"repo":         map[string]any{},
+		"runtime":      map[string]any{},
+		"materials":    map[string]any{"secretName": "ar-x-s"},
+		"callbackURL":  "http://haliphron-controller:8080",
 	}
 	if err := unstructured.SetNestedMap(obj.Object, spec, "spec"); err != nil {
 		t.Fatalf("set spec: %v", err)

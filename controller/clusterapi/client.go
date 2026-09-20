@@ -232,6 +232,17 @@ func problemFrom(op string, status int, payload []byte) error {
 	return &p
 }
 
+// streamer is the client for the one endpoint whose body has no ceiling worth
+// timing out on.
+//
+// It shares the transport — the connection pool, the TLS configuration, the
+// proxy settings — and differs only in having no whole-request deadline. Two
+// http.Clients over one Transport is the supported way to say that; a second
+// Transport would be a second connection pool to the same backend.
+func (c *Client) streamer() *http.Client {
+	return &http.Client{Transport: c.http.Transport, CheckRedirect: c.http.CheckRedirect}
+}
+
 // authed mints the token for the current identity.
 func (c *Client) authed() (string, error) {
 	if c.signer == nil {

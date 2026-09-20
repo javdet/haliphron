@@ -32,7 +32,12 @@ type NewRun struct {
 	CreatedVia string
 	Priority   int32
 
-	Spec         json.RawMessage
+	Spec json.RawMessage
+	// Prompt is the task, and the reason the artifact store is not on the path
+	// to starting a run any more. Bounded by run.MaxPromptBytes at admission,
+	// which is what keeps it insertable and what keeps the per-run Secret the
+	// controller builds from it under the 1 MiB Kubernetes cap.
+	Prompt       string
 	PromptSHA256 []byte
 
 	Agent          runv1.AgentType
@@ -60,13 +65,13 @@ func (s *Store) InsertRun(ctx context.Context, r NewRun) error {
 	}
 	_, err := s.db.ExecContext(ctx, `
 		INSERT INTO runs (id, parent_run_id, depth, created_by, created_via, priority,
-		                  spec, prompt_sha256, agent, model, role_name,
+		                  spec, prompt, prompt_sha256, agent, model, role_name,
 		                  repo_url, repo_provider, base_branch, target_branch,
 		                  timeout_seconds, max_cost_usd, cluster_id, status)
-		VALUES ($1, $2, $3, $4, $5, $6, $7::jsonb, $8, $9, $10, $11,
-		        $12, $13, $14, $15, $16, $17::numeric, $18, 'Queued')`,
+		VALUES ($1, $2, $3, $4, $5, $6, $7::jsonb, $8, $9, $10, $11, $12,
+		        $13, $14, $15, $16, $17, $18::numeric, $19, 'Queued')`,
 		r.ID, nullString(string(r.ParentRunID)), r.Depth, r.CreatedBy, r.CreatedVia, r.Priority,
-		[]byte(r.Spec), r.PromptSHA256, string(r.Agent), r.Model, nullString(r.Role),
+		[]byte(r.Spec), r.Prompt, r.PromptSHA256, string(r.Agent), r.Model, nullString(r.Role),
 		nullString(r.RepoURL), string(provider), nullString(r.BaseBranch), nullString(r.TargetBranch),
 		r.TimeoutSeconds, nullString(string(r.MaxCostUSD)), nullString(string(r.ClusterID)))
 	if err != nil {
@@ -115,11 +120,15 @@ type Run struct {
 	CancelReason      string
 
 	ResultSummary string
-	PRURL         string
-	PRNumber      *int32
-	PRAction      runv1.PRAction
-	CommitSHA     string
-	Pushed        bool
+	// ResultRef is a URI carrying its scheme — file://runs/… or s3://bucket/runs/…
+	// — so a row read years later says which store wrote it rather than leaving
+	// the reader to assume today's mode.
+	ResultRef string
+	PRURL     string
+	PRNumber  *int32
+	PRAction  runv1.PRAction
+	CommitSHA string
+	Pushed    bool
 
 	CostUSD          runv1.MoneyUSD
 	InputTokens      int64
@@ -156,7 +165,7 @@ const runColumns = `
 	       cluster_id, lease_epoch, attempt, ack_deadline, lease_deadline,
 	       status, status_reason, status_message, failure_class, exit_code, observed_phase,
 	       cancel_requested_at, cancel_reason,
-	       result_summary, pr_url, pr_number, pr_action, commit_sha, pushed,
+	       result_summary, result_ref, pr_url, pr_number, pr_action, commit_sha, pushed,
 	       cost_usd, input_tokens, output_tokens, cache_read_tokens, cache_write_tokens, num_turns,
 	       completion_received_at, created_at, queued_at, started_at, finished_at, updated_at`
 
@@ -187,9 +196,12 @@ type RunFilter struct {
 
 // ListRuns returns a page, newest first.
 //
-// result_summary is not selected. It is up to 64 KiB and TOAST moves it out of
-// line, so a wide column costs the list nothing — provided the list does not
-// ask for it, which is a rule about the query rather than about the schema.
+// Neither prompt nor result_summary is selected. Both are up to 64 KiB or more
+// and TOAST moves them out of line, so wide columns cost the list nothing —
+// provided the list does not ask for them, which is a rule about the query
+// rather than about the schema. The prompt in particular is read in exactly two
+// places: the lease that hands it to a cluster, and the one detail endpoint
+// that shows a user what they asked for.
 func (s *Store) ListRuns(ctx context.Context, f RunFilter) ([]Run, error) {
 	limit := f.Limit
 	if limit <= 0 || limit > 200 {
@@ -643,6 +655,7 @@ func scanRun(row rowScanner) (Run, error) {
 		cancelAt   sql.NullTime
 		cancelWhy  sql.NullString
 		summary    sql.NullString
+		resultRef  sql.NullString
 		prURL      sql.NullString
 		prNumber   sql.NullInt32
 		prAction   sql.NullString
@@ -659,7 +672,7 @@ func scanRun(row rowScanner) (Run, error) {
 		&cluster, &r.Epoch, &r.Attempt, &ackAt, &leaseAt,
 		&r.Status, &reason, &message, &r.FailureClass, &exitCode, &phase,
 		&cancelAt, &cancelWhy,
-		&summary, &prURL, &prNumber, &prAction, &commit, &pushed,
+		&summary, &resultRef, &prURL, &prNumber, &prAction, &commit, &pushed,
 		&r.CostUSD, &r.InputTokens, &r.OutputTokens, &r.CacheReadTokens, &r.CacheWriteTokens, &r.NumTurns,
 		&completed, &r.CreatedAt, &r.QueuedAt, &startedAt, &finishedAt, &r.UpdatedAt)
 	if err != nil {
@@ -685,6 +698,7 @@ func scanRun(row rowScanner) (Run, error) {
 	r.CancelRequestedAt = timePtr(cancelAt)
 	r.CancelReason = cancelWhy.String
 	r.ResultSummary = summary.String
+	r.ResultRef = resultRef.String
 	r.PRURL = prURL.String
 	r.PRNumber = int32Ptr(prNumber)
 	r.PRAction = runv1.PRAction(prAction.String)
@@ -694,6 +708,36 @@ func scanRun(row rowScanner) (Run, error) {
 	r.StartedAt = timePtr(startedAt)
 	r.FinishedAt = timePtr(finishedAt)
 	return r, nil
+}
+
+// Prompt reads a run's task.
+//
+// A call of its own rather than a column in runColumns: it is up to 512 KiB,
+// every list would carry it, and exactly two callers want it — the lease, which
+// gets it from the lease statement, and the detail view, which is one row.
+func (s *Store) Prompt(ctx context.Context, id runv1.ULID) (string, error) {
+	var prompt string
+	err := s.db.QueryRowContext(ctx, `SELECT prompt FROM runs WHERE id = $1`, id).Scan(&prompt)
+	if errors.Is(err, sql.ErrNoRows) {
+		return "", ErrNotFound
+	}
+	if err != nil {
+		return "", fmt.Errorf("store: read prompt for %s: %w", id, err)
+	}
+	return prompt, nil
+}
+
+// SetResultRef records where the full result landed, scheme and all.
+//
+// Written by the artifact path rather than by the completion path: the pod's
+// report names a key, and only the backend knows which store that key is in.
+func (s *Store) SetResultRef(ctx context.Context, id runv1.ULID, ref string) error {
+	_, err := s.db.ExecContext(ctx,
+		`UPDATE runs SET result_ref = $2 WHERE id = $1 AND result_ref IS DISTINCT FROM $2`, id, ref)
+	if err != nil {
+		return fmt.Errorf("store: set result ref for %s: %w", id, err)
+	}
+	return nil
 }
 
 // SelectCluster picks a cluster for a run that is not yet placed. It is

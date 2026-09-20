@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/ed25519"
 	"encoding/base64"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -176,7 +177,8 @@ func (s *Service) issue(ctx context.Context, cluster store.Cluster, runtimes []r
 		if err != nil {
 			return nil, err
 		}
-		bundle, err := artifacts.Bundle(s.artifacts, l.RunID, s.bundleTTL(l.TimeoutSeconds))
+		bundle, err := artifacts.Bundle(s.artifacts, l.RunID,
+			s.bundleTTL(l.TimeoutSeconds), s.limits.MaxArtifactBytesPerRun)
 		if err != nil {
 			return nil, err
 		}
@@ -189,18 +191,25 @@ func (s *Service) issue(ctx context.Context, cluster store.Cluster, runtimes []r
 			LeaseDeadline: l.LeaseDeadline,
 			Priority:      l.Priority,
 			Spec:          spec,
-			Secrets:       secrets,
-			RoleConfig:    roleConfig,
-			Artifacts:     bundle,
+			// The prompt travels here, in the clear, for the same reason the
+			// secrets do: the backend cannot create a Secret inside the
+			// cluster. Unlike them it is not a credential, and unlike them it
+			// becomes exactly one environment variable rather than a file.
+			Prompt:          l.Prompt,
+			PromptSHA256:    hex.EncodeToString(l.PromptSHA256),
+			CompletedPhases: l.CompletedPhases,
+			Secrets:         secrets,
+			RoleConfig:      roleConfig,
+			Artifacts:       bundle,
 		})
 	}
 
 	if err := s.store.RecordLease(ctx, cluster.ID); err != nil {
 		return nil, err
 	}
-	// Identifiers and a count. The body holds a git token, a model key and
-	// presigned URLs, and this is the line where a control plane usually leaks
-	// them.
+	// Identifiers and a count. The body holds a git token, a model key, the
+	// customer's prompt and — in object-store mode — presigned URLs, and this
+	// is the line where a control plane usually leaks them.
 	s.log.Info("leases issued", "cluster", cluster.ID, "count", len(out))
 	return out, nil
 }
@@ -293,6 +302,12 @@ func (s *Service) rejectAck(ctx context.Context, cluster store.Cluster, runID ru
 // the one the caller already holds. The controller makes it before creating
 // the Job for a further attempt, because an expired signature surfaces as a
 // lost result on work that actually succeeded.
+//
+// In relay mode there are no signatures and nothing expires, so the answer is
+// the same bundle every time and the controller never asks. The endpoint still
+// answers, because a controller configured for one mode against a backend
+// configured for the other should get a usable bundle rather than a 404 it
+// reports as a broken control plane.
 func (s *Service) ArtifactBundle(ctx context.Context, cluster store.Cluster, runID runv1.ULID,
 	req clusterv1.ArtifactBundleRequest) (clusterv1.ArtifactBundle, error) {
 
@@ -301,7 +316,8 @@ func (s *Service) ArtifactBundle(ctx context.Context, cluster store.Cluster, run
 		return clusterv1.ArtifactBundle{}, s.problemFor(runID, err)
 	}
 
-	bundle, err := artifacts.Bundle(s.artifacts, runID, s.bundleTTL(r.TimeoutSeconds))
+	bundle, err := artifacts.Bundle(s.artifacts, runID,
+		s.bundleTTL(r.TimeoutSeconds), s.limits.MaxArtifactBytesPerRun)
 	if err != nil {
 		return clusterv1.ArtifactBundle{}, err
 	}

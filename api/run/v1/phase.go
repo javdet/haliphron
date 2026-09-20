@@ -91,17 +91,19 @@ const (
 	ExitAgentTimeout  int32 = 11 // entrypoint killed the agent at timeoutSeconds
 	ExitOutputInvalid int32 = 12 // output.json missing or fails the node schema
 	ExitGit           int32 = 20 // clone, push or PR failed
-	ExitStorage       int32 = 21 // a presigned GET or PUT failed
+	ExitStorage       int32 = 21 // an artifact upload failed: a relay POST, or a presigned PUT
 	ExitConfig        int32 = 30 // incomplete configuration, or MCP servers did not come up
 )
 
 // FailureClassForExitCode classifies a container exit code.
 //
-// ExitStorage is infra rather than config even though it usually means an
-// expired presigned bundle: the controller reissues the bundle before it starts
-// the next attempt, so this is the one failure the cluster can actually repair
-// on its own. Classifying it as config would burn a run whose result the
-// entrypoint had already produced.
+// ExitStorage is infra rather than config in both artifact modes, and for the
+// same reason in each: it is the one failure the cluster can repair by itself.
+// In relay mode the controller's spool was unreachable or refused the bytes,
+// and the next attempt finds a controller that has come back; in object-store
+// mode the presigned bundle had expired, and the controller mints a fresh one
+// before it starts the next attempt. Classifying it as config would burn a run
+// whose result the entrypoint had already produced.
 //
 // Codes above 128 are signals — 137 is SIGKILL (OOMKilled, eviction), 143 is
 // SIGTERM (drain, preemption) — and all of them mean the platform stopped the

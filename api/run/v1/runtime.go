@@ -21,11 +21,17 @@ const (
 
 // Environment variables the controller sets on the agent container.
 //
-// Everything here is non-secret and therefore safe in `kubectl describe`. The
-// secret material arrives as files under MountSecrets instead: env would put it
-// in /proc/self/environ, which every child process inherits — including the
-// agent, which is the one process in this system explicitly assumed to be
-// capable of exfiltrating what it can read.
+// Everything set as a literal value here is non-secret and therefore safe in
+// `kubectl describe`. The secret material arrives as files under MountSecrets
+// instead: a literal env value would put it in /proc/self/environ, which every
+// child process inherits — including the agent, which is the one process in
+// this system explicitly assumed to be capable of exfiltrating what it reads.
+//
+// EnvPrompt is the single exception and is set differently: never as a literal,
+// always through valueFrom.secretKeyRef on SecretKeyPrompt, so the value is in
+// neither the Job's spec nor `kubectl describe pod`. See SecretKeyPrompt for
+// why the prompt is allowed in the environment at all when ADR 33 says
+// credentials are not.
 const (
 	EnvContract  = "HALIPHRON_CONTRACT"
 	EnvRunID     = "HALIPHRON_RUN_ID"
@@ -59,21 +65,50 @@ const (
 	EnvLFS          = "HALIPHRON_LFS"
 	EnvCreatePR     = "HALIPHRON_CREATE_PR"
 
-	// EnvPromptSHA256 is the digest of prompt.txt as the backend posted it. The
-	// pod fetches the prompt through a presigned GET and refuses to run on a
+	// EnvPrompt carries the task itself. It is sourced from SecretKeyPrompt
+	// with valueFrom.secretKeyRef and never written as a literal value.
+	//
+	// The ceiling is real and is stated rather than discovered: a Secret is
+	// hard-capped at 1 MiB across all of its keys and this one shares the
+	// Secret with the git token, the model key and mcp.json, so the backend
+	// refuses a prompt over MaxPromptBytes at admission with a 413 naming the
+	// limit — not later, as a failed Secret create on a run that was already
+	// accepted.
+	EnvPrompt = "HALIPHRON_PROMPT"
+
+	// EnvPromptSHA256 is the digest of the prompt as the backend admitted it.
+	// The entrypoint verifies EnvPrompt against it and refuses to run on a
 	// mismatch: a run that executes something other than what was admitted is
-	// worse than a run that does not start.
+	// worse than a run that does not start. It is the one property the old
+	// presigned GET bought that survives the move off object storage.
 	EnvPromptSHA256 = "HALIPHRON_PROMPT_SHA256"
+
+	// EnvCompletedPhases is the attempt checkpoint of section 9.3: the
+	// comma-separated entrypoint phases a previous attempt of this run got
+	// through, as the controller accumulated them. Absent on the first attempt,
+	// which is a normal answer and not a failure — the same non-event the old
+	// 404 on state.json was, minus the round trip that could fail for unrelated
+	// reasons.
+	//
+	// If RuntimePhaseRun is in the list, the retry does not call the model: it
+	// finishes push, PR, upload and notify.
+	EnvCompletedPhases = "HALIPHRON_COMPLETED_PHASES"
 
 	EnvLogChunkSeconds = "HALIPHRON_LOG_CHUNK_SECONDS"
 	EnvOTLPEndpoint    = "HALIPHRON_OTLP_ENDPOINT"
 	EnvTraceparent     = "HALIPHRON_TRACEPARENT"
 
-	// EnvStorageBucket and EnvStoragePrefix are informational: every access to
-	// storage goes through a presigned URL from the bundle, and the pod holds
-	// no storage credential. They exist so that a log line can say where a
-	// result went without the operator decoding a signed URL.
-	EnvStorageBucket = "HALIPHRON_STORAGE_BUCKET"
+	// EnvArtifactMode is which half of the ArtifactStore port is in force,
+	// "relay" or "object-store". The entrypoint could infer it from whether
+	// SecretKeyPresigned is in the mount, and is told instead: a phase that
+	// fails should be able to say which path it was taking, and inferring it
+	// makes a missing Secret key look like a mode rather than a defect.
+	EnvArtifactMode = "HALIPHRON_ARTIFACT_MODE"
+
+	// EnvStoragePrefix is informational, and there is deliberately no
+	// companion bucket variable. The pod holds no storage credential in either
+	// mode and addresses no bucket by name; the prefix exists so that a log
+	// line can say where a result went.
 	EnvStoragePrefix = "HALIPHRON_STORAGE_PREFIX"
 
 	// EnvImageVersion is the image's own tag or digest, baked in at build time
@@ -112,12 +147,17 @@ const (
 	// not envFrom: two of its keys are file-shaped (mcp.json, presigned.json)
 	// and would not survive the conversion to a variable name at all, and the
 	// rest must not be inherited by the agent process.
+	//
+	// The same Secret is also the source of EnvPrompt, through a
+	// secretKeyRef naming that one key. Naming one key is the difference
+	// between this and the envFrom failure mode ADR 33 describes.
 	MountSecrets = "/haliphron/secrets"
 
-	// DirRunPrivate is the entrypoint's own scratch: the fetched prompt, the
-	// rolling log, the checkpoint. Outside the work tree and outside anything
-	// the agent is pointed at, so that a prompt injection that gets the agent
-	// to rewrite "its instructions" rewrites nothing that is read again.
+	// DirRunPrivate is the entrypoint's own scratch: the prompt as written out
+	// for the CLI to read, and the rolling log. Outside the work tree and
+	// outside anything the agent is pointed at, so that a prompt injection that
+	// gets the agent to rewrite "its instructions" rewrites nothing that is
+	// read again.
 	DirRunPrivate = "/haliphron/run"
 
 	// HomeDir is writable (emptyDir). Every cache the CLIs would put under a
@@ -149,10 +189,17 @@ const (
 	// RuntimePhaseValidate checks the configuration before anything costs
 	// money. Exits ExitConfig on anything missing.
 	RuntimePhaseValidate RuntimePhase = "validate"
-	// RuntimePhaseFetch downloads prompt.txt and verifies EnvPromptSHA256.
+	// RuntimePhaseFetch reads the prompt out of EnvPrompt and verifies it
+	// against EnvPromptSHA256.
+	//
+	// It reads the environment rather than a presigned GET and it remains a
+	// phase: the names here key the checkpoint, they are the phase field of
+	// PhaseTiming, and the UI groups a run's timeline by them. Deleting two of
+	// them to save two lines of entrypoint would be a breaking change to three
+	// contracts in exchange for nothing.
 	RuntimePhaseFetch RuntimePhase = "fetch"
-	// RuntimePhaseCheckpoint reads state.json. A 404 here is the normal answer
-	// on the first attempt, not a failure.
+	// RuntimePhaseCheckpoint reads EnvCompletedPhases. An absent variable is
+	// the normal answer on the first attempt, not a failure.
 	RuntimePhaseCheckpoint RuntimePhase = "checkpoint"
 	// RuntimePhaseAuth wires the model credential and the git credential
 	// helper. The token is never written into .git/config.
@@ -176,10 +223,15 @@ const (
 	// RuntimePhaseOutput wraps the agent's payload in the envelope and, when
 	// the node declared a schema, validates it.
 	RuntimePhaseOutput RuntimePhase = "output"
-	// RuntimePhasePersist uploads result.md, output.json, the log so far and
-	// the checkpoint — before the git phases, not after. Everything from here
-	// on can fail and be retried; what the model produced is already durable
-	// and is never paid for twice.
+	// RuntimePhasePersist uploads result.md, output.json and the log so far —
+	// before the git phases, not after. Everything from here on can fail and be
+	// retried; what the model produced is already durable and is never paid for
+	// twice.
+	//
+	// "Durable" is whatever the mode makes it: the controller's spool, which
+	// does not acknowledge until the bytes are on its volume, or the object
+	// store. What the rule forbids is a paid-for result existing only in the
+	// filesystem of a pod about to be deleted; it does not require a bucket.
 	RuntimePhasePersist RuntimePhase = "persist"
 	// RuntimePhaseCommit commits what the agent left uncommitted. The agent's
 	// own commits are kept as they are.
@@ -189,8 +241,7 @@ const (
 	RuntimePhasePush RuntimePhase = "push"
 	// RuntimePhasePR creates or updates. On a retry the PR already exists.
 	RuntimePhasePR RuntimePhase = "pr"
-	// RuntimePhaseFinalize uploads the final log, the completion report and
-	// the last checkpoint.
+	// RuntimePhaseFinalize uploads the final log and the completion report.
 	RuntimePhaseFinalize RuntimePhase = "finalize"
 	// RuntimePhaseNotify posts the report to the controller. Last, and
 	// deliberately unable to change the exit code: by the time it runs, the
@@ -246,7 +297,7 @@ var ContractEnv = []string{
 	EnvAllowedTools, EnvDeniedTools,
 	EnvRepoURL, EnvGitProvider, EnvBaseBranch, EnvTargetBranch,
 	EnvCloneDepth, EnvSubmodules, EnvLFS, EnvCreatePR,
-	EnvPromptSHA256,
+	EnvPrompt, EnvPromptSHA256, EnvCompletedPhases,
 	EnvLogChunkSeconds, EnvOTLPEndpoint, EnvTraceparent,
-	EnvStorageBucket, EnvStoragePrefix, EnvImageVersion,
+	EnvArtifactMode, EnvStoragePrefix, EnvImageVersion,
 }

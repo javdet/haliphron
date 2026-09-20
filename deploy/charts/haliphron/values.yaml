@@ -35,7 +35,21 @@ backend:
   # halves then scale, roll and fail independently, which is the entire point.
   mode: all
 
-  replicaCount: 2
+  # One, and the reason is the default artifact mode rather than anything about
+  # the backend itself.
+  #
+  # Everything in the backend scales freely: the queue is FOR UPDATE SKIP
+  # LOCKED, the listeners are stateless, and two replicas were the default when
+  # results went to an object store. Relay mode puts the artifact writer on a
+  # PVC, and a ReadWriteOnce volume is mountable for writing by one node at a
+  # time — so two replicas against the default volume is a rollout that never
+  # completes.
+  #
+  # To scale the control plane out, pick one: an RWX storage class
+  # (artifacts.pvc.accessMode: ReadWriteMany), or artifacts.mode: object-store.
+  # The chart refuses the combination that does not work rather than letting it
+  # half-install.
+  replicaCount: 1
 
   # Every replica applies the schema at startup under an advisory lock, so a
   # rollout waits for its migration instead of starting against half of one.
@@ -81,8 +95,70 @@ database:
   connLifetime: 1h
 
 # -----------------------------------------------------------------------------
-# Object storage — results, logs, artifacts
+# Artifacts — results, logs, the agents' own output
 # -----------------------------------------------------------------------------
+#
+# Two modes behind one port, and the default needs nothing configured.
+#
+#   relay          pod -> controller -> backend -> the PVC below.
+#                  No object storage anywhere. This is the default because an
+#                  installation should not have to stand up MinIO to run its
+#                  first agent.
+#
+#   object-store   pod -> S3/MinIO directly, by presigned URL. The better
+#                  answer at volume — many clusters, large logs, an existing
+#                  bucket with lifecycle rules already on it — and never a
+#                  requirement.
+#
+# The key layout is identical in both, and `runs.result_ref` records which
+# store wrote each object, so switching modes keeps old runs readable.
+#
+# What relay mode costs, stated rather than discovered:
+#   - the backend is in the artifact data path, so gigabytes of logs pass
+#     through it. Bounded by maxBytesPerRun and by the log chunking that
+#     already exists.
+#   - a PVC is ReadWriteOnce on most storage classes, and the replica that
+#     serves artifact writes must then be singular. The rest of the backend
+#     scales freely on SKIP LOCKED, so this pins the artifact writer rather
+#     than the control plane — but the chart refuses replicas > 1 with an RWO
+#     volume rather than letting it fail at runtime.
+#   - no lifecycle rules for free: retention below is the backend's own reaper
+#     walking the volume by prefix age.
+artifacts:
+  mode: relay
+
+  # The volume, in relay mode.
+  pvc:
+    enabled: true
+    # ReadWriteMany here lets the backend run more than one replica. Most
+    # storage classes do not offer it; ReadWriteOnce is the honest default.
+    accessMode: ReadWriteOnce
+    size: 50Gi
+    storageClass: ""
+    # Use a volume that already exists instead of creating one.
+    existingClaim: ""
+
+  mountPath: /var/lib/haliphron/artifacts
+
+  # What one run may store, across every object it produces. Enforced by the
+  # controller, so an over-large upload is refused one hop from the pod rather
+  # than after crossing the network to the control plane.
+  maxBytesPerRun: 1Gi
+
+  # Retention. Three ages because the three kinds of object have different
+  # value: a log is worth long enough to diagnose last month's failure, a
+  # result is worth keeping because somebody paid for it.
+  #
+  # In relay mode the backend's reaper applies these. In object-store mode they
+  # are what the chart renders lifecycle rules from.
+  retention:
+    logs: 720h    # 30 days
+    results: 4320h # 180 days
+    artifacts: 2160h # 90 days
+
+# Object storage. Read only when artifacts.mode is object-store; the backend
+# refuses to start in that mode without credentials, rather than letting a run
+# work for an hour and fail its upload.
 objectStorage:
   bucket: haliphron
   region: us-east-1
@@ -426,6 +502,10 @@ postgresql:
       enabled: true
       size: 20Gi
 
+# MinIO is for evaluating object-store mode and nothing else. It is off, and it
+# stays off for an installation on the default relay mode — which is the point
+# of the default: `helm install` with nothing set produces a control plane that
+# runs an agent end to end.
 minio:
   enabled: false
   auth:

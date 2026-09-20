@@ -324,11 +324,12 @@ paths:
         identity and epoch.
 
         The payload is **references, not contents**, apart from a summary of up
-        to 64 KiB. The result is already in S3 by the time of the call
-        (ADR 15), so this call is an optimization, not a correctness condition:
-        if it did not arrive and the terminal status did, the backend marks the
-        run `CompletedWithoutResult` and restores the contents by reading
-        `runs/{runID}/` from S3.
+        to 64 KiB. The result is durable in the data plane by the time of the
+        call (ADR 15) — on the controller's spool in relay mode, in the object
+        store in the other — so this call is an optimization, not a correctness
+        condition: if it did not arrive and the terminal status did, the backend
+        marks the run `CompletedWithoutResult` and restores the contents by
+        reading `runs/{runID}/` back out of the artifact store.
 
         Idempotent on (runID, attempt).
       parameters:
@@ -345,6 +346,91 @@ paths:
           content:
             application/json:
               schema: {$ref: '#/components/schemas/CompletionIngestResponse'}
+        '400': {$ref: '#/components/responses/BadRequest'}
+        '401': {$ref: '#/components/responses/Unauthenticated'}
+        '403': {$ref: '#/components/responses/Forbidden'}
+        '404': {$ref: '#/components/responses/RunNotFound'}
+        '409': {$ref: '#/components/responses/EpochMismatch'}
+        '413': {$ref: '#/components/responses/PayloadTooLarge'}
+        '429': {$ref: '#/components/responses/RateLimited'}
+        '500': {$ref: '#/components/responses/ServerError'}
+        '503': {$ref: '#/components/responses/Unavailable'}
+
+  /ingest/artifacts:
+    post:
+      tags: [ingest]
+      operationId: ingestArtifact
+      summary: Relay one artifact from a pod
+      description: |
+        Relay mode only. The bytes a pod handed its controller, forwarded on.
+
+        This is the half of the design that makes object storage optional. The
+        pod uploaded the object to its controller, which wrote it to its own
+        volume before acknowledging — so the pod was free to exit — and is now
+        forwarding it with the usual retry and backoff. The backend writes it
+        under the key layout of section 9.2 onto its volume, and only then is
+        the controller entitled to forget its copy.
+
+        The metadata is in the query and one header, and the body is the object.
+        It is the only endpoint on this API that does not carry JSON, for the
+        reason a relay exists at all: base64 in a field would cost a third of
+        the bytes on the one path here that carries gigabytes.
+
+        The **cluster identity comes from the token**, not from a parameter.
+        Every other endpoint reads it out of a decoded body and cross-checks;
+        here there is no body to read it from, and taking it from the query
+        would let a caller name a cluster it cannot sign for.
+
+        The **run prefix is stamped by the backend** from the envelope it
+        authenticated. `key` is relative to the run — `result.md`,
+        `logs/chunks/000007.log` — exactly as the controller stamped it from the
+        CR. Neither side lets the producer of the bytes choose the prefix they
+        land under.
+
+        Idempotent: the second write of identical bytes under an identical key
+        changed nothing, and the call is retried on any network error.
+      parameters:
+        - $ref: '#/components/parameters/ControllerVersion'
+        - $ref: '#/components/parameters/Traceparent'
+        - name: runID
+          in: query
+          required: true
+          schema: {$ref: '#/components/schemas/ULID'}
+        - name: epoch
+          in: query
+          required: true
+          schema: {$ref: '#/components/schemas/Epoch'}
+        - name: attempt
+          in: query
+          required: true
+          schema: {$ref: '#/components/schemas/Attempt'}
+        - name: key
+          in: query
+          required: true
+          description: The object's key relative to the run's prefix.
+          schema: {type: string, minLength: 1, maxLength: 1024, example: 'logs/chunks/000007.log'}
+        - name: X-Haliphron-SHA256
+          in: header
+          required: false
+          description: |
+            The digest of the body as the controller spooled it, verified before
+            anything is written. A transfer that was cut is refused rather than
+            stored: a half-written `result.md` under the right key is worse than
+            none, because the `CompletedWithoutResult` recovery path would read
+            it and believe it.
+          schema: {type: string, maxLength: 64, pattern: '^[a-f0-9]{64}$'}
+      requestBody:
+        required: true
+        description: The object itself. At most 256 MiB.
+        content:
+          application/octet-stream:
+            schema: {type: string, format: binary}
+      responses:
+        '200':
+          description: On the backend's volume
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/ArtifactIngestResponse'}
         '400': {$ref: '#/components/responses/BadRequest'}
         '401': {$ref: '#/components/responses/Unauthenticated'}
         '403': {$ref: '#/components/responses/Forbidden'}
@@ -569,14 +655,28 @@ components:
 
     ObjectRef:
       type: object
-      description: A reference to an object in S3. No contents are transmitted under this contract.
-      required: [bucket, key]
+      description: |
+        A reference to an object in the artifact store. No contents are
+        transmitted under this contract.
+
+        There is deliberately no bucket. Which store holds the object is the
+        installation's business — a volume on the backend in relay mode, S3 in
+        object-store mode — and the pod is told neither. A pod that never learns
+        a bucket name cannot leak one, and a key that means the same thing in
+        both modes is what lets the mode stay invisible above the port.
+      required: [key]
       properties:
-        bucket: {type: string, minLength: 1, maxLength: 63}
         key: {type: string, minLength: 1, maxLength: 1024, example: 'runs/01J8X4K2ZQ7YB3M9F0R5W6T8CD/result.md'}
         sizeBytes: {type: integer, format: int64, minimum: 0}
         sha256: {type: string, maxLength: 64, pattern: '^[a-f0-9]{64}$'}
         contentType: {type: string, maxLength: 128}
+        uploaded:
+          type: boolean
+          description: |
+            What the backend checks before believing the reference. In relay
+            mode it is the controller's acknowledgement that the bytes reached
+            a disk that is not the pod's; in object-store mode it is the pod's
+            own PUT. A reference without it names a key nothing was written to.
 
     Problem:
       type: object
@@ -789,7 +889,7 @@ components:
         A unit of transferred work. It contains everything needed to execute
         without calling the backend (principle P4): the rendered specification,
         the secrets and capability links to S3.
-      required: [runID, epoch, attempt, ackDeadline, leaseDeadline, spec, secrets, artifacts]
+      required: [runID, epoch, attempt, ackDeadline, leaseDeadline, spec, prompt, promptSHA256, secrets, artifacts]
       properties:
         runID: {$ref: '#/components/schemas/ULID'}
         epoch: {$ref: '#/components/schemas/Epoch'}
@@ -808,6 +908,49 @@ components:
             result later with its own epoch (ADR 5, 6).
         priority: {type: integer, format: int32, description: From the queue; for scheduling on the cluster side}
         spec: {$ref: '#/components/schemas/RenderedRunSpec'}
+        prompt:
+          type: string
+          maxLength: 524288
+          description: |
+            The task, in the clear, exactly as `runs.prompt` holds it.
+
+            It travels here rather than through the artifact store because the
+            store is optional and the prompt is not: an object there would make
+            an object store a prerequisite for *starting* a run, which is the
+            one thing section 9.2 of the architecture set out to remove.
+
+            The ceiling is 512 KiB and is enforced at admission with a 413
+            naming the limit. It is not arbitrary: the controller writes this
+            into the per-run Secret, and a Secret is hard-capped at 1 MiB
+            across all of its keys together — this one also carries the git
+            token, the model key and `mcp.json`.
+
+            Handling rules that are not expressible in a schema: no-store,
+            never logged at any level, never in a span attribute. Not because
+            it is a credential, but because it is the customer's text.
+        promptSHA256:
+          type: string
+          maxLength: 64
+          pattern: '^[a-f0-9]{64}$'
+          description: |
+            Duplicates `spec.promptSHA256`, and the duplication is the point:
+            the digest in the spec is what the CR carries and the pod verifies,
+            and this one is what the controller checks `prompt` against before
+            writing a Secret. A lease whose two halves disagree is then caught
+            at materialization rather than by a pod that refuses to start.
+        completedPhases:
+          type: array
+          maxItems: 32
+          items: {$ref: '#/components/schemas/RuntimePhase'}
+          description: |
+            The attempt checkpoint of section 9.3, as the backend holds it in
+            `run_attempts.completed_phases` for this run's current epoch.
+
+            Normally empty: a lease is normally the first anyone has executed
+            this run. It is not empty when work is being re-issued after its
+            previous controller reported progress and then lost its CRs, and
+            there it is what stops the replacement attempt paying for the model
+            again.
         secrets:
           type: object
           description: |
@@ -820,14 +963,15 @@ components:
             only references. This is checked by the controller's admission
             policy.
 
-            Known keys: `git-token`, `llm-api-key`, `mcp.json`,
-            `presigned.json`. Others are passed through as they are.
+            Known keys: `git-token`, `llm-api-key`, `mcp.json`, and
+            `presigned.json` in object-store mode only. Others are passed
+            through as they are.
 
-            The prompt is deliberately not here: a k8s Secret is hard-capped at
-            1 MiB across all keys together, and the prompt is the only quantity
-            with no natural ceiling (a workflow step's context absorbs the
-            output of the previous ones). It travels through S3, see
-            `RenderedRunSpec.prompt`.
+            The prompt is not in here. It has a field of its own because it is
+            not a credential and the two are governed by different rules: every
+            key in this map becomes a file under `/haliphron/secrets`, and none
+            of them may become an environment variable, while the prompt
+            becomes exactly one.
           additionalProperties: {type: string}
         roleConfig:
           type: object
@@ -864,21 +1008,26 @@ components:
         against them across every key that affects whether a value is accepted.
         The length bounds here are not decorative: a divergence in `maxLength`
         means a lease the backend issued and the controller cannot materialize.
-      required: [agent, prompt, model, image, repo, runtime]
+      required: [agent, promptSHA256, model, image, repo, runtime]
       properties:
         agent: {$ref: '#/components/schemas/AgentType'}
-        prompt:
-          allOf:
-            - $ref: '#/components/schemas/ObjectRef'
+        promptSHA256:
+          type: string
+          maxLength: 64
+          pattern: '^[a-f0-9]{64}$'
           description: |
-            A reference to `runs/{runID}/prompt.txt`, placed there by the
-            backend during admission. The pod reads it with a presigned GET
-            from `artifacts.get['prompt.txt']`.
+            The digest of the prompt as the backend admitted it.
 
-            Through S3 rather than through the Secret: the prompt has no natural
-            ceiling, and a Secret is capped at 1 MiB. In addition, the `sha256`
-            here lets the pod verify that it is executing exactly what the
-            backend supplied.
+            The prompt text itself is not here and is not anywhere else in this
+            schema: it lives in `runs.prompt`, travels beside the spec in the
+            lease, and reaches the pod as an environment variable sourced from
+            the per-run Secret (ADR 30, 38). A field for it here would put
+            customer prompts into `kubectl get agentrun -o yaml` and into every
+            GitOps diff.
+
+            The digest is what the entrypoint verifies before it calls a model.
+            A run that executes something other than what was admitted is worse
+            than one that does not start.
         model:
           type: string
           minLength: 1
@@ -1060,9 +1209,10 @@ components:
           description: |
             How many times the controller repeats locally without asking the
             backend. Only the `infra` and `git` classes are repeated. The
-            idempotency of a repeat is provided by the
-            `runs/{runID}/state.json` checkpoint: a `run` phase already passed
-            does not call the LLM a second time (ADR 19).
+            idempotency of a repeat is provided by the attempt checkpoint of
+            section 9.3, handed to the next Job as
+            `HALIPHRON_COMPLETED_PHASES`: a `run` phase already passed does not
+            call the LLM a second time (ADR 19).
 
     ObservabilitySpec:
       type: object
@@ -1071,10 +1221,42 @@ components:
         traceparent: {type: string, maxLength: 256, description: "The parent context: workflow instance → step → attempt"}
         logChunkIntervalSeconds: {type: integer, format: int32, minimum: 1, default: 5}
 
-    # ---------- the presigned bundle ----------
+    ArtifactIngestResponse:
+      type: object
+      description: Confirms one relayed object is on the backend's volume.
+      required: [runID, ref]
+      properties:
+        runID: {$ref: '#/components/schemas/ULID'}
+        ref: {$ref: '#/components/schemas/ObjectRef'}
+        duplicate:
+          type: boolean
+          description: |
+            The same key was already written. A success for the reason a
+            duplicate completion is: the call is retried on any network error,
+            and the controller does not drop its spooled copy until it hears a
+            200.
+
+    RuntimePhase:
+      type: string
+      maxLength: 32
+      enum:
+        [init, validate, fetch, checkpoint, auth, clone, role, mcp-prepare,
+         mcp-verify, run, parse, output, persist, commit, push, pr, finalize,
+         notify]
+      description: |
+        One step of the agent image's entrypoint. The set and its order are the
+        runtime contract's, and both are contract rather than logging: the
+        checkpoint is keyed by these names, `phaseTimings` enumerates them, and
+        the UI groups a run's timeline by them.
+
+    # ---------- the artifact bundle ----------
 
     ArtifactBundleRequest:
       type: object
+      description: |
+        Asks for a fresh presigned bundle for an active lease. Meaningful only
+        in object-store mode; in relay mode there is no signature to expire and
+        the controller never makes the call.
       required: [epoch, attempt]
       properties:
         epoch: {$ref: '#/components/schemas/Epoch'}
@@ -1083,57 +1265,79 @@ components:
     ArtifactBundle:
       type: object
       description: |
-        The pod's capability access to S3 without storage credentials (ADR 14).
-        A compromised pod writes only into its own prefix and cannot read other
-        runs. The bundle is secret material: it goes into the per-run Secret,
-        not into the CR's `spec`.
-      required: [bucket, keyPrefix, put, expiresAt]
+        How this run's results reach durable storage. Two modes behind one port.
+
+        In the default **relay** mode it holds `mode` and `maxBytesPerRun` and
+        nothing else: the pod posts its artifacts to the controller Service it
+        already posts the completion to, and there is no bucket, no endpoint and
+        no signature anywhere in the lease. The controller writes them to its
+        own volume before acknowledging, then forwards them over
+        `/ingest/artifacts`.
+
+        In **object-store** mode it is the pod's whole access to the store, and
+        it holds no credential (ADR 14): capabilities to write into its own
+        prefix, and no reads at all. A compromised pod writes only into its own
+        prefix and cannot read another run's. Being bearer capabilities, it is
+        secret material and goes into the per-run Secret, never into the CR's
+        `spec`.
+      required: []
       properties:
-        bucket: {type: string}
-        region: {type: string}
-        endpoint: {type: string, description: For MinIO and S3-compatible stores}
+        mode:
+          type: string
+          maxLength: 16
+          enum: [relay, object-store]
+          description: |
+            Which half of the port is in force. An absent value reads as
+            `relay`: a controller newer than its backend must default to the
+            mode that needs no configuration, not to the one that needs a
+            bucket.
+        maxBytesPerRun:
+          type: integer
+          format: int64
+          description: |
+            What one run may store across every object it produces. Enforced by
+            the controller in relay mode, so an over-large upload is refused one
+            hop from the pod rather than after crossing the network to the
+            control plane. Zero means the installation's default.
+        bucket: {type: string, description: Object-store mode only}
+        region: {type: string, description: Object-store mode only}
+        endpoint: {type: string, description: For MinIO and S3-compatible stores; object-store mode only}
         keyPrefix: {type: string, example: 'runs/01J8X4K2ZQ7YB3M9F0R5W6T8CD/'}
         put:
           type: object
           description: |
-            Presigned PUTs to keys known in advance: `output.json`, `result.md`,
-            `state.json`, `completion.json`, `logs/agent.log`.
+            Object-store mode only. Presigned PUTs to keys known in advance:
+            `output.json`, `result.md`, `completion.json`, `logs/agent.log`.
 
             `completion.json` is the same report that goes to the controller as
             a webhook. The webhook and the forwarding to `/ingest/completion`
             live in the controller's memory: if it crashes between them the
-            report is lost, and without a copy in storage the backend will never
+            report is lost, and without a durable copy the backend will never
             learn the cost or the PR link — `result.md` and `output.json` do not
             contain them. The copy costs one PUT and makes the loss recoverable.
           additionalProperties: {$ref: '#/components/schemas/PresignedURL'}
-        get:
-          type: object
-          description: |
-            Presigned GETs. Two mandatory keys:
-
-            `prompt.txt` — without it the pod will not get its task;
-
-            `state.json` — without reading the checkpoint, an idempotent retry
-            (ADR 19) is unachievable: the pod will not learn that the `run`
-            phase is already past, and will pay for the LLM a second time. On
-            the first attempt the object does not exist yet, and a 404 on this
-            link is a normal answer rather than a failure.
-
-            An extension point for the input artifacts of workflow steps
-            (phase 3).
-          additionalProperties: {$ref: '#/components/schemas/PresignedURL'}
         post:
           type: array
-          description: POST policies for prefixes with names not known in advance — artifacts and log chunks.
+          description: |
+            Object-store mode only. POST policies for prefixes with names not
+            known in advance — artifacts and log chunks.
           items: {$ref: '#/components/schemas/PresignedPostPolicy'}
         expiresAt:
           type: string
           format: date-time
           description: |
-            The minimum over the expiries of all the links. Before creating the
-            Job for attempt > 1 the controller compares it with the expected
-            duration and, if it falls short, mints a new bundle through
+            Object-store mode only, and zero in relay mode where nothing
+            expires. The minimum over the expiries of all the links. Before
+            creating the Job for attempt > 1 the controller compares it with the
+            expected duration and, if it falls short, mints a new bundle through
             `POST /leases/{runID}/artifacts`.
+
+            There are deliberately no presigned **GETs** in this bundle. The two
+            objects the pod used to read — `prompt.txt` and `state.json` — are
+            both gone from this store: the prompt travels in the lease and the
+            checkpoint is a column in `run_attempts`. That removes exit code
+            21's most common cause and one whole class of "the run failed and
+            the reason was a URL expiry".
 
     PresignedURL:
       type: object
@@ -1263,6 +1467,24 @@ components:
         finishedAt: {type: string, format: date-time}
         exitCode: {type: integer, format: int32}
         failureClass: {$ref: '#/components/schemas/FailureClass'}
+        completedPhases:
+          type: array
+          maxItems: 32
+          items: {$ref: '#/components/schemas/RuntimePhase'}
+          description: |
+            The attempt checkpoint of section 9.3: the entrypoint phases this
+            attempt has got through, as the pod reported them to the controller.
+
+            It rides on the observation rather than on a channel of its own
+            because it is the same fact about the same attempt, and a second
+            channel would need the same epoch check, the same ordering rule and
+            the same batching.
+
+            The backend **unions** it into `run_attempts.completed_phases`
+            rather than replacing: reports arrive reordered, and a heartbeat
+            carrying an earlier snapshot must not shorten a list the fast path
+            already grew — which would hand the next attempt a checkpoint saying
+            the model had not run when it had.
         observedAt:
           type: string
           format: date-time
@@ -1475,14 +1697,25 @@ components:
         resultRef: {$ref: '#/components/schemas/ObjectRef'}
         outputRef: {$ref: '#/components/schemas/ObjectRef'}
         logRef: {$ref: '#/components/schemas/ObjectRef'}
-        stateRef: {$ref: '#/components/schemas/ObjectRef'}
+        completedPhases:
+          type: array
+          maxItems: 32
+          items: {$ref: '#/components/schemas/RuntimePhase'}
+          description: |
+            What this attempt and every earlier one got through, in execution
+            order. The per-phase reports the pod sends as it goes are the
+            primary channel; this is the copy that survives a pod whose last few
+            reports did not get through.
+
+            There is deliberately no `stateRef` beside it. The checkpoint is a
+            column in `run_attempts` now, not an object the pod wrote.
         summary:
           type: string
           maxLength: 65536
           description: |
             The first 64 KiB of `result.md` — the only content in this contract.
             Duplicated into `runs.result_summary` so that the run list in the UI
-            does not hit S3 for every row.
+            does not hit the artifact store for every row.
         repo: {$ref: '#/components/schemas/RepoResult'}
         usage: {$ref: '#/components/schemas/Usage'}
         phaseTimings:

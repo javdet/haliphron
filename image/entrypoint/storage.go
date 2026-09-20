@@ -18,9 +18,14 @@ import (
 	runv1 "github.com/automagicops/haliphron/api/run/v1"
 )
 
-// The pod's entire access to storage: a bundle of presigned capabilities and no
-// credential of its own. It can write into its own prefix and read two keys,
-// and that is the whole of ADR 14.
+// The object-store half of the Uploader port: a bundle of presigned
+// capabilities and no credential of its own.
+//
+// It can write into its own prefix and read nothing at all. The reads are gone
+// — the prompt and the checkpoint both arrive in the environment now — and with
+// them went the two failure modes that made this path fragile: a run that could
+// not start because a presigned GET had expired, and a retry that paid for the
+// model again because it could not read a checkpoint it was entitled to.
 //
 // Every failure here is exit 21, class infra, retryable — and that classing is
 // the point of the code existing at all (R3). An expired signature expressed as
@@ -36,10 +41,6 @@ type Storage struct {
 	redactor *Redactor
 }
 
-// maxGetBytes caps what a presigned GET may return. Generous against any
-// legitimate prompt or checkpoint, and finite.
-const maxGetBytes = 64 << 20
-
 // storageTimeout bounds one request. Generous, because a two-gigabyte log on a
 // slow link is a real case and the phase that uploads it is not on the critical
 // path of anything; bounded, because the alternative is a pod that hangs until
@@ -53,65 +54,6 @@ func NewStorage(bundle clusterv1.ArtifactBundle, redactor *Redactor) *Storage {
 		client:   &http.Client{Timeout: storageTimeout},
 		redactor: redactor,
 	}
-}
-
-// ErrNotFound is a 404 from a presigned GET. It is separate from every other
-// storage failure because of one caller: a 404 on state.json is the normal
-// answer on a first attempt, and an entrypoint that treated it as a failure
-// would fail every run it ever made.
-var ErrNotFound = errors.New("no such key")
-
-// Get fetches one of the bundle's readable keys.
-func (s *Storage) Get(ctx context.Context, key string) ([]byte, error) {
-	link, ok := s.bundle.Get[key]
-	if !ok {
-		return nil, fail(runv1.ExitStorage, "MissingCapability",
-			"the bundle has no presigned GET for %s", key)
-	}
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, link.URL, nil)
-	if err != nil {
-		return nil, failWrap(runv1.ExitStorage, "MalformedCapability", err, "GET %s", key)
-	}
-	for name, value := range link.Headers {
-		req.Header.Set(name, value)
-	}
-
-	resp, err := s.client.Do(req)
-	if err != nil {
-		// Unreachable storage. Retryable: the pod cannot tell a DNS hiccup from
-		// a MinIO restart, and neither is a reason to abandon a run.
-		return nil, failWrap(runv1.ExitStorage, "StorageUnreachable", s.scrub(err),
-			"GET %s", key)
-	}
-	defer func() { _ = resp.Body.Close() }()
-
-	// Capped. The two keys this bundle can read are the prompt and the
-	// checkpoint, and the prompt's content came from outside the system: an
-	// object far larger than either has any business being takes down the one
-	// process that still has to persist a paid-for result.
-	body, readErr := io.ReadAll(io.LimitReader(resp.Body, maxGetBytes+1))
-	if readErr == nil && int64(len(body)) > maxGetBytes {
-		return nil, fail(runv1.ExitStorage, "ObjectTooLarge",
-			"GET %s returned more than %d bytes", key, maxGetBytes)
-	}
-	switch {
-	case resp.StatusCode == http.StatusNotFound:
-		return nil, fmt.Errorf("%s: %w", key, ErrNotFound)
-	case resp.StatusCode == http.StatusForbidden:
-		// S3 answers 403 to an expired signature and to a forged one alike, so
-		// the pod cannot distinguish them and must not try. Both are repaired
-		// by a fresh bundle, which the controller mints before the next attempt.
-		return nil, fail(runv1.ExitStorage, "PresignedAccessDenied",
-			"GET %s was refused: the signature has expired or does not verify "+
-				"(the bundle expires at %s)", key, s.bundle.ExpiresAt.Format(time.RFC3339))
-	case resp.StatusCode != http.StatusOK:
-		return nil, fail(runv1.ExitStorage, "StorageError",
-			"GET %s: %s", key, s.summarise(resp.StatusCode, body))
-	case readErr != nil:
-		return nil, failWrap(runv1.ExitStorage, "StorageError", s.scrub(readErr),
-			"reading the body of GET %s", key)
-	}
-	return body, nil
 }
 
 // Put writes one of the bundle's known keys and returns a reference to what
@@ -157,12 +99,17 @@ func (s *Storage) Put(ctx context.Context, key string, body []byte, contentType 
 	}
 
 	sum := sha256.Sum256(clean)
+	// No bucket in the ref. Which store holds the object is the installation's
+	// business, and a pod that never puts a bucket name in a report cannot leak
+	// one. Uploaded is this pod's own PUT: in relay mode the same field is the
+	// controller's acknowledgement, and the backend checks it either way before
+	// believing the reference.
 	return &runv1.ObjectRef{
-		Bucket:      s.bundle.Bucket,
 		Key:         s.bundle.KeyPrefix + key,
 		SizeBytes:   int64(len(clean)),
 		SHA256:      hex.EncodeToString(sum[:]),
 		ContentType: contentType,
+		Uploaded:    true,
 	}, nil
 }
 
@@ -231,11 +178,11 @@ func (s *Storage) PostUnder(ctx context.Context, prefix, suffix string, body []b
 
 	sum := sha256.Sum256(clean)
 	return &runv1.ObjectRef{
-		Bucket:      s.bundle.Bucket,
 		Key:         key,
 		SizeBytes:   int64(len(clean)),
 		SHA256:      hex.EncodeToString(sum[:]),
 		ContentType: contentType,
+		Uploaded:    true,
 	}, nil
 }
 
@@ -261,6 +208,17 @@ func (s *Storage) policyFor(relative string) (clusterv1.PresignedPostPolicy, boo
 // ExpiresAt is when the bundle stops working. Reported in the log at startup so
 // that "the upload failed at minute fifty" has an obvious first suspect.
 func (s *Storage) ExpiresAt() time.Time { return s.bundle.ExpiresAt }
+
+// Mode is object-store.
+func (s *Storage) Mode() runv1.ArtifactMode { return runv1.ArtifactModeObjectStore }
+
+// Describe is the startup line. It names the expiry, because in this mode the
+// expiry is the first thing to suspect when an upload fails late in a long run.
+func (s *Storage) Describe() string {
+	return fmt.Sprintf("object store %s/%s, bundle expires %s",
+		s.bundle.Bucket, s.bundle.KeyPrefix,
+		s.bundle.ExpiresAt.UTC().Format("2006-01-02T15:04:05Z"))
+}
 
 // summarise renders a store's refusal without letting its echo of the request
 // carry a signature into the log.

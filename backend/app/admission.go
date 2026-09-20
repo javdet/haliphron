@@ -3,12 +3,12 @@ package app
 import (
 	"context"
 	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
 
 	runv1 "github.com/automagicops/haliphron/api/run/v1"
-	"github.com/automagicops/haliphron/backend/artifacts"
 	"github.com/automagicops/haliphron/backend/run"
 	"github.com/automagicops/haliphron/backend/store"
 )
@@ -17,14 +17,20 @@ import (
 //
 // REST, MCP and Slack all arrive here, and that is the point — three callers
 // with three shapes of request and one set of rules about what a run is
-// allowed to be. The order of the work inside is deliberate:
+// allowed to be.
 //
-//  1. the prompt is written to storage first, because a run whose row exists
-//     without its prompt is a run the pod cannot execute and nobody can
-//     diagnose, while a prompt whose run was never written is an orphaned
-//     object that costs a fraction of a cent;
-//  2. the spec is rendered once, and the digest of the prompt goes into it, so
-//     "the run executed what was admitted" is provable after the fact;
+// It used to begin by writing the prompt into object storage and then insert a
+// row pointing at it: two stores, two failure modes, and an object store on the
+// critical path of *starting* a run rather than finishing one. The prompt is
+// now a column, written in the same INSERT as everything else, and the whole
+// step is gone. What remains:
+//
+//  1. the request is validated, and a prompt over the ceiling is a 413 naming
+//     the limit — refused here, where the caller can summarise and try again,
+//     rather than later as a Secret the controller cannot create on a run that
+//     was already accepted;
+//  2. the spec is rendered once and carries the prompt's digest, so "the run
+//     executed what was admitted" is provable after the fact;
 //  3. placement happens at admission when a cluster is eligible, and is left
 //     to the placement loop when none is — a request that fails because a
 //     controller is mid-rollout is a request that should have waited.
@@ -125,19 +131,12 @@ func (s *Service) submit(ctx context.Context, req run.SubmitRequest) (Submitted,
 		return Submitted{}, err
 	}
 
-	prompt := []byte(req.Prompt)
-	digest := sha256.Sum256(prompt)
-	key := artifacts.Key(id, runv1.StorageKeyPrompt)
-	if err := s.artifacts.Put(ctx, key, prompt, "text/plain; charset=utf-8"); err != nil {
-		return Submitted{}, fmt.Errorf("write prompt for %s: %w", id, err)
-	}
-	spec.Prompt = runv1.ObjectRef{
-		Bucket:      s.artifacts.Bucket(),
-		Key:         key,
-		SizeBytes:   int64(len(prompt)),
-		SHA256:      fmt.Sprintf("%x", digest),
-		ContentType: "text/plain; charset=utf-8",
-	}
+	// The digest is over the bytes as admitted, and it is the only thing about
+	// the prompt that travels in the spec. The pod checks the value it is given
+	// against it and refuses to run on a mismatch, which is the one property
+	// the old presigned GET bought and the one worth keeping.
+	digest := sha256.Sum256([]byte(req.Prompt))
+	spec.PromptSHA256 = hex.EncodeToString(digest[:])
 
 	encoded, err := json.Marshal(spec)
 	if err != nil {
@@ -157,6 +156,7 @@ func (s *Service) submit(ctx context.Context, req run.SubmitRequest) (Submitted,
 		CreatedVia:     req.CreatedVia,
 		Priority:       req.Priority,
 		Spec:           encoded,
+		Prompt:         req.Prompt,
 		PromptSHA256:   digest[:],
 		Agent:          spec.Agent,
 		Model:          spec.Model,

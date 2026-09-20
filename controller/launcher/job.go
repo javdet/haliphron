@@ -86,7 +86,13 @@ type Builder struct {
 // cluster would reject anyway — an unparsable quantity above all — so that the
 // failure is reported as a rejection before anything is created rather than as
 // a pod that never schedules.
-func (b Builder) Job(cr *agentrunv1alpha1.AgentRun, attempt int32) (*batchv1.Job, error) {
+//
+// completedPhases is the checkpoint of section 9.3: what any earlier attempt of
+// this run got through. It is a parameter rather than read from the status
+// because the caller is the one that knows whether it is building the current
+// attempt or dry-running a preflight, and a preflight that replayed a
+// checkpoint would produce a pod spec the real attempt does not match.
+func (b Builder) Job(cr *agentrunv1alpha1.AgentRun, attempt int32, completedPhases []runv1.RuntimePhase) (*batchv1.Job, error) {
 	if attempt < 1 {
 		return nil, fmt.Errorf("launcher: attempt %d is not a counting number", attempt)
 	}
@@ -143,7 +149,7 @@ func (b Builder) Job(cr *agentrunv1alpha1.AgentRun, attempt int32) (*batchv1.Job
 						Name:            ContainerName,
 						Image:           spec.Image,
 						ImagePullPolicy: corev1.PullPolicy(spec.ImagePullPolicy),
-						Env:             b.env(cr, attempt),
+						Env:             b.env(cr, attempt, completedPhases),
 						Resources:       resources,
 						VolumeMounts:    volumeMounts(cr),
 						SecurityContext: &corev1.SecurityContext{
@@ -187,16 +193,29 @@ func (b Builder) deadlineSlack() int64 {
 	return DefaultDeadlineSlackSeconds
 }
 
-// env is the non-secret half of the runtime contract. Everything secret is a
-// file under MountSecrets instead: a variable lands in /proc/self/environ,
-// which every child process inherits — including the agent, the one process in
-// this system explicitly assumed to be capable of exfiltrating what it reads.
+// env is the non-secret half of the runtime contract, plus the one variable
+// that is neither secret nor a literal.
+//
+// Secret material is a file under MountSecrets: a literal variable lands in
+// /proc/self/environ, which every child process inherits — including the agent,
+// the one process in this system explicitly assumed to be capable of
+// exfiltrating what it reads.
+//
+// The prompt is the exception, and it is set through valueFrom.secretKeyRef
+// rather than as a value. It is not a credential — it is the task, the one
+// thing the agent is meant to read, and nothing is protected by withholding it
+// from the process whose purpose is to act on it. What secretKeyRef buys over
+// a literal is that the text stays out of the Job's spec and out of
+// `kubectl describe pod`, which matters because prompts carry customer context.
+// What it buys over envFrom is that it names one key: envFrom is the failure
+// mode ADR 33 actually describes, where half a Secret's keys are not valid
+// variable names and vanish silently.
 //
 // Optional variables are set whenever the spec has an answer, including the
 // boolean ones. The image reads an absent boolean as false, so leaving
 // HALIPHRON_CREATE_PR unset is not "use the default" — it is "do not open a
 // pull request", on a run whose spec said to open one.
-func (b Builder) env(cr *agentrunv1alpha1.AgentRun, attempt int32) []corev1.EnvVar {
+func (b Builder) env(cr *agentrunv1alpha1.AgentRun, attempt int32, completedPhases []runv1.RuntimePhase) []corev1.EnvVar {
 	spec := cr.Spec.RenderedRunSpec
 	vals := map[string]string{
 		runv1.EnvContract:       strconv.Itoa(runv1.ContractMajor),
@@ -208,9 +227,15 @@ func (b Builder) env(cr *agentrunv1alpha1.AgentRun, attempt int32) []corev1.EnvV
 		runv1.EnvAgent:          string(spec.Agent),
 		runv1.EnvModel:          spec.Model,
 		runv1.EnvTimeoutSeconds: strconv.Itoa(int(spec.Runtime.TimeoutSeconds)),
-		runv1.EnvPromptSHA256:   spec.Prompt.SHA256,
-		runv1.EnvStorageBucket:  spec.Prompt.Bucket,
+		runv1.EnvPromptSHA256:   spec.PromptSHA256,
+		runv1.EnvArtifactMode:   string(artifactMode(cr)),
 		runv1.EnvStoragePrefix:  fmt.Sprintf(runv1.StoragePrefixRun, cr.Spec.RunID),
+	}
+	// Absent on the first attempt, which the entrypoint reads as "nothing is
+	// done yet" — the same non-event the old 404 on state.json was. Set as a
+	// literal because it is neither secret nor large: eighteen phase names.
+	if len(completedPhases) > 0 {
+		vals[runv1.EnvCompletedPhases] = joinPhases(completedPhases)
 	}
 	setIf(vals, runv1.EnvRole, spec.Role)
 	setIf(vals, runv1.EnvPermissionMode, string(spec.Runtime.PermissionMode))
@@ -253,14 +278,59 @@ func (b Builder) env(cr *agentrunv1alpha1.AgentRun, attempt int32) []corev1.EnvV
 	for _, name := range names {
 		out = append(out, corev1.EnvVar{Name: name, Value: vals[name]})
 	}
-	// Free-form extras from the spec, last so that a run cannot quietly
-	// redefine a contract variable ahead of it. The backend is obliged not to
-	// put secrets here; no schema can check the contents of a string, so the
-	// obligation is held by a contract test instead.
+	// Free-form extras from the spec, before the prompt so that a run cannot
+	// quietly redefine a contract variable ahead of it. The backend is obliged
+	// not to put secrets here; no schema can check the contents of a string, so
+	// the obligation is held by a contract test instead.
 	for _, e := range spec.Runtime.Env {
 		out = append(out, corev1.EnvVar{Name: e.Name, Value: e.Value})
 	}
+
+	// Last, and the only entry with no Value. Optional on the reference so that
+	// a Secret written by an older controller — one that predates the key —
+	// leaves the pod starting and failing at its validate phase with a message
+	// about a missing prompt, rather than stuck in
+	// CreateContainerConfigError with a message about a Secret key.
+	optional := true
+	out = append(out, corev1.EnvVar{
+		Name: runv1.EnvPrompt,
+		ValueFrom: &corev1.EnvVarSource{
+			SecretKeyRef: &corev1.SecretKeySelector{
+				LocalObjectReference: corev1.LocalObjectReference{Name: cr.Spec.Materials.SecretName},
+				Key:                  runv1.SecretKeyPrompt,
+				Optional:             &optional,
+			},
+		},
+	})
 	return out
+}
+
+// artifactMode is what the pod is told about where its results go. An empty
+// value in the spec reads as relay: a CR written by a controller that predates
+// the field belongs to an installation that had no other mode.
+func artifactMode(cr *agentrunv1alpha1.AgentRun) runv1.ArtifactMode {
+	if cr.Spec.ArtifactMode == runv1.ArtifactModeObjectStore {
+		return runv1.ArtifactModeObjectStore
+	}
+	return runv1.ArtifactModeRelay
+}
+
+// joinPhases renders the checkpoint for the environment, in the contract's
+// execution order rather than whatever order the reports arrived in. The
+// entrypoint's resume rule is "every phase before the first unfinished one is
+// done", which is only meaningful against a fixed sequence.
+func joinPhases(phases []runv1.RuntimePhase) string {
+	seen := make(map[runv1.RuntimePhase]bool, len(phases))
+	for _, p := range phases {
+		seen[p] = true
+	}
+	out := make([]string, 0, len(seen))
+	for _, p := range runv1.RuntimePhases {
+		if seen[p] {
+			out = append(out, string(p))
+		}
+	}
+	return strings.Join(out, ",")
 }
 
 func setIf(vals map[string]string, key, value string) {
@@ -273,8 +343,12 @@ func setIf(vals map[string]string, key, value string) {
 // a volume rather than envFrom because its keys — git-token, mcp.json,
 // presigned.json — are not valid environment variable names, and envFrom skips
 // such keys silently. The pod would start with no token, no MCP configuration
-// and no link to storage, and the first intelligible symptom would be "could
-// not download the prompt".
+// and no credentials at all, and the first intelligible symptom would be a
+// clone that failed to authenticate.
+//
+// The same Secret is also the source of one environment variable, the prompt,
+// through a secretKeyRef naming that one key. Naming one key is exactly the
+// difference between that and envFrom.
 func volumeMounts(cr *agentrunv1alpha1.AgentRun) []corev1.VolumeMount {
 	mounts := []corev1.VolumeMount{
 		{Name: volWorkspace, MountPath: runv1.MountWorkspace},

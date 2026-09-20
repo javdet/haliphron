@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"strings"
 	"testing"
@@ -15,45 +16,83 @@ import (
 	"github.com/automagicops/haliphron/backend/store"
 )
 
-// The prompt travels through object storage rather than the lease, because a
-// workflow step's prompt absorbs the output of previous steps and has no
-// natural ceiling, while a Secret is capped at 1 MiB for all its keys together.
-// The digest is what makes "the run executed what was admitted" provable after
-// the fact: the pod refuses to run on a mismatch.
-func TestAdmissionWritesThePromptAndFreezesItsDigest(t *testing.T) {
+// The prompt is a column, and admission is the only place it is written.
+//
+// It used to be an object in storage, referenced by a digest. Moving it is what
+// took the artifact store off the path to *starting* a run: nothing between an
+// admitted run and a pod executing it touches that store any more.
+//
+// The digest survives the move and is what makes "the run executed what was
+// admitted" provable after the fact — the pod refuses to run on a mismatch.
+func TestAdmissionStoresThePromptAndFreezesItsDigest(t *testing.T) {
 	h := newHarness(t)
 	const prompt = "add a health endpoint and a test for it"
 	admitted := h.Submit(func(r *run.SubmitRequest) { r.Prompt = prompt })
 
-	stored, err := h.Artifacts.Get(context.Background(),
-		artifacts.Key(admitted.ID, runv1.StorageKeyPrompt))
+	stored, err := h.Store.Prompt(context.Background(), admitted.ID)
 	if err != nil {
 		t.Fatalf("read the prompt back: %v", err)
 	}
-	if string(stored) != prompt {
+	if stored != prompt {
 		t.Errorf("stored prompt = %q, want %q", stored, prompt)
 	}
 
 	digest := sha256.Sum256([]byte(prompt))
 	if fmt.Sprintf("%x", admitted.PromptSHA256) != fmt.Sprintf("%x", digest) {
-		t.Errorf("the run's digest does not match what was written")
+		t.Errorf("the run's digest does not match what was stored")
 	}
 
 	var spec runv1.RenderedRunSpec
 	if err := json.Unmarshal(admitted.Spec, &spec); err != nil {
 		t.Fatalf("decode spec: %v", err)
 	}
-	if spec.Prompt.SHA256 != fmt.Sprintf("%x", digest) {
-		t.Errorf("spec digest = %s, want %x", spec.Prompt.SHA256, digest)
+	if spec.PromptSHA256 != fmt.Sprintf("%x", digest) {
+		t.Errorf("spec digest = %s, want %x", spec.PromptSHA256, digest)
 	}
-	if spec.Prompt.Key != artifacts.Key(admitted.ID, runv1.StorageKeyPrompt) {
-		t.Errorf("spec points at %s, want the run's own prefix", spec.Prompt.Key)
+	// And the text is nowhere in the spec. A field for it there would put
+	// customer prompts into every `kubectl get agentrun -o yaml` and into every
+	// GitOps diff.
+	if strings.Contains(string(admitted.Spec), prompt) {
+		t.Error("the rendered spec carries the prompt text")
 	}
-	if spec.Prompt.Bucket == "" {
-		t.Error("the spec does not name a bucket, so the pod cannot address the prompt")
+
+	// Nor is there an object. The one that used to be here is what made an
+	// object store a prerequisite for starting a run.
+	if _, err := h.Artifacts.Get(context.Background(),
+		artifacts.Key(admitted.ID, "prompt.txt")); err == nil {
+		t.Error("admission wrote a prompt object as well")
 	}
-	if spec.Prompt.SizeBytes != int64(len(prompt)) {
-		t.Errorf("size = %d, want %d", spec.Prompt.SizeBytes, len(prompt))
+}
+
+// The ceiling is stated rather than discovered, and it is a 413 rather than a
+// 422: the request was well formed and too big, which is the one refusal a
+// caller can act on mechanically by summarising and trying again.
+//
+// It is refused here rather than by the controller because the alternative is a
+// run that is accepted, assigned, leased, and then fails to materialise because
+// the per-run Secret would exceed 1 MiB — minutes later, in a cluster, as a
+// configuration failure on work the user believed had started.
+func TestAdmissionRefusesAPromptOverTheCeiling(t *testing.T) {
+	h := newHarness(t)
+
+	_, err := h.App.Submit(context.Background(), run.SubmitRequest{
+		Prompt: strings.Repeat("x", run.MaxPromptBytes+1), CreatedBy: "t", CreatedVia: "api",
+	}, app.SubmitOptions{})
+
+	var tooLarge *run.PromptTooLargeError
+	if !errors.As(err, &tooLarge) {
+		t.Fatalf("got %v, want a PromptTooLargeError", err)
+	}
+	if tooLarge.Limit != run.MaxPromptBytes {
+		t.Errorf("the refusal names a limit of %d, want %d", tooLarge.Limit, run.MaxPromptBytes)
+	}
+
+	// And one byte under the ceiling is admitted, so the boundary is where it
+	// says it is rather than somewhere near it.
+	if _, err := h.App.Submit(context.Background(), run.SubmitRequest{
+		Prompt: strings.Repeat("x", run.MaxPromptBytes), CreatedBy: "t", CreatedVia: "api",
+	}, app.SubmitOptions{}); err != nil {
+		t.Errorf("a prompt of exactly the limit was refused: %v", err)
 	}
 }
 

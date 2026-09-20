@@ -116,6 +116,11 @@ func storageCodeFor(status int) string {
 // deliveries. A non-positive count means every delivery until it is cleared —
 // the setup for the checklist row that says an undelivered webhook must not
 // change the exit code.
+//
+// It covers the completion webhook and nothing else. A relayed artifact takes
+// the pod's write path, which FailStorage controls in both modes: a test that
+// wants "the controller is unreachable for the report" must not also break the
+// upload of the result the report is about.
 func (c *ControlPlane) FailCallback(status, count int) {
 	c.mu.Lock()
 	defer c.mu.Unlock()

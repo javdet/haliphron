@@ -41,6 +41,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("POST "+p+"/leases/{runID}/artifacts", s.artifacts)
 	mux.HandleFunc("POST "+p+"/ingest/status", s.ingestStatus)
 	mux.HandleFunc("POST "+p+"/ingest/completion", s.ingestCompletion)
+	mux.HandleFunc("POST "+p+"/ingest/artifacts", s.ingestArtifacts)
 
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if !s.preflight(w, r) {
@@ -54,14 +55,23 @@ func (s *Server) Handler() http.Handler {
 // body: the size ceiling and the version window. Both answer with an action,
 // so the controller never has to infer behaviour from the number.
 func (s *Server) preflight(w http.ResponseWriter, r *http.Request) bool {
-	if r.ContentLength > clusterv1.MaxRequestBytes {
+	// The artifact relay is the one endpoint whose body is not JSON but an
+	// object, so it gets its own ceiling. Everything else is a message about
+	// runs, and a megabyte is generous for one.
+	limit := int64(clusterv1.MaxRequestBytes)
+	name := "1 MiB"
+	if strings.HasSuffix(r.URL.Path, "/ingest/artifacts") {
+		limit = clusterv1.MaxArtifactBytes
+		name = "256 MiB"
+	}
+	if r.ContentLength > limit {
 		s.problem(w, clusterv1.Problem{
-			Title: "body exceeds 1 MiB", Status: http.StatusRequestEntityTooLarge,
+			Title: "body exceeds " + name, Status: http.StatusRequestEntityTooLarge,
 			Code: clusterv1.CodePayloadTooLarge, Action: clusterv1.ActionFatal,
 		})
 		return false
 	}
-	r.Body = http.MaxBytesReader(w, r.Body, clusterv1.MaxRequestBytes)
+	r.Body = http.MaxBytesReader(w, r.Body, limit)
 
 	// Mandatory on every request, including /register: in a multi-cluster
 	// installation there is otherwise no telling which version sent what, and
@@ -246,6 +256,61 @@ func (s *Server) ingestCompletion(w http.ResponseWriter, r *http.Request) {
 
 	resp, err := s.app.IngestCompletion(r.Context(), cluster, req)
 	if err != nil {
+		s.fail(w, r, req.RunID, err)
+		return
+	}
+	s.write(w, http.StatusOK, resp)
+}
+
+// ingestArtifacts accepts one relayed object.
+//
+// It is the only endpoint here that does not decode a JSON body, because the
+// body is the object: base64 in a field would cost a third of the bytes on the
+// one path in this system that carries gigabytes. The metadata is therefore in
+// the query and one header, and the request is streamed into the store rather
+// than read into memory — a control plane that buffers every artifact is a
+// control plane that an agent can exhaust with one log.
+func (s *Server) ingestArtifacts(w http.ResponseWriter, r *http.Request) {
+	q := r.URL.Query()
+	req := clusterv1.ArtifactIngestRequest{
+		RunID:       runv1.ULID(q.Get(clusterv1.QueryRunID)),
+		Key:         q.Get(clusterv1.QueryKey),
+		ContentType: r.Header.Get("Content-Type"),
+		SHA256:      r.Header.Get(clusterv1.HeaderArtifactSHA256),
+		SizeBytes:   r.ContentLength,
+	}
+	req.Epoch, _ = strconv.ParseInt(q.Get(clusterv1.QueryEpoch), 10, 64)
+	if attempt, err := strconv.ParseInt(q.Get(clusterv1.QueryAttempt), 10, 32); err == nil {
+		req.Attempt = int32(attempt)
+	}
+	if req.RunID == "" || req.Key == "" {
+		s.problem(w, clusterv1.Problem{
+			Title: "an artifact must name its run and its key", Status: http.StatusBadRequest,
+			Code: clusterv1.CodeInvalidRequest, Action: clusterv1.ActionFatal,
+		})
+		return
+	}
+
+	// The cluster comes from the token rather than from the query. Every other
+	// endpoint reads it out of a decoded body and cross-checks; here there is
+	// no body to read it from, and taking it from a parameter would let a
+	// caller name a cluster it cannot sign for.
+	cluster, ok := s.authenticate(w, r, "")
+	if !ok {
+		return
+	}
+	req.ClusterID = cluster.ID
+
+	resp, err := s.app.IngestArtifact(r.Context(), cluster, req, r.Body)
+	if err != nil {
+		var tooLarge *http.MaxBytesError
+		if errors.As(err, &tooLarge) {
+			s.problem(w, clusterv1.Problem{
+				Title: "the artifact exceeds 256 MiB", Status: http.StatusRequestEntityTooLarge,
+				Code: clusterv1.CodePayloadTooLarge, Action: clusterv1.ActionFatal, RunID: req.RunID,
+			})
+			return
+		}
 		s.fail(w, r, req.RunID, err)
 		return
 	}

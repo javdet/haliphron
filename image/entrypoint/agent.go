@@ -233,7 +233,7 @@ const agentGraceOnTimeout = 30 * time.Second
 func phaseRun(ctx context.Context, r *Run) error {
 	if r.resumed {
 		return skip("attempt %d already completed this phase; the model is not called twice",
-			r.prior.Attempt)
+			r.cfg.Attempt-1)
 	}
 	rt, err := runtimeFor(r.cfg.Agent)
 	if err != nil {
@@ -274,12 +274,6 @@ func phaseRun(ctx context.Context, r *Run) error {
 	if r.agent.SessionID != "" {
 		r.agent.Usage.SessionID = r.agent.SessionID
 	}
-	r.checkpoint.Agent = &CheckpointAgent{
-		SessionID: r.agent.SessionID,
-		ExitCode:  r.agent.ExitCode,
-		Usage:     r.agent.Usage,
-	}
-
 	switch {
 	case errors.Is(budget.Err(), context.DeadlineExceeded):
 		// Exit 11, and the pipeline goes on. parse, output, persist, commit,
@@ -307,7 +301,7 @@ func phaseRun(ctx context.Context, r *Run) error {
 // should say so in its timings.
 func phaseParse(_ context.Context, r *Run) error {
 	if r.resumed {
-		return skip("the result of attempt %d is already in storage", r.prior.Attempt)
+		return skip("an earlier attempt already produced and stored the result")
 	}
 	r.summary = ResultMarkdown(r.cfg, r.agent.Text, r.exitCodeSoFar(), r.failure, r.timings)
 	if r.agent.Usage != nil {

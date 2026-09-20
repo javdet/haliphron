@@ -49,6 +49,46 @@ func textArray(in []string) string {
 	return "{" + strings.Join(quoted, ",") + "}"
 }
 
+// runtimePhaseArray renders the checkpoint for a runtime_phase[] column. It
+// deduplicates and keeps the contract's execution order rather than the order
+// the reports happened to arrive in: the column is read back as "what is done",
+// and a list ordered by arrival is a list that reads differently after a
+// retry that reported out of sequence.
+func runtimePhaseArray(in []runv1.RuntimePhase) string {
+	seen := make(map[runv1.RuntimePhase]bool, len(in))
+	for _, p := range in {
+		seen[p] = true
+	}
+	out := make([]string, 0, len(seen))
+	for _, p := range runv1.RuntimePhases {
+		if seen[p] {
+			out = append(out, string(p))
+		}
+	}
+	return textArray(out)
+}
+
+// runtimePhases converts a scanned text array back. A value this build does not
+// recognise is dropped rather than carried: the list is handed to an entrypoint
+// as "phases you may skip", and skipping a phase whose name means nothing here
+// is the one way this column could cost money.
+func runtimePhases(in []string) []runv1.RuntimePhase {
+	known := make(map[string]bool, len(runv1.RuntimePhases))
+	for _, p := range runv1.RuntimePhases {
+		known[string(p)] = true
+	}
+	var out []runv1.RuntimePhase
+	for _, p := range runv1.RuntimePhases {
+		for _, got := range in {
+			if got == string(p) && known[got] {
+				out = append(out, p)
+				break
+			}
+		}
+	}
+	return out
+}
+
 func agentTypeArray(in []runv1.AgentType) string {
 	out := make([]string, 0, len(in))
 	for _, a := range in {

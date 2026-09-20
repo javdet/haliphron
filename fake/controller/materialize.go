@@ -142,10 +142,20 @@ func (c *Controller) buildSecret(lease clusterv1.Lease, state *runState, owner m
 	for k, v := range lease.Secrets {
 		data[k] = []byte(v)
 	}
-	// The presigned bundle is a bearer capability on a bucket prefix, so it
-	// belongs here and not in the CR or an environment variable.
-	if bundle, err := json.Marshal(lease.Artifacts); err == nil {
-		data[runv1.SecretKeyPresigned] = bundle
+	// The prompt is a Secret key rather than a CR field. It is not a
+	// credential — it is the task — but prompts carry customer context, and in
+	// the spec they would land in `kubectl get agentrun -o yaml` and in every
+	// GitOps diff. It reaches the container through valueFrom.secretKeyRef,
+	// which keeps it out of the Job's spec as well.
+	data[runv1.SecretKeyPrompt] = []byte(lease.Prompt)
+
+	// The presigned bundle is object-store mode only. In relay mode there is
+	// nothing to sign — the pod posts to the controller — and writing an empty
+	// bundle would give the entrypoint a mode to misread.
+	if !lease.Artifacts.Relay() {
+		if bundle, err := json.Marshal(lease.Artifacts); err == nil {
+			data[runv1.SecretKeyPresigned] = bundle
+		}
 	}
 	data[runv1.SecretKeyCallbackToken] = []byte(state.callbackToken)
 
@@ -200,7 +210,12 @@ func (c *Controller) buildJob(state *runState) *batchv1.Job {
 	activeDeadline := int64(spec.Runtime.TimeoutSeconds) + 600
 	grace := int64(30)
 	runAsNonRoot, readOnlyRoot, noEscalation := true, true, false
-	var runAsUser int64 = 65532
+	// 1000, matching the image's USER line. The CLI caches live in /home/agent
+	// owned by uid 1000, so a pod that runs as anyone else finds them in a
+	// directory it does not own — and the real controller uses 1000, so a fake
+	// that used anything else would have the backend track asserting on a pod
+	// nobody builds.
+	var runAsUser int64 = 1000
 	automount := false
 	var secretMode int32 = 0400
 
@@ -291,9 +306,25 @@ func (c *Controller) containerEnv(state *runState) []corev1.EnvVar {
 		runv1.EnvGitProvider:    string(spec.Repo.Provider),
 		runv1.EnvBaseBranch:     spec.Repo.BaseBranch,
 		runv1.EnvTargetBranch:   spec.Repo.TargetBranch,
-		runv1.EnvPromptSHA256:   spec.Prompt.SHA256,
-		runv1.EnvStorageBucket:  state.lease.Artifacts.Bucket,
-		runv1.EnvStoragePrefix:  state.lease.Artifacts.KeyPrefix,
+		runv1.EnvPromptSHA256:   spec.PromptSHA256,
+		runv1.EnvArtifactMode:   string(artifactMode(state.lease)),
+		runv1.EnvStoragePrefix:  fmt.Sprintf(runv1.StoragePrefixRun, state.runID),
+		// The image reads an absent boolean as false, so leaving these unset is
+		// not "use the default" — it is "do not open a pull request", on a run
+		// whose spec said to open one.
+		runv1.EnvCreatePR:   strconv.FormatBool(spec.Repo.CreatePR == nil || *spec.Repo.CreatePR),
+		runv1.EnvSubmodules: strconv.FormatBool(spec.Repo.Submodules),
+		runv1.EnvLFS:        strconv.FormatBool(spec.Repo.LFS),
+	}
+	if spec.Repo.CloneDepth > 0 {
+		vals[runv1.EnvCloneDepth] = strconv.Itoa(int(spec.Repo.CloneDepth))
+	}
+	if len(state.lease.CompletedPhases) > 0 {
+		names := make([]string, 0, len(state.lease.CompletedPhases))
+		for _, phase := range state.lease.CompletedPhases {
+			names = append(names, string(phase))
+		}
+		vals[runv1.EnvCompletedPhases] = strings.Join(names, ",")
 	}
 	if spec.Runtime.MaxTurns > 0 {
 		vals[runv1.EnvMaxTurns] = strconv.Itoa(int(spec.Runtime.MaxTurns))
@@ -325,7 +356,33 @@ func (c *Controller) containerEnv(state *runState) []corev1.EnvVar {
 	for _, e := range spec.Runtime.Env {
 		out = append(out, corev1.EnvVar{Name: e.Name, Value: e.Value})
 	}
+
+	// Last, and the only entry with no Value: the prompt, from one named key of
+	// the per-run Secret. Naming one key is what separates this from the envFrom
+	// failure mode ADR 33 describes.
+	optional := true
+	out = append(out, corev1.EnvVar{
+		Name: runv1.EnvPrompt,
+		ValueFrom: &corev1.EnvVarSource{
+			SecretKeyRef: &corev1.SecretKeySelector{
+				LocalObjectReference: corev1.LocalObjectReference{
+					Name: agentrunv1alpha1.SecretName(state.runID),
+				},
+				Key:      runv1.SecretKeyPrompt,
+				Optional: &optional,
+			},
+		},
+	})
 	return out
+}
+
+// artifactMode is what the pod is told about where its results go. An empty
+// mode reads as relay, matching the real controller.
+func artifactMode(lease clusterv1.Lease) runv1.ArtifactMode {
+	if lease.Artifacts.Mode == runv1.ArtifactModeObjectStore {
+		return runv1.ArtifactModeObjectStore
+	}
+	return runv1.ArtifactModeRelay
 }
 
 func volumeMounts(lease clusterv1.Lease) []corev1.VolumeMount {

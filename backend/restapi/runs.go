@@ -2,6 +2,7 @@ package restapi
 
 import (
 	"encoding/json"
+	"io"
 	"net/http"
 	"time"
 
@@ -255,24 +256,66 @@ func (s *Server) getRun(w http.ResponseWriter, r *http.Request, _ caller) {
 	s.write(w, http.StatusOK, RunView(item))
 }
 
-// runResult redirects to a presigned link rather than proxying the bytes.
+// runResult serves a stored object, by streaming it or by redirecting to it.
 //
-// The object store is already reachable from wherever the caller is — it is
-// where the pod wrote the result from inside a cluster — and putting every byte
-// of every result through one process is how a control plane becomes a
-// bandwidth bottleneck for work it did not do.
+// Which of the two depends on the artifact mode, and the difference is not
+// cosmetic. With an object store the bytes are already reachable from wherever
+// the caller is — it is where the pod wrote them from inside a cluster — and
+// putting every byte of every result through one process is how a control plane
+// becomes a bandwidth bottleneck for work it did not do. Without one the
+// backend holds the volume and is the only thing that can serve it, so it does.
+//
+// The choice is the service's; this handler only knows which half of
+// ResultAccess came back.
 func (s *Server) runResult(w http.ResponseWriter, r *http.Request, _ caller) {
 	key := r.URL.Query().Get("key")
-	url, err := s.app.ResultLink(r.Context(), runv1.ULID(r.PathValue("id")), key, 15*time.Minute)
+	access, err := s.app.Result(r.Context(), runv1.ULID(r.PathValue("id")), key, 15*time.Minute)
 	if err != nil {
 		s.failFor(w, r, err)
 		return
 	}
-	// The link is a bearer capability with a short life, so the redirect must
-	// not be cached anywhere between here and the caller.
+
+	if access.RedirectURL != "" {
+		// The link is a bearer capability with a short life, so the redirect
+		// must not be cached anywhere between here and the caller.
+		w.Header().Set("Cache-Control", "no-store")
+		w.Header().Set("Location", access.RedirectURL)
+		w.WriteHeader(http.StatusFound)
+		return
+	}
+
+	defer func() { _ = access.Body.Close() }()
+	w.Header().Set("Content-Type", access.ContentType)
 	w.Header().Set("Cache-Control", "no-store")
-	w.Header().Set("Location", url)
-	w.WriteHeader(http.StatusFound)
+	// Nothing sniffs the body: a result.md is whatever an agent wrote, and a
+	// browser that decides for itself that it is HTML will render it.
+	w.Header().Set("X-Content-Type-Options", "nosniff")
+	if _, err := io.Copy(w, access.Body); err != nil {
+		// The status is long gone; there is nothing to tell the caller that
+		// their connection has not already told them.
+		s.log.Warn("streaming a result was cut short",
+			"run", r.PathValue("id"), "key", access.Key, "error", err)
+	}
+}
+
+// runLogChunk streams one log chunk. Relay mode only: with an object store the
+// listing hands out presigned links and no caller arrives here.
+func (s *Server) runLogChunk(w http.ResponseWriter, r *http.Request, _ caller) {
+	body, err := s.app.LogChunkBody(r.Context(),
+		runv1.ULID(r.PathValue("id")), r.PathValue("chunk"))
+	if err != nil {
+		s.failFor(w, r, err)
+		return
+	}
+	defer func() { _ = body.Close() }()
+
+	w.Header().Set("Content-Type", "text/plain; charset=utf-8")
+	w.Header().Set("Cache-Control", "no-store")
+	w.Header().Set("X-Content-Type-Options", "nosniff")
+	if _, err := io.Copy(w, body); err != nil {
+		s.log.Warn("streaming a log chunk was cut short",
+			"run", r.PathValue("id"), "chunk", r.PathValue("chunk"), "error", err)
+	}
 }
 
 func (s *Server) runLogs(w http.ResponseWriter, r *http.Request, _ caller) {

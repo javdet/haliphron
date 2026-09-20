@@ -9,14 +9,20 @@
 // this package is, and it is why the image track can be verified with a single
 // `docker run` rather than a cluster.
 //
+// It serves both halves of the ArtifactStore port, because the image implements
+// both. In relay mode it accepts the pod's artifacts on the same endpoint that
+// takes its completion, which is what a controller does; in object-store mode
+// it serves signed links, which is what S3 does. Relay is the default, matching
+// what an installation gets without configuration.
+//
 // What it is not: MinIO. Objects live in a map and the links are signed with
 // HMAC over the method, the key and the expiry. What the image must get right
 // is the shape of the exchange and the answers it gets when things go wrong —
-// 403 on an expired signature, 404 on a checkpoint nobody has written yet, a
-// POST policy that refuses a key outside its prefix — and those are
+// 403 on an expired signature, a POST policy that refuses a key outside its
+// prefix, a 413 on a run that has spent its artifact budget — and those are
 // implemented exactly, because every one of them is a row in the contract's
-// test checklist. Where a real S3 would differ in a way the image can observe,
-// the comment says so.
+// test checklist. Where a real S3 or a real controller would differ in a way
+// the image can observe, the comment says so.
 //
 // A fake that is merely permissive is worse than no fake: it teaches the image
 // habits MinIO will reject.
@@ -47,6 +53,14 @@ const (
 	maxObjectBytes = 256 << 20
 )
 
+// artifactModeOrRelay is the configured mode, defaulting to relay.
+func (c *ControlPlane) artifactModeOrRelay() runv1.ArtifactMode {
+	if c.artifactMode == runv1.ArtifactModeObjectStore {
+		return runv1.ArtifactModeObjectStore
+	}
+	return runv1.ArtifactModeRelay
+}
+
 // ControlPlane is the fake. Safe for concurrent use: the entrypoint uploads log
 // chunks from a background goroutine while the main one is still running the
 // agent, and "the final log and the chunks agree" is a property worth testing
@@ -58,6 +72,12 @@ type ControlPlane struct {
 	baseURL string
 	signKey []byte
 	ttl     time.Duration
+
+	// artifactMode is which half of the port this fake presents. Relay by
+	// default, matching what an installation gets without configuration: the
+	// image must work against the default path without being told anything.
+	artifactMode   runv1.ArtifactMode
+	maxBytesPerRun int64
 
 	objects map[string]*object
 	runs    map[runv1.ULID]*runState
@@ -94,6 +114,16 @@ type runState struct {
 	// cannot see the repeat cannot check that the second one was a duplicate
 	// rather than a second run.
 	reports []ReceivedReport
+
+	// phases are the entrypoint phases this run reported getting through, in
+	// arrival order. It is the assertion surface that replaced reading
+	// state.json back out of the bucket — and a better one, because it records
+	// what the pod said when it said it rather than what survived until the pod
+	// next chose to save.
+	phases []runv1.RuntimePhase
+	// relayed is how many bytes this run has pushed through the relay, for the
+	// per-run budget.
+	relayed int64
 }
 
 // ReceivedReport is one delivery of the completion webhook, as it arrived.
@@ -126,6 +156,23 @@ func WithSignatureTTL(d time.Duration) Option {
 	return func(c *ControlPlane) { c.ttl = d }
 }
 
+// WithArtifactMode selects which half of the ArtifactStore port the image is
+// exercised against.
+//
+// Relay is the default, matching what an installation gets with nothing
+// configured. A test that sets object-store is exercising the optimisation
+// rather than the path every installation takes, and both are worth a pass:
+// the image implements both, and the contract test runs the checklist twice.
+func WithArtifactMode(mode runv1.ArtifactMode) Option {
+	return func(c *ControlPlane) { c.artifactMode = mode }
+}
+
+// WithArtifactBudget caps what one run may store. Small values are the point: a
+// 413 on a spent budget is otherwise only reachable by uploading a gigabyte.
+func WithArtifactBudget(bytes int64) Option {
+	return func(c *ControlPlane) { c.maxBytesPerRun = bytes }
+}
+
 // New builds a fake with no runs in it. The caller must set the base URL before
 // preparing a run — presigned links have to point somewhere — which is why
 // NewServer exists and is what almost every caller should use.
@@ -143,6 +190,11 @@ func New(opts ...Option) *ControlPlane {
 		objects: map[string]*object{},
 		runs:    map[runv1.ULID]*runState{},
 		byToken: map[string]runv1.ULID{},
+		// Relay, matching the real default. A fake whose default differed would
+		// let the image pass its contract tests against a path most
+		// installations never take.
+		artifactMode:   runv1.ArtifactModeRelay,
+		maxBytesPerRun: clusterv1.DefaultMaxBytesPerRun,
 	}
 	for _, opt := range opts {
 		opt(c)
@@ -194,7 +246,12 @@ func (c *ControlPlane) Handler() http.Handler {
 	mux.HandleFunc("GET /storage/{bucket}/{key...}", c.handleGet)
 	mux.HandleFunc("PUT /storage/{bucket}/{key...}", c.handlePut)
 	mux.HandleFunc("POST /storage/{bucket}", c.handlePost)
-	mux.HandleFunc("POST /runtime/v1/completion", c.handleCompletion)
+	// The three callback paths, under the base the CR advertises. They are
+	// named by the contract's own constants rather than spelled out, so a fake
+	// and an image built from one contract agree on the routes by construction.
+	mux.HandleFunc("POST /runtime/v1"+runv1.CallbackPathCompletion, c.handleCompletion)
+	mux.HandleFunc("POST /runtime/v1"+runv1.CallbackPathPhase, c.handlePhase)
+	mux.HandleFunc("POST /runtime/v1"+runv1.CallbackPathArtifacts, c.handleRelay)
 	return mux
 }
 

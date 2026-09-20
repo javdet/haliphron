@@ -74,6 +74,8 @@ spec:
               value: {{ .Values.identity.secretName | quote }}
             - name: HALIPHRON_CALLBACK_URL
               value: {{ include "haliphron-runtime.callbackURL" . | quote }}
+            - name: HALIPHRON_SPOOL_PATH
+              value: {{ .Values.controller.spool.mountPath | quote }}
             - name: HALIPHRON_CALLBACK_ADDR
               value: ":{{ .Values.controller.callbackPort }}"
             - name: HALIPHRON_HEALTH_ADDR
@@ -140,6 +142,12 @@ spec:
               readOnly: true
             - name: tmp
               mountPath: /tmp
+            # The artifact spool. readOnlyRootFilesystem is on, so this and
+            # /tmp are the only writable paths — and this is the one that has
+            # to survive a restart, because it holds results this controller
+            # has already told a pod were safe.
+            - name: spool
+              mountPath: {{ .Values.controller.spool.mountPath }}
       volumes:
         - name: bootstrap
           secret:
@@ -150,6 +158,16 @@ spec:
                 path: {{ include "haliphron-runtime.bootstrapSecretKey" . }}
         - name: tmp
           emptyDir: {}
+        - name: spool
+          {{- if or .Values.controller.spool.persistence.enabled .Values.controller.spool.persistence.existingClaim }}
+          persistentVolumeClaim:
+            claimName: {{ include "haliphron-runtime.spoolClaim" . }}
+          {{- else }}
+          # Spooled artifacts live for as long as the pod does. Acceptable for
+          # an evaluation; in an installation it means a controller restart can
+          # lose a result whose pod was told it was durable.
+          emptyDir: {}
+          {{- end }}
       {{- with .Values.controller.nodeSelector }}
       nodeSelector: {{- toYaml . | nindent 8 }}
       {{- end }}

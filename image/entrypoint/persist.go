@@ -28,7 +28,7 @@ import (
 // against the node's schema when there is one.
 func phaseOutput(_ context.Context, r *Run) error {
 	if r.resumed {
-		return skip("the output of attempt %d is already in storage", r.prior.Attempt)
+		return skip("an earlier attempt already produced and stored the output")
 	}
 
 	names, err := CollectArtifacts(r.layout.Artifacts)
@@ -71,7 +71,7 @@ func phaseOutput(_ context.Context, r *Run) error {
 // is already durable by then and is never paid for twice.
 func phasePersist(ctx context.Context, r *Run) error {
 	if r.resumed {
-		return skip("attempt %d already persisted the result", r.prior.Attempt)
+		return skip("an earlier attempt already persisted the result")
 	}
 
 	// result.md first, and always — even when the agent produced no text. A
@@ -80,7 +80,7 @@ func phasePersist(ctx context.Context, r *Run) error {
 	if r.summary == "" {
 		r.summary = ResultMarkdown(r.cfg, r.agent.Text, r.exitCodeSoFar(), r.failure, r.timings)
 	}
-	resultRef, err := r.storage.Put(ctx, runv1.StorageKeyResult, []byte(r.summary), "text/markdown")
+	resultRef, err := r.uploader.Put(ctx, runv1.StorageKeyResult, []byte(r.summary), "text/markdown")
 	if err != nil {
 		return err
 	}
@@ -98,7 +98,7 @@ func phasePersist(ctx context.Context, r *Run) error {
 	if err != nil {
 		return failWrap(runv1.ExitStorage, "OutputUnserialisable", err, "marshalling the envelope")
 	}
-	outputRef, err := r.storage.Put(ctx, runv1.StorageKeyOutput, body, "application/json")
+	outputRef, err := r.uploader.Put(ctx, runv1.StorageKeyOutput, body, "application/json")
 	if err != nil {
 		return err
 	}
@@ -108,14 +108,10 @@ func phasePersist(ctx context.Context, r *Run) error {
 
 	// The log up to this point, so that a pod which dies in the git phases
 	// leaves a readable trail rather than the first two chunks.
-	if err := r.log.Flush(ctx, r.storage, r.checkpoint); err != nil {
+	if err := r.log.Flush(ctx, r.uploader, r.checkpoint); err != nil {
 		r.logf("log chunk upload failed during persist: %v", err)
 	}
 
-	r.checkpoint.Artifacts = &CheckpointArtifacts{Result: resultRef, Output: outputRef}
-	if _, err := r.checkpoint.Save(ctx, r.storage, r.clock()); err != nil {
-		return err
-	}
 	r.logf("persisted: %s (%d bytes), %s (%d bytes), %d artifact(s)",
 		resultRef.Key, resultRef.SizeBytes, outputRef.Key, outputRef.SizeBytes, len(r.artifacts))
 	return nil
@@ -133,7 +129,7 @@ func (r *Run) uploadArtifacts(ctx context.Context) {
 			r.logf("artifact %s could not be read and was not uploaded: %v", art.Path, err)
 			continue
 		}
-		ref, err := r.storage.PostUnder(ctx, "artifacts/", art.Path, body, art.ContentType)
+		ref, err := r.uploader.PostUnder(ctx, "artifacts/", art.Path, body, art.ContentType)
 		if err != nil {
 			r.logf("artifact %s could not be uploaded: %v", art.Path, err)
 			continue
@@ -167,14 +163,14 @@ func phaseFinalize(ctx context.Context, r *Run) error {
 	// the final object sees the git phases twice — or, on a resumed attempt
 	// that flushed nothing, sees the chunk counter stand still and the next
 	// attempt overwrite what this one wrote.
-	if err := r.log.Flush(ctx, r.storage, r.checkpoint); err != nil {
+	if err := r.log.Flush(ctx, r.uploader, r.checkpoint); err != nil {
 		r.logf("the last log chunk could not be uploaded: %v", err)
 	}
 
 	// The concatenation of the same bytes the chunks carried. A reader who has
 	// followed the chunks to the end and switched to the final log must see
 	// neither a gap nor a repetition.
-	logRef, err := r.storage.Put(ctx, runv1.StorageKeyAgentLog, r.log.Bytes(), "text/plain")
+	logRef, err := r.uploader.Put(ctx, runv1.StorageKeyAgentLog, r.log.Bytes(), "text/plain")
 	if err != nil {
 		// Reported and survived: the chunks are already there, and the run's
 		// result does not depend on the tidy copy.
@@ -193,24 +189,22 @@ func phaseFinalize(ctx context.Context, r *Run) error {
 	// a difference between them is a question nobody can answer afterwards.
 	r.reportBody = body
 
-	if _, err := r.storage.Put(ctx, runv1.StorageKeyCompletion, body, "application/json"); err != nil {
+	if _, err := r.uploader.Put(ctx, runv1.StorageKeyCompletion, body, "application/json"); err != nil {
 		return err
 	}
 
-	stateRef, err := r.checkpoint.Save(ctx, r.storage, r.clock())
-	if err != nil {
-		return err
-	}
-	r.stateRef = stateRef
-
-	// The report named the checkpoint before the checkpoint existed, which is
-	// unavoidable: the reference is to a key, and the key is fixed.
-	r.report.StateRef = stateRef
-	r.report.LogRef = r.logRef
-	if body, err := json.Marshal(r.report); err == nil {
-		r.reportBody = body
-		if _, err := r.storage.Put(ctx, runv1.StorageKeyCompletion, body, "application/json"); err != nil {
-			r.logf("the completion report could not be updated with its own references: %v", err)
+	// The log reference only exists once the final log has been uploaded, which
+	// is a few lines above the report that names it. Rewriting the object once
+	// is cheaper than reordering the phase: the alternative is to upload the
+	// log after the report, and then a pod killed in between leaves a report
+	// naming a log that is not there.
+	if r.logRef != nil {
+		r.report.LogRef = r.logRef
+		if body, err := json.Marshal(r.report); err == nil {
+			r.reportBody = body
+			if _, err := r.uploader.Put(ctx, runv1.StorageKeyCompletion, body, "application/json"); err != nil {
+				r.logf("the completion report could not be updated with its log reference: %v", err)
+			}
 		}
 	}
 	return nil

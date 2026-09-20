@@ -115,6 +115,11 @@ func (in *AgentRunStatus) DeepCopyInto(out *AgentRunStatus) {
 		*out = new(ResultRefs)
 		(*in).DeepCopyInto(*out)
 	}
+	if in.CompletedPhases != nil {
+		in, out := &in.CompletedPhases, &out.CompletedPhases
+		*out = make([]runv1.RuntimePhase, len(*in))
+		copy(*out, *in)
+	}
 	if in.Usage != nil {
 		in, out := &in.Usage, &out.Usage
 		*out = new(runv1.Usage)
@@ -182,11 +187,6 @@ func (in *ResultRefs) DeepCopyInto(out *ResultRefs) {
 	}
 	if in.Log != nil {
 		in, out := &in.Log, &out.Log
-		*out = new(runv1.ObjectRef)
-		**out = **in
-	}
-	if in.State != nil {
-		in, out := &in.State, &out.State
 		*out = new(runv1.ObjectRef)
 		**out = **in
 	}

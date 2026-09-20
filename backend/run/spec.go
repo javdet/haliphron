@@ -118,9 +118,40 @@ var (
 const (
 	MinTimeoutSeconds = 60
 	MaxTimeoutSeconds = 86400
-	MaxPromptBytes    = 4 << 20
 	MaxDepth          = 8
+
+	// MaxPromptBytes is 512 KiB, and the number is not arbitrary.
+	//
+	// The prompt reaches the pod as an environment variable sourced from the
+	// per-run Secret, and a Secret is hard-capped at 1 MiB across all of its
+	// keys together — this one also carries the git token, the model key and
+	// mcp.json. The ceiling is stated here so that a caller gets a 413 naming
+	// the limit at admission, rather than a failed Secret create on a run that
+	// was already accepted, minutes later, in a cluster.
+	//
+	// It is a real constraint and it is paid deliberately. A workflow step
+	// whose accumulated context outgrows it is a genuine case; the answer is to
+	// summarise upstream output into the step's input rather than to grow the
+	// envelope, and the alternative — an object in a bucket, as before — bought
+	// the missing headroom at the price of making an object store a
+	// prerequisite for starting any run at all.
+	MaxPromptBytes = 512 << 10
 )
+
+// PromptTooLargeError is a prompt over the ceiling.
+//
+// Separate from InvalidRequestError because the answer is a different status:
+// a 413 says the request was well formed and too big, which is the one refusal
+// here a caller can act on mechanically, by summarising and trying again. A 422
+// invites them to look for a typo.
+type PromptTooLargeError struct {
+	Size  int
+	Limit int
+}
+
+func (e *PromptTooLargeError) Error() string {
+	return fmt.Sprintf("prompt: %d bytes exceeds the limit of %d", e.Size, e.Limit)
+}
 
 // TargetBranch is the branch name for a run, derived from its identifier.
 //
@@ -146,12 +177,9 @@ func Render(id runv1.ULID, req SubmitRequest, role *Role, def Defaults) (runv1.R
 		Role:            req.Role,
 		Image:           pickImage(role, def),
 		ImagePullPolicy: def.ImagePullPolicy,
-		Prompt: runv1.ObjectRef{
-			// Bucket is filled in by the caller, which is the only component
-			// that knows which store it wrote the prompt to.
-			Key:         promptKey(id),
-			ContentType: "text/plain; charset=utf-8",
-		},
+		// PromptSHA256 is filled in by the caller, which is where the prompt
+		// itself is: this function renders the shape of the run, and the digest
+		// is a fact about the request it was rendered from.
 		Repo:    renderRepo(id, req),
 		Runtime: renderRuntime(req, role, def),
 	}
@@ -179,10 +207,6 @@ func Render(id runv1.ULID, req SubmitRequest, role *Role, def Defaults) (runv1.R
 		spec.TTLSecondsAfterFinished = &ttl
 	}
 	return spec, nil
-}
-
-func promptKey(id runv1.ULID) string {
-	return fmt.Sprintf(runv1.StoragePrefixRun, string(id)) + runv1.StorageKeyPrompt
 }
 
 // InvalidRequestError is a request admission refused. It is a distinct type so
@@ -213,7 +237,7 @@ func validate(req SubmitRequest, def Defaults) error {
 	case strings.TrimSpace(req.Prompt) == "":
 		return invalid("prompt", "a run without a prompt has no task")
 	case len(req.Prompt) > maxPrompt:
-		return invalid("prompt", "%d bytes exceeds the limit of %d", len(req.Prompt), maxPrompt)
+		return &PromptTooLargeError{Size: len(req.Prompt), Limit: maxPrompt}
 	}
 
 	if req.Agent != "" && req.Agent != runv1.AgentClaudeCode && req.Agent != runv1.AgentCodex {

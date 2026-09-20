@@ -61,6 +61,16 @@ type Limits struct {
 	RunTokenTTLMultiplier float32
 
 	IdempotencyTTL time.Duration
+
+	// MaxArtifactBytesPerRun is artifacts.maxBytesPerRun, handed to the
+	// controller in every bundle. It is enforced there rather than here so the
+	// transfer is not paid for twice — once into the controller's spool and
+	// once into a refusal by the backend that already received it.
+	//
+	// The backend still bounds one object at clusterv1.MaxArtifactBytes: the
+	// per-run budget is an agreement with a controller, and a control plane
+	// does not stake its volume on an agreement.
+	MaxArtifactBytesPerRun int64
 }
 
 // Options assembles a Service.
@@ -96,6 +106,9 @@ func New(opts Options) *Service {
 	}
 	if limits.IdempotencyTTL <= 0 {
 		limits.IdempotencyTTL = 24 * time.Hour
+	}
+	if limits.MaxArtifactBytesPerRun <= 0 {
+		limits.MaxArtifactBytesPerRun = clusterv1.DefaultMaxBytesPerRun
 	}
 	logger := opts.Logger
 	if logger == nil {

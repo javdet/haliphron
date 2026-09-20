@@ -116,6 +116,58 @@ a complete instruction rather than half of one.
 {{- if .Values.objectStorage.existingSecret -}}{{ .Values.objectStorage.existingSecretSecretKeyKey }}{{- else -}}secretKey{{- end -}}
 {{- end -}}
 
+{{/*
+Which half of the ArtifactStore port is in force. Empty means relay, which is
+what an installation gets without configuration.
+*/}}
+{{- define "haliphron.objectStore" -}}
+{{- if eq .Values.artifacts.mode "object-store" -}}true{{- end -}}
+{{- end -}}
+
+{{/*
+Whether the chart creates a PVC for artifacts. Relay mode with no existing
+claim; in object-store mode there is nothing to mount.
+*/}}
+{{- define "haliphron.artifactPVC" -}}
+{{- if and (not (include "haliphron.objectStore" .)) .Values.artifacts.pvc.enabled (not .Values.artifacts.pvc.existingClaim) -}}true{{- end -}}
+{{- end -}}
+
+{{/*
+The claim the backend mounts: the one the chart makes, or one that already
+exists.
+*/}}
+{{- define "haliphron.artifactClaim" -}}
+{{- if .Values.artifacts.pvc.existingClaim -}}
+{{- .Values.artifacts.pvc.existingClaim -}}
+{{- else -}}
+{{- printf "%s-artifacts" (include "haliphron.fullname" .) -}}
+{{- end -}}
+{{- end -}}
+
+{{/*
+maxBytesPerRun in bytes. Written as a quantity in values because "1Gi" is what
+an operator wants to type and 1073741824 is not.
+*/}}
+{{- define "haliphron.artifactMaxBytes" -}}
+{{- include "haliphron.quantityBytes" .Values.artifacts.maxBytesPerRun -}}
+{{- end -}}
+
+{{/*
+A Kubernetes quantity as a plain byte count. Binary suffixes only, because that
+is what a storage value is written in; a value the chart cannot read is a
+failure rather than a guess, since guessing low silently truncates every log.
+*/}}
+{{- define "haliphron.quantityBytes" -}}
+{{- $q := toString . -}}
+{{- if regexMatch "^[0-9]+$" $q -}}{{ $q }}
+{{- else if hasSuffix "Ki" $q -}}{{ mul (trimSuffix "Ki" $q | int64) 1024 }}
+{{- else if hasSuffix "Mi" $q -}}{{ mul (trimSuffix "Mi" $q | int64) 1048576 }}
+{{- else if hasSuffix "Gi" $q -}}{{ mul (trimSuffix "Gi" $q | int64) 1073741824 }}
+{{- else if hasSuffix "Ti" $q -}}{{ mul (trimSuffix "Ti" $q | int64) 1099511627776 }}
+{{- else -}}{{ fail (printf "%q is not a byte quantity the chart can read; use a plain number or a Ki/Mi/Gi/Ti suffix" $q) }}
+{{- end -}}
+{{- end -}}
+
 {{- define "haliphron.kekEnabled" -}}
 {{- if or .Values.encryption.key .Values.encryption.existingSecret -}}true{{- end -}}
 {{- end -}}
@@ -170,6 +222,41 @@ worse than the misconfiguration it is looking for.
 {{- fail (printf "backend.mode is %q; it must be one of all, api, mcp, cluster" $mode) -}}
 {{- end -}}
 
+{{- $artifactMode := .Values.artifacts.mode -}}
+{{- if not (has $artifactMode (list "relay" "object-store")) -}}
+{{- fail (printf "artifacts.mode is %q; it must be relay or object-store" $artifactMode) -}}
+{{- end -}}
+
+{{- if eq $artifactMode "object-store" -}}
+{{/*
+Object-store mode without a bucket is the failure that is expensive to find
+late: the backend refuses to start, and an operator who works around that by
+disabling the check gets runs that work for an hour and cannot upload.
+*/}}
+{{- if and (not .Values.objectStorage.accessKey) (not .Values.objectStorage.existingSecret) (not .Values.minio.enabled) -}}
+{{- fail "artifacts.mode is object-store but no object storage is configured: set objectStorage.accessKey/secretKey, or objectStorage.existingSecret, or minio.enabled — or leave artifacts.mode at its default of relay, which needs no object store at all" -}}
+{{- end -}}
+{{- else -}}
+{{/*
+Relay mode puts the backend in the artifact data path, and a ReadWriteOnce
+volume can be mounted for writing by one node at a time. Two replicas against
+one RWO claim is not a degraded configuration — the second pod does not
+schedule — so it is refused here rather than discovered as a rollout that never
+completes.
+*/}}
+{{- if and .Values.artifacts.pvc.enabled (gt (int .Values.backend.replicaCount) 1) (eq .Values.artifacts.pvc.accessMode "ReadWriteOnce") -}}
+{{- fail (printf "backend.replicaCount is %d and artifacts.pvc.accessMode is ReadWriteOnce, which one node may mount for writing: set artifacts.pvc.accessMode to ReadWriteMany if your storage class offers it, or switch artifacts.mode to object-store, or run one replica" (int .Values.backend.replicaCount)) -}}
+{{- end -}}
+{{- if and (not .Values.artifacts.pvc.enabled) (not .Values.artifacts.pvc.existingClaim) -}}
+{{/*
+No volume at all means results land on the container filesystem and go with the
+next restart. Allowed, because it is exactly right for a CI run of the chart,
+and refused for anything with persistence turned off by accident.
+*/}}
+{{- fail "artifacts.mode is relay and artifacts.pvc is disabled with no existingClaim: results would be written to the container filesystem and lost on restart. Set artifacts.pvc.enabled, or artifacts.pvc.existingClaim, or switch to artifacts.mode=object-store" -}}
+{{- end -}}
+{{- end -}}
+
 {{- if not .Values.agent.image -}}
 {{- fail "agent.image is required: it decides what every run executes, so the chart will not choose it for you. Pin it by digest." -}}
 {{- end -}}
@@ -181,10 +268,14 @@ worse than the misconfiguration it is looking for.
 {{- fail "postgresql.enabled=true needs postgresql.auth.password, which the derived DSN is built from" -}}
 {{- end -}}
 
+{{/*
+Object storage is checked only when it is used. The unconditional check that
+stood here was correct when a bucket was mandatory, and it is now the thing that
+would stop `helm install` with nothing set — which is the whole point of the
+default mode. Object-store mode's own check is above, next to the other artifact
+validation.
+*/}}
 {{- $s3 := .Values.objectStorage -}}
-{{- if and (not $s3.existingSecret) (not $s3.accessKey) (not .Values.minio.enabled) -}}
-{{- fail "set objectStorage.existingSecret (preferred), objectStorage.accessKey/secretKey, or minio.enabled=true" -}}
-{{- end -}}
 {{- if and .Values.minio.enabled (not $s3.existingSecret) (not $s3.accessKey) (not .Values.minio.auth.rootPassword) -}}
 {{- fail "minio.enabled=true needs minio.auth.rootPassword, which becomes the backend's secret key" -}}
 {{- end -}}

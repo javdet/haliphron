@@ -1,6 +1,8 @@
 package backend_test
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
 	"net/http"
 	"strings"
 	"sync"
@@ -367,7 +369,9 @@ func TestLeaseBodyNeverReachesTheLog(t *testing.T) {
 
 func TestArtifactBundleIsReissuedWithALaterExpiry(t *testing.T) {
 	t.Parallel()
-	b, c := start(t)
+	// Object-store mode: this is the one call that only exists there. In relay
+	// mode there is no signature to expire and the controller never makes it.
+	b, c := start(t, backend.WithArtifactMode(runv1.ArtifactModeObjectStore))
 	b.Enqueue(sampleSpec())
 	l := c.mustLease()
 	c.mustAck(l.RunID, l.Epoch)
@@ -387,8 +391,143 @@ func TestArtifactBundleIsReissuedWithALaterExpiry(t *testing.T) {
 		t.Fatalf("reissued bundle expires at %s, no later than the original %s",
 			bundle.ExpiresAt, l.Artifacts.ExpiresAt)
 	}
-	if _, ok := bundle.Get[runv1.StorageKeyState]; !ok {
-		t.Fatal("no presigned GET for state.json: an idempotent retry becomes impossible")
+	// The four keys the pod writes, and no reads at all: prompt.txt and
+	// state.json are both gone from this store, which is what removed exit 21's
+	// most common cause.
+	for _, key := range []string{
+		runv1.StorageKeyOutput, runv1.StorageKeyResult,
+		runv1.StorageKeyCompletion, runv1.StorageKeyAgentLog,
+	} {
+		if _, ok := bundle.Put[key]; !ok {
+			t.Errorf("the reissued bundle has no PUT for %s", key)
+		}
+	}
+}
+
+// The default is relay, because that is what an installation gets with nothing
+// configured — and a controller has to work against it without being told
+// anything. A fake whose default differed would let a controller pass its
+// contract tests against a path most installations never take.
+func TestALeaseDefaultsToRelayAndCarriesNoBucket(t *testing.T) {
+	t.Parallel()
+	b, c := start(t)
+	b.Enqueue(sampleSpec(), backend.WithPrompt("add a postgres database"))
+	l := c.mustLease()
+
+	switch {
+	case !l.Artifacts.Relay():
+		t.Errorf("mode = %q, want relay", l.Artifacts.Mode)
+	case l.Artifacts.Bucket != "":
+		t.Errorf("a relay lease names bucket %q", l.Artifacts.Bucket)
+	case len(l.Artifacts.Put) != 0 || len(l.Artifacts.Post) != 0:
+		t.Errorf("a relay lease carries capabilities: %+v", l.Artifacts)
+	case l.Artifacts.MaxBytesPerRun <= 0:
+		t.Error("a lease with no artifact budget lets a run fill the control plane's volume")
+	}
+}
+
+// The prompt travels in the lease, and the two digests beside it agree with it.
+// A controller checks both before writing a Secret, so a fake that set only one
+// would let a controller bug through.
+func TestALeaseCarriesThePromptAndAMatchingDigest(t *testing.T) {
+	t.Parallel()
+	b, c := start(t)
+	b.Enqueue(sampleSpec(), backend.WithPrompt("add a postgres database"))
+	l := c.mustLease()
+
+	if l.Prompt != "add a postgres database" {
+		t.Fatalf("lease prompt = %q", l.Prompt)
+	}
+	sum := sha256.Sum256([]byte(l.Prompt))
+	want := hex.EncodeToString(sum[:])
+	if l.PromptSHA256 != want {
+		t.Errorf("lease digest = %q, want %q", l.PromptSHA256, want)
+	}
+	if l.Spec.PromptSHA256 != want {
+		t.Errorf("spec digest = %q, want %q", l.Spec.PromptSHA256, want)
+	}
+	// And the spec carries no prompt of its own: a field for one would put
+	// customer text into every `kubectl get agentrun -o yaml`.
+	if strings.Contains(string(mustJSON(t, l.Spec)), "add a postgres database") {
+		t.Error("the rendered spec carries the prompt text")
+	}
+}
+
+// A controller relays an artifact, and the fake keeps it under the run's prefix
+// — stamped from the authenticated envelope, not from the query.
+func TestARelayedArtifactLandsUnderTheRunsPrefix(t *testing.T) {
+	t.Parallel()
+	b, c := start(t)
+	b.Enqueue(sampleSpec())
+	l := c.mustLease()
+
+	body := []byte("# done\n")
+	resp := c.relayArtifact(l.RunID, l.Epoch, l.Attempt, runv1.StorageKeyResult, body)
+	if resp.status != http.StatusOK {
+		t.Fatalf("want 200, got %d body %s", resp.status, resp.body)
+	}
+	var ack clusterv1.ArtifactIngestResponse
+	resp.decode(t, &ack)
+
+	want := "runs/" + string(l.RunID) + "/" + runv1.StorageKeyResult
+	if ack.Ref.Key != want {
+		t.Errorf("stored under %q, want %q", ack.Ref.Key, want)
+	}
+	if !ack.Ref.Uploaded {
+		t.Error("the acknowledgement does not mark the object uploaded")
+	}
+	stored, ok := b.Artifact(l.RunID, runv1.StorageKeyResult)
+	if !ok || string(stored) != string(body) {
+		t.Errorf("the fake stored %q (found: %v)", stored, ok)
+	}
+
+	// A repeat is a success and says so: the controller retries on any network
+	// error and does not drop its spooled copy until it hears a 200.
+	again := c.relayArtifact(l.RunID, l.Epoch, l.Attempt, runv1.StorageKeyResult, body)
+	if again.status != http.StatusOK {
+		t.Fatalf("a repeat gave %d", again.status)
+	}
+	again.decode(t, &ack)
+	if !ack.Duplicate {
+		t.Error("a repeated relay was not reported as a duplicate")
+	}
+}
+
+// A cluster that lost a run must not overwrite the result of the one that holds
+// it now. The refusal carries abandon, which is what makes the controller drop
+// its spool rather than retry forever.
+func TestARelayedArtifactUnderAStaleEpochIsRefused(t *testing.T) {
+	t.Parallel()
+	b, c := start(t)
+	b.Enqueue(sampleSpec())
+	l := c.mustLease()
+	b.Reassign(l.RunID)
+
+	resp := c.relayArtifact(l.RunID, l.Epoch, l.Attempt, runv1.StorageKeyResult, []byte("stale"))
+	if resp.status != http.StatusConflict {
+		t.Fatalf("want 409, got %d body %s", resp.status, resp.body)
+	}
+	if _, ok := b.Artifact(l.RunID, runv1.StorageKeyResult); ok {
+		t.Error("the stale cluster's bytes were stored anyway")
+	}
+}
+
+// A transfer that was cut is refused rather than stored: a half-written
+// result.md under the right key is worse than none, because the recovery path
+// would read it and believe it.
+func TestARelayedArtifactWithAWrongDigestIsRefused(t *testing.T) {
+	t.Parallel()
+	b, c := start(t)
+	b.Enqueue(sampleSpec())
+	l := c.mustLease()
+
+	resp := c.relayArtifactWithDigest(l.RunID, l.Epoch, l.Attempt,
+		runv1.StorageKeyResult, []byte("truncated"), strings.Repeat("a", 64))
+	if resp.status != http.StatusBadRequest {
+		t.Fatalf("want 400, got %d body %s", resp.status, resp.body)
+	}
+	if _, ok := b.Artifact(l.RunID, runv1.StorageKeyResult); ok {
+		t.Error("a body that did not match its digest was stored")
 	}
 }
 

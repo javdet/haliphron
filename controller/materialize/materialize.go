@@ -20,7 +20,9 @@ package materialize
 import (
 	"context"
 	"crypto/rand"
+	"crypto/sha256"
 	"encoding/base64"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -174,7 +176,7 @@ func (m *Materializer) Apply(ctx context.Context, lease clusterv1.Lease) (Result
 		return Result{}, err
 	}
 
-	if rejection, err := m.preflightJob(ctx, cr); err != nil {
+	if rejection, err := m.preflightJob(ctx, cr, lease.CompletedPhases); err != nil {
 		return Result{}, err
 	} else if rejection != nil {
 		m.deleteQuietly(ctx, cr)
@@ -260,23 +262,77 @@ func (m *Materializer) preflight(lease clusterv1.Lease) *clusterv1.AckRejection 
 			Code: clusterv1.RejectInvalidSpec, Message: "spec.image is empty", Fields: []string{"image"},
 		}
 	}
-	if lease.Spec.Prompt.Key == "" {
+	if lease.Prompt == "" {
 		return &clusterv1.AckRejection{
-			Code: clusterv1.RejectInvalidSpec, Message: "spec.prompt has no key", Fields: []string{"prompt.key"},
+			Code: clusterv1.RejectInvalidSpec, Message: "the lease carries no prompt: this run has no task",
+			Fields: []string{"prompt"},
+		}
+	}
+	// The digest in the spec is what the pod checks its prompt against, and the
+	// one beside it is what this check uses. Two halves of one lease that
+	// disagree mean the control plane built the message wrongly, and catching
+	// it here costs a comparison; catching it in the pod costs a scheduled Job
+	// that exits 30 and a run reported as a configuration failure.
+	sum := sha256.Sum256([]byte(lease.Prompt))
+	got := hex.EncodeToString(sum[:])
+	switch {
+	case lease.PromptSHA256 != "" && lease.PromptSHA256 != got:
+		return &clusterv1.AckRejection{
+			Code: clusterv1.RejectInvalidSpec,
+			Message: fmt.Sprintf("the lease's prompt hashes to %s and the lease says %s",
+				got, lease.PromptSHA256),
+			Fields: []string{"promptSHA256"},
+		}
+	case lease.Spec.PromptSHA256 != "" && lease.Spec.PromptSHA256 != got:
+		return &clusterv1.AckRejection{
+			Code: clusterv1.RejectInvalidSpec,
+			Message: fmt.Sprintf("the lease's prompt hashes to %s and the spec says %s",
+				got, lease.Spec.PromptSHA256),
+			Fields: []string{"promptSHA256"},
+		}
+	}
+	// A Secret is capped at 1 MiB across all of its keys, and the prompt shares
+	// this one with the git token, the model key and mcp.json. The backend caps
+	// the prompt at 512 KiB at admission; this is the check that turns a lease
+	// from a backend configured otherwise into a negative ack naming the field,
+	// rather than a Secret create that fails after the CR already exists.
+	if total := materialBytes(lease); total > maxSecretBytes {
+		return &clusterv1.AckRejection{
+			Code: clusterv1.RejectInvalidSpec,
+			Message: fmt.Sprintf(
+				"the lease's materials are %d bytes and a Secret holds at most %d; the prompt is %d of them",
+				total, maxSecretBytes, len(lease.Prompt)),
+			Fields: []string{"prompt"},
 		}
 	}
 	return nil
+}
+
+// maxSecretBytes is the Kubernetes ceiling, less room for the keys the
+// controller adds after the backend's: the callback token, and the presigned
+// bundle in object-store mode.
+const maxSecretBytes = 1<<20 - 16<<10
+
+// materialBytes is what the per-run Secret will weigh.
+func materialBytes(lease clusterv1.Lease) int {
+	total := len(lease.Prompt)
+	for k, v := range lease.Secrets {
+		total += len(k) + len(v)
+	}
+	return total
 }
 
 // preflightJob asks the API server to admit the Job without persisting it. A
 // dry-run create runs the same admission chain as the real one — quota,
 // policies, the structural schema — and consumes nothing, so the causes the CRD
 // contract lists as "detectable before the Job" actually get detected there.
-func (m *Materializer) preflightJob(ctx context.Context, cr *agentrunv1alpha1.AgentRun) (*clusterv1.AckRejection, error) {
+func (m *Materializer) preflightJob(ctx context.Context, cr *agentrunv1alpha1.AgentRun,
+	completedPhases []runv1.RuntimePhase) (*clusterv1.AckRejection, error) {
+
 	if !m.PreflightJob {
 		return nil, nil
 	}
-	job, err := m.Builder.Job(cr, 1)
+	job, err := m.Builder.Job(cr, 1, completedPhases)
 	if err != nil {
 		var invalid *launcher.InvalidFieldError
 		if errors.As(err, &invalid) {
@@ -349,6 +405,11 @@ func (m *Materializer) buildAgentRun(lease clusterv1.Lease) *agentrunv1alpha1.Ag
 		annotations[agentrunv1alpha1.AnnotationRunURL] = fmt.Sprintf(m.RunURLTemplate, lease.RunID)
 	}
 
+	mode := lease.Artifacts.Mode
+	if mode == "" {
+		mode = runv1.ArtifactModeRelay
+	}
+
 	return &agentrunv1alpha1.AgentRun{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:        agentrunv1alpha1.ObjectName(lease.RunID),
@@ -361,11 +422,13 @@ func (m *Materializer) buildAgentRun(lease clusterv1.Lease) *agentrunv1alpha1.Ag
 			Finalizers: []string{agentrunv1alpha1.FinalizerTerminateJob},
 		},
 		Spec: agentrunv1alpha1.AgentRunSpec{
-			RunID:           lease.RunID,
-			LeaseEpoch:      lease.Epoch,
-			RenderedRunSpec: lease.Spec,
-			Materials:       materials,
-			CallbackURL:     m.CallbackURL,
+			RunID:            lease.RunID,
+			LeaseEpoch:       lease.Epoch,
+			RenderedRunSpec:  lease.Spec,
+			Materials:        materials,
+			CallbackURL:      m.CallbackURL,
+			ArtifactMode:     mode,
+			MaxArtifactBytes: lease.Artifacts.MaxBytesPerRun,
 		},
 	}
 }
@@ -380,17 +443,31 @@ func (m *Materializer) buildAgentRun(lease clusterv1.Lease) *agentrunv1alpha1.Ag
 func (m *Materializer) ensureMaterials(ctx context.Context, cr *agentrunv1alpha1.AgentRun, lease clusterv1.Lease, token string) error {
 	owner := kmeta.OwnerRef(cr)
 	labels := kmeta.Labels(lease.RunID, lease.Epoch, lease.Attempt, m.ClusterID, lease.Spec.Agent)
+	var err error
 
-	bundle, err := json.Marshal(lease.Artifacts)
-	if err != nil {
-		return fmt.Errorf("materialize: encode artifact bundle: %w", err)
-	}
-
-	data := make(map[string][]byte, len(lease.Secrets)+2)
+	data := make(map[string][]byte, len(lease.Secrets)+3)
 	for k, v := range lease.Secrets {
 		data[k] = []byte(v)
 	}
-	data[runv1.SecretKeyPresigned] = bundle
+
+	// The prompt is a key in the Secret and not a field in the CR, and it is
+	// the one key here that is not a credential. Prompts carry customer
+	// context: in the spec they would land in `kubectl get agentrun -o yaml`
+	// and in every GitOps diff, while a Secret key reached through
+	// valueFrom.secretKeyRef stays out of the Job's spec and out of
+	// `kubectl describe pod`.
+	data[runv1.SecretKeyPrompt] = []byte(lease.Prompt)
+
+	// The presigned bundle exists only in object-store mode. In relay mode
+	// there is nothing to sign — the pod posts to this controller — and writing
+	// an empty bundle would give the entrypoint a mode to misread.
+	if !lease.Artifacts.Relay() {
+		bundle, err := json.Marshal(lease.Artifacts)
+		if err != nil {
+			return fmt.Errorf("materialize: encode artifact bundle: %w", err)
+		}
+		data[runv1.SecretKeyPresigned] = bundle
+	}
 
 	secret := &corev1.Secret{
 		ObjectMeta: metav1.ObjectMeta{

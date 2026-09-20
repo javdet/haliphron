@@ -19,6 +19,7 @@ import (
 	"time"
 
 	clusterv1 "github.com/automagicops/haliphron/api/cluster/v1"
+	runv1 "github.com/automagicops/haliphron/api/run/v1"
 )
 
 // S3, spoken directly rather than through a vendor SDK.
@@ -98,6 +99,12 @@ func NewS3(cfg S3Config) (*S3Store, error) {
 // Bucket is the bucket every capability is scoped to.
 func (s *S3Store) Bucket() string { return s.cfg.Bucket }
 
+// Scheme is s3, which is what a result_ref written by this store says.
+func (s *S3Store) Scheme() string { return runv1.SchemeS3 }
+
+// Mode is object-store.
+func (s *S3Store) Mode() runv1.ArtifactMode { return runv1.ArtifactModeObjectStore }
+
 // Endpoint is what the pod addresses. It travels in the bundle because the pod
 // has no configuration of its own.
 func (s *S3Store) Endpoint() string { return s.cfg.Endpoint }
@@ -106,28 +113,70 @@ func (s *S3Store) Endpoint() string { return s.cfg.Endpoint }
 // Going through the presigned path rather than a signed request keeps one
 // signing implementation instead of two.
 func (s *S3Store) Put(ctx context.Context, key string, body []byte, contentType string) error {
+	_, err := s.put(ctx, key, bytes.NewReader(body), int64(len(body)), contentType)
+	return err
+}
+
+// PutStream writes without buffering.
+//
+// It exists for symmetry with the disk store rather than for this mode's own
+// sake: in object-store mode the backend is not in the artifact data path at
+// all — the pod PUTs straight to the store — so the only bytes that come
+// through here are the ones a relay-to-object-store migration would move.
+// SigV4 with an unsigned payload is what makes streaming possible without
+// buffering to compute a body digest.
+func (s *S3Store) PutStream(ctx context.Context, key string, body io.Reader, contentType string) (runv1.ObjectRef, error) {
+	// The digest is computed on the way past rather than up front, so a caller
+	// that handed us a network reader is not asked to produce it twice.
+	sum := sha256.New()
+	counter := &countingReader{r: io.TeeReader(body, sum)}
+	if _, err := s.put(ctx, key, counter, -1, contentType); err != nil {
+		return runv1.ObjectRef{}, err
+	}
+	return runv1.ObjectRef{
+		Key:         key,
+		SizeBytes:   counter.n,
+		SHA256:      hex.EncodeToString(sum.Sum(nil)),
+		ContentType: contentType,
+		Uploaded:    true,
+	}, nil
+}
+
+func (s *S3Store) put(ctx context.Context, key string, body io.Reader, length int64, contentType string) (*http.Response, error) {
 	signed, err := s.presign(http.MethodPut, key, nil, time.Minute)
 	if err != nil {
-		return err
+		return nil, err
 	}
-	req, err := http.NewRequestWithContext(ctx, http.MethodPut, signed.URL, bytes.NewReader(body))
+	req, err := http.NewRequestWithContext(ctx, http.MethodPut, signed.URL, body)
 	if err != nil {
-		return fmt.Errorf("artifacts: build put %s: %w", key, err)
+		return nil, fmt.Errorf("artifacts: build put %s: %w", key, err)
 	}
 	if contentType != "" {
 		req.Header.Set("Content-Type", contentType)
 	}
-	req.ContentLength = int64(len(body))
+	req.ContentLength = length
 
 	resp, err := s.client.Do(req)
 	if err != nil {
-		return fmt.Errorf("artifacts: put %s: %w", key, err)
+		return nil, fmt.Errorf("artifacts: put %s: %w", key, err)
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode/100 != 2 {
-		return fmt.Errorf("artifacts: put %s: %s", key, statusDetail(resp))
+		return nil, fmt.Errorf("artifacts: put %s: %s", key, statusDetail(resp))
 	}
-	return nil
+	return resp, nil
+}
+
+// countingReader is how PutStream learns the size it did not know in advance.
+type countingReader struct {
+	r io.Reader
+	n int64
+}
+
+func (c *countingReader) Read(p []byte) (int, error) {
+	n, err := c.r.Read(p)
+	c.n += int64(n)
+	return n, err
 }
 
 // Get reads one object. A 404 is ErrNotFound and nothing else: the caller that
@@ -155,6 +204,64 @@ func (s *S3Store) Get(ctx context.Context, key string) ([]byte, error) {
 		return nil, fmt.Errorf("artifacts: get %s: %s", key, statusDetail(resp))
 	}
 	return io.ReadAll(io.LimitReader(resp.Body, maxGetBytes))
+}
+
+// Open streams one object out. The caller closes it.
+//
+// Unlike Get it is not capped: its caller is the log endpoint streaming a
+// gigabyte to a browser, and a cap there would truncate a log rather than
+// protect anything — the bytes pass through without being held.
+func (s *S3Store) Open(ctx context.Context, key string) (io.ReadCloser, error) {
+	signed, err := s.presign(http.MethodGet, key, nil, time.Minute)
+	if err != nil {
+		return nil, err
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, signed.URL, nil)
+	if err != nil {
+		return nil, fmt.Errorf("artifacts: build open %s: %w", key, err)
+	}
+	// No client timeout on a stream: s.client bounds a whole request, and a
+	// large log legitimately takes longer than s3Timeout to read.
+	resp, err := (&http.Client{}).Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("artifacts: open %s: %w", key, err)
+	}
+	if resp.StatusCode == http.StatusNotFound {
+		_ = resp.Body.Close()
+		return nil, fmt.Errorf("artifacts: open %s: %w", key, ErrNotFound)
+	}
+	if resp.StatusCode/100 != 2 {
+		detail := statusDetail(resp)
+		_ = resp.Body.Close()
+		return nil, fmt.Errorf("artifacts: open %s: %s", key, detail)
+	}
+	return resp.Body, nil
+}
+
+// Delete removes one object. Retention in this mode is normally ILM or S3
+// lifecycle rules generated by the chart; this is for the reaper on an
+// installation that has neither.
+func (s *S3Store) Delete(ctx context.Context, key string) error {
+	signed, err := s.presign(http.MethodDelete, key, nil, time.Minute)
+	if err != nil {
+		return err
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodDelete, signed.URL, nil)
+	if err != nil {
+		return fmt.Errorf("artifacts: build delete %s: %w", key, err)
+	}
+	resp, err := s.client.Do(req)
+	if err != nil {
+		return fmt.Errorf("artifacts: delete %s: %w", key, err)
+	}
+	defer resp.Body.Close()
+	// S3 answers 204 to deleting a key that was never there, which is the
+	// answer this caller wants: the reaper deleting an object twice is
+	// ordinary, and it is not evidence of anything.
+	if resp.StatusCode/100 != 2 && resp.StatusCode != http.StatusNotFound {
+		return fmt.Errorf("artifacts: delete %s: %s", key, statusDetail(resp))
+	}
+	return nil
 }
 
 // maxGetBytes caps what the backend will read from storage. The two objects it

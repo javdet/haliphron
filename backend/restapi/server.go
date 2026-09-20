@@ -56,6 +56,10 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET "+BasePath+"/runs/{id}", s.scoped(store.ScopeRunsRead, s.getRun))
 	mux.HandleFunc("GET "+BasePath+"/runs/{id}/result", s.scoped(store.ScopeRunsRead, s.runResult))
 	mux.HandleFunc("GET "+BasePath+"/runs/{id}/logs", s.scoped(store.ScopeRunsRead, s.runLogs))
+	// One chunk by name. It exists only for relay mode, where the listing has
+	// no presigned link to hand out and the volume this process holds is the
+	// only place the bytes are.
+	mux.HandleFunc("GET "+BasePath+"/runs/{id}/logs/{chunk}", s.scoped(store.ScopeRunsRead, s.runLogChunk))
 	mux.HandleFunc("GET "+BasePath+"/runs/{id}/attempts", s.scoped(store.ScopeRunsRead, s.runAttempts))
 	mux.HandleFunc("POST "+BasePath+"/runs/{id}/cancel", s.scoped(store.ScopeRunsWrite, s.cancelRun))
 	mux.HandleFunc("POST "+BasePath+"/runs/{id}/retry", s.scoped(store.ScopeRunsWrite, s.retryRun))

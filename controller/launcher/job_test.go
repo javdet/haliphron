@@ -32,10 +32,10 @@ func testRun() *agentrunv1alpha1.AgentRun {
 			RunID:      testRunID,
 			LeaseEpoch: 1,
 			RenderedRunSpec: runv1.RenderedRunSpec{
-				Agent:  runv1.AgentClaudeCode,
-				Prompt: runv1.ObjectRef{Bucket: "haliphron", Key: "runs/x/prompt.txt", SHA256: strings.Repeat("a", 64)},
-				Model:  "anthropic/claude-opus-5",
-				Image:  "ghcr.io/automagicops/agent:1.0.0",
+				Agent:        runv1.AgentClaudeCode,
+				PromptSHA256: strings.Repeat("a", 64),
+				Model:        "anthropic/claude-opus-5",
+				Image:        "ghcr.io/automagicops/agent:1.0.0",
 				Repo: runv1.RepoSpec{
 					URL: "https://github.com/acme/widgets", Provider: runv1.GitProviderGitHub,
 					BaseBranch: "main", TargetBranch: "haliphron/run-x", CreatePR: &createPR,
@@ -46,7 +46,7 @@ func testRun() *agentrunv1alpha1.AgentRun {
 				},
 			},
 			Materials:   agentrunv1alpha1.MaterialsRef{SecretName: agentrunv1alpha1.SecretName(testRunID)},
-			CallbackURL: "http://haliphron-controller.haliphron.svc:8083/completion",
+			CallbackURL: "http://haliphron-controller.haliphron.svc:8083",
 		},
 		Status: agentrunv1alpha1.AgentRunStatus{Attempt: 1},
 	}
@@ -55,7 +55,7 @@ func testRun() *agentrunv1alpha1.AgentRun {
 func build(t *testing.T, cr *agentrunv1alpha1.AgentRun, attempt int32) *corev1.PodSpec {
 	t.Helper()
 	b := Builder{Namespace: "agents", ClusterID: "01J8X4K2ZQ7YB3M9F0R5W6T8CE"}
-	job, err := b.Job(cr, attempt)
+	job, err := b.Job(cr, attempt, nil)
 	if err != nil {
 		t.Fatalf("build the job: %v", err)
 	}
@@ -67,7 +67,7 @@ func build(t *testing.T, cr *agentrunv1alpha1.AgentRun, attempt int32) *corev1.P
 // bypass the rule that only infrastructure failures are repeated.
 func TestEveryAttemptIsADecisionOfTheController(t *testing.T) {
 	b := Builder{Namespace: "agents"}
-	job, err := b.Job(testRun(), 2)
+	job, err := b.Job(testRun(), 2, nil)
 	if err != nil {
 		t.Fatalf("build: %v", err)
 	}
@@ -87,7 +87,7 @@ func TestEveryAttemptIsADecisionOfTheController(t *testing.T) {
 // turning a success into an Unknown that needs a human.
 func TestTheJobHasNoTTL(t *testing.T) {
 	b := Builder{Namespace: "agents"}
-	job, err := b.Job(testRun(), 1)
+	job, err := b.Job(testRun(), 1, nil)
 	if err != nil {
 		t.Fatalf("build: %v", err)
 	}
@@ -132,7 +132,7 @@ func TestAnUnparsableQuantityIsRefusedRatherThanDropped(t *testing.T) {
 	cr := testRun()
 	cr.Spec.Runtime.Resources.Memory = "four gigabytes"
 	b := Builder{Namespace: "agents"}
-	_, err := b.Job(cr, 1)
+	_, err := b.Job(cr, 1, nil)
 	if err == nil {
 		t.Fatal("a malformed quantity was accepted")
 	}
@@ -273,14 +273,54 @@ func TestABooleanTheImageReadsAsFalseWhenAbsentIsAlwaysSet(t *testing.T) {
 	}
 }
 
-// TestNothingSecretIsInTheEnvironment. A variable lands in /proc/self/environ,
-// which every child process inherits — including the agent, the one process in
-// this system explicitly assumed to be capable of exfiltrating what it reads.
-func TestNothingSecretIsInTheEnvironment(t *testing.T) {
+// TestOnlyThePromptIsReadFromASecret. A literal variable lands in
+// /proc/self/environ, which every child process inherits — including the agent,
+// the one process in this system explicitly assumed to be capable of
+// exfiltrating what it reads.
+//
+// Exactly one entry is allowed to come from a Secret, and it is named here
+// rather than described by a rule: the prompt is the task, the one value the
+// agent is meant to read, and nothing is protected by withholding it from the
+// process whose purpose is to act on it. Every other Secret key stays a file
+// under MountSecrets.
+func TestOnlyThePromptIsReadFromASecret(t *testing.T) {
 	spec := build(t, testRun(), 1)
+
+	var fromSecret []string
 	for _, e := range spec.Containers[0].Env {
-		if e.ValueFrom != nil && e.ValueFrom.SecretKeyRef != nil {
-			t.Fatalf("%s is read from a Secret into the environment", e.Name)
+		if e.ValueFrom == nil || e.ValueFrom.SecretKeyRef == nil {
+			continue
+		}
+		fromSecret = append(fromSecret, e.Name)
+		if e.Name != runv1.EnvPrompt {
+			t.Errorf("%s is read from a Secret into the environment", e.Name)
+			continue
+		}
+		ref := e.ValueFrom.SecretKeyRef
+		switch {
+		case ref.Key != runv1.SecretKeyPrompt:
+			t.Errorf("the prompt is read from key %q, want %q", ref.Key, runv1.SecretKeyPrompt)
+		case ref.Name != agentrunv1alpha1.SecretName(testRunID):
+			t.Errorf("the prompt is read from Secret %q, want the run's own", ref.Name)
+		case e.Value != "":
+			// A literal would put customer text into the Job's spec and into
+			// `kubectl describe pod`, which is the whole reason for the
+			// reference.
+			t.Errorf("the prompt also has a literal value of %d bytes", len(e.Value))
+		case ref.Optional == nil || !*ref.Optional:
+			// Without optional, a Secret written by an older controller gives a
+			// pod stuck in CreateContainerConfigError rather than one that
+			// starts and fails at validate with a message about the prompt.
+			t.Error("the prompt reference is not optional")
+		}
+	}
+	if len(fromSecret) != 1 {
+		t.Errorf("entries read from a Secret: %v, want exactly the prompt", fromSecret)
+	}
+
+	for _, e := range spec.Containers[0].Env {
+		if e.ValueFrom != nil {
+			continue
 		}
 		for _, forbidden := range []string{"token", "secret", "key", "presigned"} {
 			if strings.Contains(strings.ToLower(e.Name), forbidden) &&
@@ -288,6 +328,57 @@ func TestNothingSecretIsInTheEnvironment(t *testing.T) {
 				t.Fatalf("%s looks like secret material in the environment", e.Name)
 			}
 		}
+	}
+}
+
+// The checkpoint reaches the next attempt as a variable, in the contract's
+// execution order rather than the order the reports arrived in: the entrypoint's
+// resume rule is "every phase before the first unfinished one is done", which is
+// only meaningful against a fixed sequence.
+func TestTheCheckpointReachesTheNextAttempt(t *testing.T) {
+	// Absent on a first attempt, which the entrypoint reads as "nothing is done
+	// yet" rather than as a failure.
+	env := envMap(build(t, testRun(), 1).Containers[0].Env)
+	if v, ok := env[runv1.EnvCompletedPhases]; ok {
+		t.Errorf("a first attempt was handed a checkpoint of %q", v)
+	}
+
+	b := Builder{Namespace: "agents", ClusterID: "01J8X4K2ZQ7YB3M9F0R5W6T8CE"}
+	job, err := b.Job(testRun(), 2, []runv1.RuntimePhase{
+		// Deliberately out of order, and with a repeat.
+		runv1.RuntimePhasePersist, runv1.RuntimePhaseInit, runv1.RuntimePhaseRun,
+		runv1.RuntimePhaseInit,
+	})
+	if err != nil {
+		t.Fatalf("build the job: %v", err)
+	}
+	env = envMap(job.Spec.Template.Spec.Containers[0].Env)
+	if got, want := env[runv1.EnvCompletedPhases], "init,run,persist"; got != want {
+		t.Errorf("%s = %q, want %q", runv1.EnvCompletedPhases, got, want)
+	}
+}
+
+// The mode is told rather than inferred, and an unset one is relay: a CR
+// written before the field existed belongs to an installation that had no other
+// mode, and defaulting to the one that needs no configuration is the only safe
+// direction.
+func TestArtifactModeDefaultsToRelay(t *testing.T) {
+	env := envMap(build(t, testRun(), 1).Containers[0].Env)
+	if got := env[runv1.EnvArtifactMode]; got != string(runv1.ArtifactModeRelay) {
+		t.Errorf("%s = %q, want relay", runv1.EnvArtifactMode, got)
+	}
+
+	cr := testRun()
+	cr.Spec.ArtifactMode = runv1.ArtifactModeObjectStore
+	env = envMap(build(t, cr, 1).Containers[0].Env)
+	if got := env[runv1.EnvArtifactMode]; got != string(runv1.ArtifactModeObjectStore) {
+		t.Errorf("%s = %q, want object-store", runv1.EnvArtifactMode, got)
+	}
+
+	// And there is no bucket variable in either: the pod addresses no bucket by
+	// name, so a name in its environment is one it could leak.
+	if _, ok := env["HALIPHRON_STORAGE_BUCKET"]; ok {
+		t.Error("the pod was told a bucket name")
 	}
 }
 

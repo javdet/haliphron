@@ -2,15 +2,19 @@ package clusterapi
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
+	"io"
 	"net/http"
+	"net/url"
+	"strconv"
 	"time"
 
 	clusterv1 "github.com/automagicops/haliphron/api/cluster/v1"
 	runv1 "github.com/automagicops/haliphron/api/run/v1"
 )
 
-// The seven endpoints. Each returns either a decoded response or an error that
+// The eight endpoints. Each returns either a decoded response or an error that
 // carries an Action; no method interprets a status code on the caller's behalf,
 // with the single exception of the 204 on /leases, which is not a failure at
 // all and is reported as a nil response.
@@ -175,5 +179,87 @@ func (c *Client) IngestCompletion(ctx context.Context, req clusterv1.CompletionI
 	c.log.Info("completion forwarded",
 		"runID", req.RunID, "epoch", req.Epoch, "attempt", req.Attempt,
 		"accepted", out.Accepted, "duplicate", out.Duplicate)
+	return &out, nil
+}
+
+// IngestArtifact streams one spooled object to the control plane.
+//
+// It is the only call in this client that does not marshal a JSON body, because
+// the body is the object: the metadata rides in the query and one header, and
+// base64 in a field would cost a third of the bytes on the one path here that
+// carries gigabytes. It therefore bypasses do() rather than growing it a mode —
+// a helper that sometimes streams and sometimes marshals is a helper whose
+// callers have to know which.
+//
+// The reader is consumed once, so a retry is the caller re-opening the spooled
+// file rather than this function rewinding anything. That is why the spool
+// keeps the object until the backend has acknowledged it.
+func (c *Client) IngestArtifact(ctx context.Context, req clusterv1.ArtifactIngestRequest,
+	body io.Reader) (*clusterv1.ArtifactIngestResponse, error) {
+
+	auth, err := c.authed()
+	if err != nil {
+		return nil, err
+	}
+	if req.ClusterID == "" {
+		req.ClusterID = c.signer.ClusterID()
+	}
+
+	q := url.Values{
+		clusterv1.QueryRunID:   {string(req.RunID)},
+		clusterv1.QueryEpoch:   {strconv.FormatInt(req.Epoch, 10)},
+		clusterv1.QueryAttempt: {strconv.Itoa(int(req.Attempt))},
+		clusterv1.QueryKey:     {req.Key},
+	}
+	target := c.base + clusterv1.BasePath + "/ingest/artifacts?" + q.Encode()
+
+	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, target, body)
+	if err != nil {
+		return nil, fmt.Errorf("cluster-api ingest/artifacts: %w", err)
+	}
+	httpReq.Header.Set("Accept", "application/json")
+	httpReq.Header.Set(clusterv1.HeaderControllerVersion, c.version)
+	httpReq.Header.Set("Authorization", "Bearer "+auth)
+	if req.ContentType != "" {
+		httpReq.Header.Set("Content-Type", req.ContentType)
+	}
+	if req.SHA256 != "" {
+		httpReq.Header.Set(clusterv1.HeaderArtifactSHA256, req.SHA256)
+	}
+	// Stated, so the backend can refuse an oversized object on its headers
+	// rather than after receiving it. The spool knows the size exactly: it
+	// wrote the file.
+	httpReq.ContentLength = req.SizeBytes
+
+	// No client timeout on this one request. c.http bounds a whole exchange,
+	// which is right for a message about a run and wrong for a gigabyte of log
+	// over a link the controller does not choose: the deadline that applies
+	// here is the caller's context, which ends when the controller does.
+	resp, err := c.streamer().Do(httpReq)
+	if err != nil {
+		return nil, &TransportError{Op: "ingest/artifacts", Err: err}
+	}
+	defer func() {
+		_, _ = io.Copy(io.Discard, io.LimitReader(resp.Body, 1<<16))
+		_ = resp.Body.Close()
+	}()
+
+	payload, err := io.ReadAll(io.LimitReader(resp.Body, clusterv1.MaxRequestBytes))
+	if err != nil {
+		return nil, &TransportError{Op: "ingest/artifacts", Err: err}
+	}
+	if resp.StatusCode >= 400 {
+		return nil, problemFrom("ingest/artifacts", resp.StatusCode, payload)
+	}
+
+	var out clusterv1.ArtifactIngestResponse
+	if len(payload) > 0 {
+		if err := json.Unmarshal(payload, &out); err != nil {
+			return nil, fmt.Errorf("cluster-api ingest/artifacts: decode response (%d bytes, status %d): %w",
+				len(payload), resp.StatusCode, err)
+		}
+	}
+	c.log.Info("artifact forwarded",
+		"runID", req.RunID, "key", req.Key, "bytes", req.SizeBytes, "duplicate", out.Duplicate)
 	return &out, nil
 }

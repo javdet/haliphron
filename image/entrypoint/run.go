@@ -24,18 +24,30 @@ type Run struct {
 	secrets *Secrets
 	layout  Layout
 
-	storage   *Storage
+	// uploader is whichever half of the ArtifactStore port this run uses: the
+	// relay through the controller, or presigned access to an object store.
+	// Nothing below this line knows which, which is the point of the port.
+	uploader  Uploader
+	callback  *Callback
 	redactor  *Redactor
 	commander Commander
 	clock     func() time.Time
 	log       *LogSink
 	http      *http.Client
 
-	// checkpoint is this attempt's; prior is the previous attempt's, when
-	// there was one and it could be read.
+	// checkpoint is what an earlier attempt got through and what this one has
+	// reported. There is no "prior" any more: the checkpoint is not a document
+	// this pod fetches and compares against, it is a list the controller handed
+	// it in an environment variable.
 	checkpoint *Checkpoint
-	prior      *Checkpoint
 	resumed    bool
+
+	// outcomes is how each phase of *this* attempt ended, for the two phases
+	// that ask about an earlier one — push asks whether commit was skipped. It
+	// is separate from the checkpoint because the checkpoint answers "did any
+	// attempt do this" and this answers "did this attempt do this", and
+	// conflating them is how a resumed attempt decides it has nothing to push.
+	outcomes map[runv1.RuntimePhase]runv1.PhaseOutcome
 
 	prompt     []byte
 	nodeSchema []byte
@@ -55,7 +67,6 @@ type Run struct {
 	resultRef *runv1.ObjectRef
 	outputRef *runv1.ObjectRef
 	logRef    *runv1.ObjectRef
-	stateRef  *runv1.ObjectRef
 
 	repo runv1.RepoResult
 
@@ -91,6 +102,7 @@ func New(cfg *Config, secrets *Secrets, opts ...Option) (*Run, error) {
 		clock:     time.Now,
 		commander: ExecCommander{},
 		http:      &http.Client{Timeout: 30 * time.Second},
+		outcomes:  map[runv1.RuntimePhase]runv1.PhaseOutcome{},
 	}
 	for _, opt := range opts {
 		opt(r)
@@ -101,10 +113,23 @@ func New(cfg *Config, secrets *Secrets, opts ...Option) (*Run, error) {
 	// header values — but starting without it would leave the first phases
 	// uncovered, and the first phases are the ones that print bundles.
 	r.redactor = NewRedactor(secrets.Values()...)
-	r.storage = NewStorage(secrets.Bundle, r.redactor)
-	r.checkpoint = NewCheckpoint(cfg, r.clock())
+	r.callback = NewCallback(cfg, secrets, r.redactor, r.logf)
+
+	uploader, err := NewUploader(cfg, secrets, r.redactor, r.callback)
+	if err != nil {
+		return nil, err
+	}
+	r.uploader = uploader
+	r.checkpoint = NewCheckpoint(cfg, r.callback, r.clock)
 	return r, nil
 }
+
+// outcome is how a phase of this attempt ended.
+func (r *Run) outcome(phase runv1.RuntimePhase) runv1.PhaseOutcome { return r.outcomes[phase] }
+
+// Uploader is the artifact path this run took, for a test that wants to assert
+// on which one it was.
+func (r *Run) Uploader() Uploader { return r.uploader }
 
 // Layout is where this run's files are.
 func (r *Run) Layout() Layout { return r.layout }

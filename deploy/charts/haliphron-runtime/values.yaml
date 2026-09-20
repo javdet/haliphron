@@ -147,10 +147,39 @@ controller:
   # not pause reconciliation.
   replicaCount: 1
 
-  # Where the agent pods post their completion report. Cluster-local by
-  # nature, which is why no part of it can come from the control plane. Empty
-  # derives it from the Service this chart installs.
+  # Where the agent pods post: their completion report, their phase
+  # transitions, and — in the default relay artifact mode — their artifacts.
+  # A base URL, not one endpoint; the pod appends the contract's paths.
+  #
+  # Cluster-local by nature, which is why no part of it can come from the
+  # control plane. Empty derives it from the Service this chart installs.
   callbackURL: ""
+
+  # The artifact spool: the controller's copy of what a pod handed it, until
+  # the control plane has taken it.
+  #
+  # This is what makes object storage optional. In relay mode the pod uploads
+  # its result here and the controller acknowledges only once the bytes are on
+  # this volume — that acknowledgement is what lets the pod exit, and from then
+  # on the controller owns delivery. It survives both the pod's deletion and a
+  # backend outage, which is the point.
+  #
+  # Unused when the control plane runs artifacts.mode=object-store: the pod
+  # writes straight to the store and nothing passes through here. The mode is a
+  # per-run fact that arrives in a lease, so the volume is mounted either way
+  # rather than guessed at from a value this chart does not have.
+  spool:
+    persistence:
+      # A PVC by default, and the reason is the acknowledgement above: with an
+      # emptyDir a controller restart loses whatever had not been forwarded
+      # yet, which turns an upload a pod was told was safe into a lost result.
+      # Turn it off for an evaluation, where the cost of that is nothing.
+      enabled: true
+      accessMode: ReadWriteOnce
+      size: 20Gi
+      storageClass: ""
+      existingClaim: ""
+    mountPath: /var/lib/haliphron/spool
 
   # Ports. The callback is the only one an agent pod may reach.
   callbackPort: 8083

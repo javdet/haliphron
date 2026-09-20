@@ -37,8 +37,10 @@ func TestAContractMajorAboveTheImagesRefusesToStart(t *testing.T) {
 		t.Fatalf("reason %q, want ContractMismatch — without it this looks like "+
 			"a run that mysteriously cannot find its prompt", f.Reason)
 	}
-	// Nothing was fetched, so nothing was spent.
-	if keys := h.cp.RunKeys(h.prepared.RunID); len(keys) != 1 {
+	// Nothing was written, so nothing was spent. Zero rather than one: the
+	// prompt used to sit under this prefix before the pod started, and it is a
+	// column in the control plane now.
+	if keys := h.cp.RunKeys(h.prepared.RunID); len(keys) != 0 {
 		t.Fatalf("the run touched storage before checking the contract: %v", keys)
 	}
 }
@@ -115,12 +117,65 @@ func TestAMissingCheckpointIsASkipAndNotAFailure(t *testing.T) {
 
 	run, code := h.executeRun()
 	if code != runv1.ExitSuccess {
-		t.Fatalf("exit %d, want 0: a 404 on state.json is the normal answer on a "+
-			"first attempt and an image that fails on it fails every run (%v)",
+		t.Fatalf("exit %d, want 0: an absent HALIPHRON_COMPLETED_PHASES is the normal "+
+			"answer on a first attempt and an image that fails on it fails every run (%v)",
 			code, run.Failure())
 	}
 	if got := h.phase(run, runv1.RuntimePhaseCheckpoint); got != runv1.PhaseOutcomeSkipped {
 		t.Fatalf("the checkpoint phase is %s, want skipped", got)
+	}
+}
+
+// The phases go to the controller as they happen, which is what replaced
+// writing them into an object. A pod killed between two phases has still
+// recorded the one it finished.
+func TestEveryCompletedPhaseIsReportedAsItHappens(t *testing.T) {
+	t.Parallel()
+	h := newHarness(t, controlplane.RunRequest{Prompt: "hello"})
+	h.commander.handle = agentScript(h, "done", "")
+
+	run, code := h.executeRun()
+	if code != runv1.ExitSuccess {
+		t.Fatalf("exit %d (%v)", code, run.Failure())
+	}
+
+	reported := h.cp.Phases(h.prepared.RunID)
+	if len(reported) == 0 {
+		t.Fatal("no phase was reported; the next attempt would pay for the model again")
+	}
+	// In execution order, because the resume rule is "every phase before the
+	// first unfinished one is done" and that is only meaningful against a fixed
+	// sequence.
+	order := map[runv1.RuntimePhase]int{}
+	for i, p := range runv1.RuntimePhases {
+		order[p] = i
+	}
+	for i := 1; i < len(reported); i++ {
+		if order[reported[i]] < order[reported[i-1]] {
+			t.Fatalf("phases were reported out of order: %v", reported)
+		}
+	}
+	// And the ones that matter are among them.
+	got := map[runv1.RuntimePhase]bool{}
+	for _, p := range reported {
+		got[p] = true
+	}
+	for _, want := range []runv1.RuntimePhase{runv1.RuntimePhaseRun, runv1.RuntimePhasePersist} {
+		if !got[want] {
+			t.Errorf("phase %s was never reported: %v", want, reported)
+		}
+	}
+	// A skipped or failed phase is not reported: a later attempt may not assume
+	// it was done, and the one phase whose replay costs money is exactly where
+	// getting that wrong would skip a model call that never happened.
+	if got[runv1.RuntimePhaseCheckpoint] {
+		t.Error("a skipped phase was reported as completed")
+	}
+
+	// The report carries the same list, as the copy that survives a pod whose
+	// last few reports did not get through.
+	if len(run.Report().CompletedPhases) == 0 {
+		t.Error("the completion report carries no checkpoint")
 	}
 }
 
@@ -147,17 +202,28 @@ func TestARefusedUploadIsInfraAndNotConfig(t *testing.T) {
 	}
 }
 
-func TestAnUnreachablePromptIsRetryable(t *testing.T) {
+// The prompt cannot be unreachable any more: it is a variable, and the fetch
+// phase makes no network call at all. What is left to check is that its absence
+// is refused before the model is called, and named.
+func TestAMissingPromptIsRefusedBeforeAnythingIsSpent(t *testing.T) {
 	t.Parallel()
-	h := newHarness(t, controlplane.RunRequest{Prompt: "hello"})
-	h.cp.FailStorage(http.MethodGet, runv1.StorageKeyPrompt, http.StatusServiceUnavailable, 0)
+	h := newHarness(t, controlplane.RunRequest{
+		Prompt: "hello",
+		// An empty override removes the variable, which is how a Secret written
+		// without the key, or a container built without the reference, reaches
+		// the pod.
+		Env: map[string]string{runv1.EnvPrompt: ""},
+	})
 
-	run, code := h.executeRun()
-	if code != runv1.ExitStorage {
-		t.Fatalf("exit %d, want %d (%v)", code, runv1.ExitStorage, run.Failure())
+	// Caught while the configuration is being read, which is before anything at
+	// all happens — not at the fetch phase, and certainly not at the run phase
+	// against an empty string.
+	f := h.loadFails()
+	if f.Code != runv1.ExitConfig {
+		t.Fatalf("exit %d, want %d", f.Code, runv1.ExitConfig)
 	}
-	if run.Failure().Phase != runv1.RuntimePhaseFetch {
-		t.Fatalf("failed phase %s, want fetch", run.Failure().Phase)
+	if !strings.Contains(f.Message(), runv1.EnvPrompt) {
+		t.Errorf("the message does not name the variable: %s", f.Message())
 	}
 }
 
@@ -205,34 +271,40 @@ func TestAResumedAttemptDoesNotPayForTheModelAgain(t *testing.T) {
 	}
 }
 
+// Any doubt is resolved in favour of a full run. An extra bill for the model is
+// money; a wrongly resumed attempt is an incorrect result reported as correct,
+// and nobody notices that on the day it happens.
 func TestACheckpointIsRefusedWhenAnythingAboutItIsWrong(t *testing.T) {
 	t.Parallel()
 	tests := []struct {
-		name   string
-		mutate func(*entrypoint.Checkpoint)
-		drop   string
+		name    string
+		attempt int32
+		phases  []runv1.RuntimePhase
 	}{
 		{
-			name:   "it belongs to a different run",
-			mutate: func(cp *entrypoint.Checkpoint) { cp.RunID = "01J000000000000000000000AA" },
+			name:    "it is empty",
+			attempt: 2,
 		},
 		{
-			name:   "it was written under a different contract major",
-			mutate: func(cp *entrypoint.Checkpoint) { cp.ContractVersion = "99.0" },
+			name:    "the run phase is not in it",
+			attempt: 2,
+			phases:  []runv1.RuntimePhase{runv1.RuntimePhaseInit, runv1.RuntimePhaseClone},
 		},
 		{
-			name:   "it is not from an earlier attempt",
-			mutate: func(cp *entrypoint.Checkpoint) { cp.Attempt = 2 },
+			// The stricter half of the resume rule. persist is what made the
+			// model's product durable; an attempt that ran the model and did
+			// not reach persist has its output nowhere, and skipping the paid
+			// phase would leave this one with nothing to report.
+			name:    "the run phase is in it and persist is not",
+			attempt: 2,
+			phases:  []runv1.RuntimePhase{runv1.RuntimePhaseRun},
 		},
 		{
-			name: "the run phase did not finish",
-			mutate: func(cp *entrypoint.Checkpoint) {
-				cp.Phases[runv1.RuntimePhaseRun] = entrypoint.PhaseRecord{Outcome: runv1.PhaseOutcomeFailed}
-			},
-		},
-		{
-			name:   "it records no result in storage",
-			mutate: func(cp *entrypoint.Checkpoint) { cp.Artifacts = nil },
+			// A checkpoint on a first attempt belongs to a previous owner of
+			// the work. This pod has none of that attempt's product.
+			name:    "it arrived on a first attempt",
+			attempt: 1,
+			phases:  []runv1.RuntimePhase{runv1.RuntimePhaseRun, runv1.RuntimePhasePersist},
 		},
 	}
 
@@ -245,20 +317,7 @@ func TestACheckpointIsRefusedWhenAnythingAboutItIsWrong(t *testing.T) {
 				t.Fatalf("the first attempt exited %d", code)
 			}
 
-			// Corrupt the checkpoint in exactly one way and start attempt two.
-			var cp entrypoint.Checkpoint
-			if err := json.Unmarshal(h.mustObject(runv1.StorageKeyState), &cp); err != nil {
-				t.Fatalf("the checkpoint does not parse: %v", err)
-			}
-			tc.mutate(&cp)
-			body, err := json.Marshal(cp)
-			if err != nil {
-				t.Fatalf("marshal: %v", err)
-			}
-			h.cp.Put(h.prefix()+runv1.StorageKeyState, body)
-
-			second := h.cp.Reissue(h.prepared, 2)
-			h.stage(second)
+			h.stage(h.cp.ReissueWithPhases(h.prepared, tc.attempt, tc.phases))
 			called := false
 			h.commander = &scriptedCommander{handle: func(c entrypoint.Command) (entrypoint.CommandResult, error) {
 				if c.Path == "claude" && len(c.Args) > 0 && c.Args[0] == "-p" {
@@ -281,7 +340,11 @@ func TestACheckpointIsRefusedWhenAnythingAboutItIsWrong(t *testing.T) {
 	}
 }
 
-func TestACheckpointPointingAtAMissingResultForcesAFullRun(t *testing.T) {
+// A phase name this image does not recognise is dropped rather than carried.
+// The list is "phases you may skip", and skipping one whose name means nothing
+// here is the single way this variable could cost money — an image a version
+// behind must not be talked into believing it has already run the model.
+func TestAnUnknownPhaseNameCannotCauseAResume(t *testing.T) {
 	t.Parallel()
 	h := newHarness(t, controlplane.RunRequest{Prompt: "hello"})
 	h.commander.handle = agentScript(h, "first", "")
@@ -289,25 +352,28 @@ func TestACheckpointPointingAtAMissingResultForcesAFullRun(t *testing.T) {
 		t.Fatalf("the first attempt exited %d", code)
 	}
 
-	// The checkpoint still claims run: ok, and what it points at is gone.
-	h.cp.Delete(h.prefix() + runv1.StorageKeyResult)
-
-	second := h.cp.Reissue(h.prepared, 2)
+	// A control plane a version ahead, naming the expensive phase something
+	// this image has never heard of.
+	second := h.cp.ReissueWithPhases(h.prepared, 2, nil)
+	second.Env[runv1.EnvCompletedPhases] = "init,invoke-model,store"
 	h.stage(second)
+
 	called := false
 	h.commander = &scriptedCommander{handle: func(c entrypoint.Command) (entrypoint.CommandResult, error) {
 		if c.Path == "claude" && len(c.Args) > 0 && c.Args[0] == "-p" {
 			called = true
+			h.writeOutput("{}")
 			c.Stdout.Write([]byte(claudeSummary("second")))
 		}
 		return entrypoint.CommandResult{}, nil
 	}}
 
-	if code := h.execute(); code != runv1.ExitSuccess {
-		t.Fatalf("exit %d", code)
+	run, code := h.executeRun()
+	if code != runv1.ExitSuccess {
+		t.Fatalf("exit %d (%v)", code, run.Failure())
 	}
 	if !called {
-		t.Fatal("the attempt skipped the paid phase and would have reported a result that is not there")
+		t.Fatal("a phase name this image does not implement was taken as grounds to skip the model")
 	}
 }
 

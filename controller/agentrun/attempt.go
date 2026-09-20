@@ -63,7 +63,11 @@ func (r *Reconciler) ensureJob(ctx context.Context, cr *agentrunv1alpha1.AgentRu
 		return ctrl.Result{}, err
 	}
 
-	job, err := r.Builder.Job(cr, attempt)
+	// The checkpoint any earlier attempt of this run reported. The controller's
+	// own copy, not the backend's: this is the path that has to work while the
+	// control plane is unreachable (P4), and the backend's copy is the one that
+	// survives losing the CR.
+	job, err := r.Builder.Job(cr, attempt, cr.Status.CompletedPhases)
 	if err != nil {
 		// The spec was admitted and cannot be built: nothing a retry fixes.
 		r.event(cr, corev1.EventTypeWarning, agentrunv1alpha1.ReasonJobCreateFailed, err.Error())
@@ -105,17 +109,21 @@ func (r *Reconciler) ensureJob(ctx context.Context, cr *agentrunv1alpha1.AgentRu
 }
 
 // ensureFreshBundle reissues the presigned bundle when it would expire before
-// the run could finish.
+// the run could finish. Object-store mode only.
 //
 // This is the failure that looks like nothing else: every link is valid when
 // the Job is created, the agent works for fifty minutes, and the upload of the
 // result fails with 403 on a signature that expired ten minutes ago. The work
 // succeeded and the evidence is gone. One comparison before the pod starts
-// removes the whole class.
+// removes the whole class — and choosing relay mode removes it too, which is
+// one of the quieter reasons the default is what it is.
 func (r *Reconciler) ensureFreshBundle(ctx context.Context, cr *agentrunv1alpha1.AgentRun, secret *corev1.Secret, attempt int32) error {
 	if r.Bundles == nil {
 		return nil
 	}
+	// Relay mode has no signatures and nothing to expire: the pod posts to this
+	// controller's Service, which does not stop working after two hours. The
+	// whole of this function is object-store mode.
 	raw, ok := secret.Data[runv1.SecretKeyPresigned]
 	if !ok {
 		return nil

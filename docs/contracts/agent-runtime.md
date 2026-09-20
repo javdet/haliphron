@@ -2,10 +2,11 @@
 
 Status: ready for implementation
 Date: 2026-09-17
-Shape: [api/runtime/v1](../../api/runtime/v1) — the completion webhook, the
-`output.json` and `state.json` schemas; [api/run/v1/runtime.go](../../api/run/v1/runtime.go) —
-variables, paths, phases; [api/run/v1/completion.go](../../api/run/v1/completion.go) —
-the report
+Shape: [api/runtime/v1](../../api/runtime/v1) — the three callback endpoints and
+the `output.json` schema; [api/run/v1/runtime.go](../../api/run/v1/runtime.go) —
+variables, paths, phases; [api/run/v1/progress.go](../../api/run/v1/progress.go) —
+the phase report and the artifact acknowledgement;
+[api/run/v1/completion.go](../../api/run/v1/completion.go) — the report
 Basis: [architecture.md](../architecture.md), sections 8, 10, 11, 12.2, 13.5, 14, 15;
 [cluster-api.md](cluster-api.md), [agentrun-crd.md](agentrun-crd.md)
 
@@ -34,7 +35,7 @@ do in v1.
 | backend ↔ controller | [Cluster API](cluster-api.md), contract 1 |
 | controller ↔ kubernetes | [CRD `AgentRun`](agentrun-crd.md), contract 2 |
 | controller ↔ agent pod | **this contract** |
-| pod ↔ storage | this contract, section 9 (addressing — contract 1, `ArtifactBundle`) |
+| pod ↔ the artifact store | this contract, section 9 (which of the two paths — contract 1, `ArtifactBundle`) |
 | client ↔ backend | the external REST `/api/v1` |
 
 The pod is the **least trusted component in the system**. It executes text that
@@ -47,11 +48,14 @@ it is malicious, but because from inside the pod there is nothing to distinguish
 Hence three cross-cutting rules, to which half the decisions below reduce:
 
 1. **The pod is given exactly what it needs for its work, and not one byte
-   more.** No storage credentials — presigned links to its own prefix instead.
-   No ServiceAccount token. No backend token. The git token lives for an hour
-   and opens one repository.
+   more.** No storage credentials in either artifact mode: in the default relay
+   mode it addresses no store at all, and in object-store mode it gets presigned
+   links to its own prefix. No ServiceAccount token. No backend token. The git
+   token lives for an hour and opens one repository.
 2. **Everything the pod produces is durable before it is announced** (P5). The
-   webhook is an optimization, not a correctness condition.
+   webhook is an optimization, not a correctness condition. "Durable" is
+   whatever outlives the pod — the controller's acknowledgement, or the object
+   store — and never necessarily a bucket.
 3. **What the pod says about itself is data, not truth.** Cost, tokens and
    duration are self-declared. The backend checks them against what it observes.
 
@@ -90,12 +94,14 @@ are inherited by every child process, including the agent itself.
 | `HALIPHRON_SUBMODULES` | no | `spec.repo.submodules` | |
 | `HALIPHRON_LFS` | no | `spec.repo.lfs` | |
 | `HALIPHRON_CREATE_PR` | no | `spec.repo.createPR` | |
-| `HALIPHRON_PROMPT_SHA256` | yes | `spec.prompt.sha256` | The digest of `prompt.txt`. A mismatch means exit 30 |
+| `HALIPHRON_PROMPT` | yes | the per-run Secret, key `prompt` | **The task.** Set through `valueFrom.secretKeyRef`, never as a literal: prompts carry customer context, and a secretKeyRef keeps the text out of the Job's spec and out of `kubectl describe pod`. Bounded at 512 KiB by the backend at admission |
+| `HALIPHRON_PROMPT_SHA256` | yes | `spec.promptSHA256` | The digest of the value above. A mismatch means exit 30 |
+| `HALIPHRON_COMPLETED_PHASES` | no | `.status.completedPhases` | Comma-separated phases an earlier attempt of this run got through. Absent on a first attempt, which is a normal answer and not a failure |
+| `HALIPHRON_ARTIFACT_MODE` | no | `spec.artifactMode` | `relay` or `object-store`. Absent reads as `relay` |
 | `HALIPHRON_LOG_CHUNK_SECONDS` | no | `spec.observability.logChunkIntervalSeconds` | The log chunk upload interval |
 | `HALIPHRON_OTLP_ENDPOINT` | no | `spec.observability.otlpEndpoint` | Empty means no spans are emitted; `phaseTimings` remain |
 | `HALIPHRON_TRACEPARENT` | no | `spec.observability.traceparent` | The parent context: workflow → step → attempt |
-| `HALIPHRON_STORAGE_BUCKET` | no | controller | Informational: the pod reaches storage only through presigned links |
-| `HALIPHRON_STORAGE_PREFIX` | no | controller | Informational, for log readability |
+| `HALIPHRON_STORAGE_PREFIX` | no | controller | Informational, for log readability. There is deliberately no companion bucket variable: the pod addresses no bucket by name in either mode |
 | `HALIPHRON_IMAGE_VERSION` | no | image | Baked in at build time, returned in the report |
 
 The list is normative: it also lives as `ContractEnv` in
@@ -119,13 +125,13 @@ The per-run Secret is **mounted as a volume** at `/haliphron/secrets/`, mode
 This is a delta against contract 2, which had `envFrom` (R1), and it has two
 independent reasons, either of which would have sufficed.
 
-**Mechanical.** The Secret's keys are fixed by contract 1: `git-token`,
-`llm-api-key`, `mcp.json`, `presigned.json`, `callback-token`. Not one of them
-is a valid environment variable name. `envFrom` silently skips such keys,
-leaving an Event in the namespace — which means the pod starts with no git
-token, no MCP configuration and not a single link to storage, and the first
-intelligible message about it appears in the `fetch` phase as "could not
-download the prompt".
+**Mechanical.** The Secret's keys are fixed by contract 1: `prompt`,
+`git-token`, `llm-api-key`, `mcp.json`, `callback-token`, and `presigned.json`
+in object-store mode. All but the first are invalid environment variable names.
+`envFrom` silently skips such keys, leaving an Event in the namespace — which
+means the pod starts with no git token, no MCP configuration and no credentials
+at all, and the first intelligible message about it is a clone that failed to
+authenticate.
 
 **Substantive.** Environment variables are inherited. The agent is a process we
 start ourselves inside the pod, and section 1 says of it that it may do anything
@@ -142,6 +148,33 @@ repo-scoped token, presigned links to its own prefix, no ServiceAccount token.
 **What the entrypoint exports to the agent's child process:** the model key
 under the name the CLI expects, and the MCP header values (section 8). Nothing
 else. The rest stays in the entrypoint's environment and in files.
+
+### 2.3 The prompt is the one exception, and it is a deliberate one
+
+`HALIPHRON_PROMPT` is an environment variable sourced from a key of the same
+Secret, through `valueFrom.secretKeyRef`. Everything above argues that Secret
+keys should not become environment variables. This one does, and the distinction
+is not a compromise.
+
+ADR 33 keeps secret *material* out of the environment because the agent inherits
+the pod's environment and is assumed capable of exfiltrating whatever it can
+read. The prompt is the one value the agent is *meant* to read: it is the task.
+Nothing is protected by withholding it from the process whose entire purpose is
+to act on it, and the entrypoint writes it to a file for the CLI in any case.
+
+What the Secret buys is a different property. Prompts carry customer context, so
+a field in the CR's `spec` would put them into `kubectl get agentrun -o yaml`
+and into every GitOps diff. A `secretKeyRef` keeps the text out of the CR, out
+of the Job's spec and out of `kubectl describe pod` — and it names **one key**,
+which is exactly the difference between it and the `envFrom` failure mode above.
+
+The cost is a ceiling, stated rather than discovered. A Secret is hard-capped at
+1 MiB across all of its keys, and this one also carries the git token, the model
+key and `mcp.json`; the backend therefore refuses a prompt over 512 KiB at
+admission, with a 413 naming the limit. A workflow step whose accumulated
+context outgrows that is a real case, and the answer is to summarise upstream
+output into the step's input rather than to grow the envelope. It is paid in
+exchange for a system that starts a run without an object store.
 
 ### 2.3 Filesystem layout
 
@@ -178,13 +211,13 @@ container root is **read-only** (R6). That is achievable rather than a pious
 wish, under one condition: every CLI cache is redirected into `$HOME` through
 `CLAUDE_CONFIG_DIR`, `CODEX_HOME`, `XDG_CACHE_HOME`, `npm_config_cache`. This is
 verified by running the image under `docker run --read-only` with three tmpfs
-mounts, not by argument — see the checklist in section 18.
+mounts, not by argument — see the checklist in section 19.
 
 ---
 
 ## 3. Phases
 
-`state.json` is keyed by phase names, `phaseTimings` in the report enumerates
+`run_attempts.completed_phases` holds these names, `phaseTimings` in the report enumerates
 the same ones, and the UI groups its timeline by them. The names are contract,
 not logging.
 
@@ -192,21 +225,21 @@ not logging.
 |---|---|---|---|
 | 1 | `init` | Runtime identity, directory preparation, `.git/info/exclude` | 30 |
 | 2 | `validate` | Checks the variables and the presence of the secret files | 30 |
-| 3 | `fetch` | Presigned GET of `prompt.txt`, sha256 check | 21 / 30 |
-| 4 | `checkpoint` | Presigned GET of `state.json`; a 404 is a normal answer | 21 |
+| 3 | `fetch` | Read `HALIPHRON_PROMPT`, sha256 check | 30 |
+| 4 | `checkpoint` | Read `HALIPHRON_COMPLETED_PHASES`; absent is a normal answer | — |
 | 5 | `auth` | Model credentials, git credential helper, `gh`/`glab` | 30 |
 | 6 | `clone` | Clone, checkout base, create the target branch | 20 / 30 |
 | 7 | `role` | The resolution chain, intersected with the policy ceiling | 30 |
 | 8 | `mcp-prepare` | Render the MCP configuration for the runtime, secrets by reference | 30 |
 | 9 | `mcp-verify` | Check that the servers came up | 30 |
-| 10 | `run` | The agent CLI under a timeout, tee'd to the log and chunked to storage | 10 / 11 |
+| 10 | `run` | The agent CLI under a timeout, tee'd to the log and chunked upstream | 10 / 11 |
 | 11 | `parse` | Normalize the runtime's output into `result.md` and `usage` | 10 |
 | 12 | `output` | Wrap the agent's output in the envelope, validate against the node schema | 12 |
-| 13 | `persist` | PUT `result.md`, `output.json`, the log, `state.json` | 21 |
+| 13 | `persist` | Upload `result.md`, `output.json` and the log so far | 21 |
 | 14 | `commit` | Commit any leftover changes | 20 |
 | 15 | `push` | `push --force-with-lease` to the deterministic branch | 20 |
 | 16 | `pr` | create-or-update the PR/MR | 20 |
-| 17 | `finalize` | PUT the final log, `completion.json`, the last `state.json` | 21 |
+| 17 | `finalize` | Upload the final log and `completion.json` | 21 |
 | 18 | `notify` | POST the report to the controller | — |
 
 ### Why `persist` comes before git rather than after
@@ -228,9 +261,23 @@ the very phases that fail. `persist` therefore runs **immediately after the
 result is obtained**, and before anything that is entitled to fail with a
 retryable class.
 
-`finalize` remains: it appends the log of the git phases, writes
-`completion.json` and the final checkpoint. But everything that has been paid
-for is already stored by then.
+`finalize` remains: it appends the log of the git phases and writes
+`completion.json`. But everything that has been paid for is already stored by
+then.
+
+### `fetch` and `checkpoint` survived losing their round trips
+
+Both phases used to be presigned GETs and are now reads of the environment. They
+remain phases, and that is deliberate rather than inertia: the names here key
+the checkpoint, they are the `phase` field of `PhaseTiming`, and the UI groups a
+run's timeline by them. Deleting two of them to save two lines of entrypoint
+would have been a breaking change to three contracts in exchange for nothing.
+
+What changed is their exit codes, and the change is the point. `fetch` could
+fail with 21 because a signature had expired; `checkpoint` could fail with 21
+for the same reason, on the path whose whole purpose was to stop a retry paying
+for the model twice. Neither can now fail for a reason unrelated to the run — a
+digest mismatch is still 30, and an absent checkpoint is a skip.
 
 ### Skips are a normal outcome
 
@@ -254,19 +301,26 @@ status even if the pod never managed to say anything.
 | 11 | `agent` | The `run` phase timed out | No |
 | 12 | `agent` | `output.json` is missing or does not pass the node schema | No |
 | 20 | `git` | Clone, push or PR failed for a surmountable reason | Yes |
-| 21 | `infra` | A presigned GET or PUT failed | Yes |
+| 21 | `infra` | An artifact upload failed: a relay POST, or a presigned PUT | Yes |
 | 30 | `config` | Incomplete configuration, an insurmountable access failure, MCP servers did not come up | No |
 | >128 | `infra` | A signal: OOMKilled, eviction, drain, cancellation | Yes |
 
 The table is normative and matches `FailureClassForExitCode` in
 [api/run/v1/phase.go](../../api/run/v1/phase.go) — a test checks it.
 
-**Code 21 is a delta (R3).** Without it an expired presigned bundle is expressed
-as code 30, which is not retried, and a run whose result has already been
-obtained dies for good — even though the controller knows how to fix exactly
-this breakage: it reissues the bundle before any attempt past the first (D5 of
-contract 1). This is the one failure the cluster repairs by itself, and it is
-obliged to be retryable.
+**Code 21 is a delta (R3).** Without it an upload failure is expressed as code
+30, which is not retried, and a run whose result has already been obtained dies
+for good — even though the cluster knows how to fix exactly this breakage. In
+relay mode the controller was restarting and the next attempt finds it back; in
+object-store mode the controller reissues the bundle before any attempt past the
+first (D5 of contract 1). It is the one failure the cluster repairs by itself,
+and it is obliged to be retryable.
+
+It also became rarer. Two of its causes are gone with the reads they belonged
+to: a run can no longer fail before it starts because the signature on
+`prompt.txt` expired, and a retry can no longer fail to read the checkpoint it
+was entitled to. In relay mode the code is reachable only when the controller
+itself is unreachable.
 
 ### The pod determines the class, not the controller
 
@@ -283,7 +337,7 @@ The entrypoint must therefore distinguish, inside the git phases (R11):
 
 The controller may reclassify only what it observes itself: OOM, eviction,
 cancellation. Everything else it takes as given — and that is precisely why
-`reason` and `message` in the report (section 10) are not decorative: they are
+`reason` and `message` in the report (section 13) are not decorative: they are
 the only instance of the evidence, and it exists once, in the pod, at the moment
 of failure.
 
@@ -291,21 +345,37 @@ of failure.
 
 ## 5. The prompt
 
-The prompt travels through storage rather than through the Secret: a workflow
-step's context has no natural ceiling, and a Secret is capped at 1 MiB across
-all keys together.
+The prompt arrives as `HALIPHRON_PROMPT`, sourced from the `prompt` key of the
+per-run Secret through `valueFrom.secretKeyRef`. It used to be an object in
+storage, fetched with a presigned GET, and moving it is one of the two changes
+that made an object store optional: an object there put the store on the path to
+*starting* a run rather than to finishing one.
 
-The `fetch` phase: a presigned GET of the `prompt.txt` key from the bundle, then
-a **sha256 check against `HALIPHRON_PROMPT_SHA256`**. A mismatch means exit 30,
-class `config`, `reason: PromptDigestMismatch` (R12). A retry does not help and
-is not requested: a run executing something other than what passed admission is
-worse than a run that never started. The case is not hypothetical — overwriting
-the object under the same key when a task is resubmitted costs exactly one PUT.
+Section 2.3 is the argument for it being allowed in the environment at all. What
+matters here is the ceiling and the check.
+
+**The ceiling is 512 KiB and is enforced at admission**, with a 413 naming the
+limit. It is not arbitrary: the value has to fit in a Secret that also carries
+the git token, the model key and `mcp.json`, and a Secret is hard-capped at
+1 MiB across all of its keys. A workflow step whose accumulated context outgrows
+it is a real case; the answer is to summarise upstream output into the step's
+input rather than to grow the envelope. The pod never sees an over-large prompt,
+because it was refused before the run existed.
+
+**The `fetch` phase checks sha256 against `HALIPHRON_PROMPT_SHA256`.** A
+mismatch means exit 30, class `config`, `reason: PromptDigestMismatch` (R12). A
+retry does not help and is not requested: a run executing something other than
+what passed admission is worse than a run that never started. This is the one
+property the presigned GET bought that was worth keeping, and it costs a hash of
+a value already in memory.
 
 The prompt is passed to the CLI **over stdin or via a file, never as a
 command-line argument**: arguments are visible in `ps` to any process in the pod,
 they land in dumps and in error messages, and they hit `ARG_MAX` on a long
-workflow context.
+workflow context. The file is written under `/haliphron/run/`, outside the work
+tree and outside anything the agent is pointed at, so that a prompt injection
+which talks the agent into rewriting "its instructions" rewrites nothing that is
+read again.
 
 The role's system prompt is a separate entity; it arrives as a file from
 `/haliphron/role/` and is supplied through the runtime's own mechanism
@@ -316,10 +386,30 @@ shape" requirement is appended there automatically, from the schema.
 
 ## 6. The checkpoint and idempotent retries
 
-`runs/{runID}/state.json` is the only object the pod both writes and reads.
-Neither the controller nor the backend parses it: this is runtime-internal
-state, moved outside only because there is nowhere else to keep it — a pod's
-filesystem dies with the pod.
+The checkpoint is no longer an object. The pod reports each phase to the
+controller as it completes it, and receives what earlier attempts got through in
+`HALIPHRON_COMPLETED_PHASES`.
+
+`runs/{runID}/state.json` used to be the only object the pod both wrote and
+read. The difference is not only where the fact lives. The object was written
+when the pod chose to save it — at the end of `persist` and again at `finalize`
+— so a pod killed anywhere between those two points recorded nothing about the
+phases in between. A report at the moment a phase completes is held by something
+that outlives the pod, so an OOM between two phases still leaves the one that
+finished on the record. And the record is visible: "how far did this get before
+it died" is a `SELECT` on the control plane rather than an object fetched out of
+a bucket.
+
+**Only an `ok` outcome is reported.** A failed or skipped phase is not something
+a later attempt may assume was done, and the one phase whose replay costs money
+is exactly where getting that wrong would skip a model call that never happened.
+
+**A failure to report a phase is logged and swallowed.** The cost of losing one
+is that a later attempt redoes a phase it need not have — for `run`, one extra
+model bill — and the cost of failing the run over it is the whole run. The two
+are not close.
+
+### Resuming
 
 **Exactly one phase is resumed — `run`.** It is the only one whose repetition
 costs money, and the only one whose result is already durable by the time the
@@ -329,21 +419,37 @@ marked as pushed could have been overwritten by a human since.
 
 **Resume conditions, all mandatory:**
 
-- `state.runID` matches `HALIPHRON_RUN_ID`;
-- `state.attempt` is strictly less than `HALIPHRON_ATTEMPT`;
-- the major of `state.contractVersion` equals the image's own;
-- `phases.run.outcome == "ok"`;
-- `artifacts.result` and `artifacts.output` are present and readable.
+- `HALIPHRON_COMPLETED_PHASES` is present and non-empty;
+- `HALIPHRON_ATTEMPT` is greater than 1;
+- the list contains `run`;
+- the list contains `persist`.
+
+The last condition replaced "`artifacts.result` and `artifacts.output` are
+present and readable", and it is stricter in the way that matters. The old check
+could only verify readability in object-store mode, and only when the bundle
+happened to grant a read of those keys — so in practice it took the claim on
+trust and said so in the log. Requiring `persist` asks the same question a
+different way: `persist` is the phase that made the model's product durable, so
+an attempt that completed it has a result in the store under a key this
+attempt's report will name, whether or not this pod could read it back.
+
+The contract major is not among the conditions any more, and it does not need to
+be: the entrypoint drops a phase name it does not recognise when it parses the
+variable, so an image a version behind cannot be talked into believing it has
+already run the model.
 
 Any doubt is resolved in favor of a full run. An extra bill for the model is
 money; a wrongly resumed attempt is an incorrect result reported as correct, and
 it will not be noticed straight away.
 
-`log.nextChunk` is not reset between attempts (R9). Numbering from zero would
-overwrite the previous attempt's chunks, and the user would see two runs spliced
-together as one, seamlessly.
-
-The schema is [state.schema.json](../../api/runtime/v1/state.schema.json).
+**Log chunk numbering** is not restarted between attempts (R9). Each attempt
+numbers within a block of a thousand — `(attempt - 1) * 1000` — which is cruder
+than the carried-over counter that lived in `state.json` and strictly more
+robust: the counter lived in the object this contract no longer has, and asking
+the controller for it would put a round trip in front of the first line of log.
+A run producing a thousand chunks in one attempt has bigger problems than an
+overlap, and the ordering within an attempt — which is what a reader follows —
+is exact.
 
 ---
 
@@ -426,7 +532,82 @@ host, and reset the remote to a clean URL after the clone.
 
 ---
 
-## 9. Structured output
+## 9. The artifact path: two modes, one port
+
+Everything the run produces leaves the pod the same way, under the same key
+layout, whichever of the two paths is in force:
+
+```
+runs/{runID}/output.json          the structured output (section 10)
+runs/{runID}/result.md            the human-readable summary
+runs/{runID}/completion.json      the report, for the CompletedWithoutResult path
+runs/{runID}/logs/agent.log       the final log
+runs/{runID}/logs/chunks/{n}.log  incremental chunks
+runs/{runID}/artifacts/**         what the agent chose to keep
+```
+
+`HALIPHRON_ARTIFACT_MODE` says which path. An absent value reads as `relay`: a
+controller older than this image belongs to an installation that had no other
+mode, and defaulting to the one that needs no configuration is the only safe
+direction.
+
+| Mode | Where the bytes go | What the pod holds |
+|---|---|---|
+| `relay` (default) | `POST` to the controller Service it already posts the completion to | nothing but the callback token |
+| `object-store` | presigned `PUT` and `POST` straight to S3 or MinIO | the bundle from `presigned.json` |
+
+**The pod holds no storage credential in either.** In relay mode it addresses no
+store at all and names keys relative to its own run — the controller stamps
+`runs/{runID}/` from the CR, so the prefix is not the pod's to choose. In
+object-store mode a presigned link bounds it to its own prefix.
+
+### There are no reads any more
+
+The bundle used to carry presigned GETs, and the two objects they were for —
+`prompt.txt` and `state.json` — are both gone from this store. The prompt is an
+environment variable and the checkpoint is a column in the control plane.
+
+That removes exit 21's most common cause and one whole class of "the run failed
+and the reason was a URL expiry": a signature that expired between the lease and
+the pod starting would answer 403, 403 is indistinguishable from a forged link,
+and the run died before it did anything. It also removes the one round trip that
+stood between a scheduled pod and its task.
+
+### The relay's acknowledgement is the contract
+
+In relay mode the pod uploads an object and **waits**. The acknowledgement means
+the bytes are on a disk that is not the pod's — the controller wrote them to its
+own volume before answering — and from that moment the pod may exit: the
+controller owns delivery onward, and it survives both the pod's deletion and a
+backend outage.
+
+That is principle P5 in full, without a bucket. What P5 forbids is a paid-for
+result existing only in the filesystem of a pod about to be deleted; it never
+required an object store to be one of the parties, and reading it as though it
+did is what made one look mandatory.
+
+The digest goes in `X-Haliphron-SHA256` and is verified on the far side before
+anything is stored. A transfer that was cut is refused rather than kept: a
+half-written `result.md` under the right key is worse than none, because the
+`CompletedWithoutResult` recovery would read it and believe it.
+
+### The per-run byte budget
+
+A run may store a bounded number of bytes across every object it produces —
+1 GiB by default, stated by the backend in the lease. It is enforced by the
+controller rather than the backend, so an over-large upload is refused one hop
+from the pod instead of after crossing whatever network separates the cluster
+from the control plane.
+
+The refusal is a **413, and it is the one the pod can act on**: it drops the
+object, notes it in the log and carries on. Failing a run over an attachment
+would throw away the result the run was for. The acknowledgement carries
+`bytesRemaining` so that an entrypoint about to upload a two-gigabyte log can
+decline before the transfer rather than after it.
+
+---
+
+## 10. Structured output
 
 **The agent writes the payload. The entrypoint fills in the envelope** (R5).
 
@@ -468,7 +649,7 @@ The envelope schema is
 
 ---
 
-## 10. Logs and redaction
+## 11. Logs and redaction
 
 **There is no live `kubectl logs -f`** (the decision on question 5 of the
 architecture). The entrypoint writes the agent's combined stream to a file and
@@ -498,7 +679,7 @@ secret — it protects against all the other ways, and those are the majority.
 
 ---
 
-## 11. Git
+## 12. Git
 
 - **The backend generates the branch name**, deterministically from the `runID`:
   `haliphron/{run_short}-{slug}`. A name invented by the agent produces a second
@@ -519,7 +700,7 @@ secret — it protects against all the other ways, and those are the majority.
 
 ---
 
-## 12. The completion report
+## 13. The completion report
 
 The shape is [openapi.yaml](../../api/runtime/v1/openapi.yaml) and
 [completion.go](../../api/run/v1/completion.go). It is **the same schema** as
@@ -558,7 +739,7 @@ be substituting the means for the end.
 
 ---
 
-## 13. Timeout, cancellation, eviction
+## 14. Timeout, cancellation, eviction
 
 **`HALIPHRON_TIMEOUT_SECONDS` is the budget for the `run` phase, not for the
 pod.** Cloning a monorepo and uploading a two-gigabyte log must not eat into the
@@ -593,7 +774,7 @@ arrive, the controller, which knows it ordered the kill.
 
 ---
 
-## 14. Security inside the pod
+## 15. Security inside the pod
 
 Section 14 of the architecture defines the perimeter; here is what the image is
 responsible for.
@@ -619,7 +800,7 @@ the invention only at review, if you are lucky.
 
 ---
 
-## 15. Versions
+## 16. Versions
 
 **The contract.** `HALIPHRON_CONTRACT` carries the major the controller expects;
 the entrypoint compares it with its own and, on a mismatch, exits 30 before
@@ -650,7 +831,7 @@ glibc `curl` and GNU coreutils are required.
 
 ---
 
-## 16. One container, not two
+## 17. One container, not two
 
 The specification assumed an init container for the clone. The decision is **one
 container**: the entrypoint does the clone. The clone requires the same
@@ -666,14 +847,14 @@ together with workflows.
 
 ---
 
-## 17. Deltas
+## 18. Deltas
 
 **The edits are applied.** The table is a log: it explains why the listed files
 say what they say, and what to look at during review.
 
 | # | What | Was | Became | Where applied |
 |---|---|---|---|---|
-| R1 | The per-run Secret in the pod | `envFrom` | a volume at `/haliphron/secrets/`, 0400 | `agentrun-crd.md` §11 |
+| R1 | The per-run Secret in the pod | `envFrom` | a volume at `/haliphron/secrets/`, 0400 — and one `secretKeyRef` for the prompt | `agentrun-crd.md` §11 |
 | R2 | When the result is uploaded | after `pr`, before `notify` | the `persist` phase right after `output`, before the git phases | `architecture.md` §11, `runtime.go` |
 | R3 | A storage failure | code 30, class `config`, not retried | code 21, class `infra`, retried | `phase.go`, `architecture.md` §12.2 |
 | R4 | `CompletionReport` | no identification and no failure cause | `runID`, `attempt`, `failedPhase`, `reason`, `message`, `runtime` | `api/cluster/v1/openapi.yaml`, `completion.go` |
@@ -681,34 +862,45 @@ say what they say, and what to look at during review.
 | R6 | `readOnlyRootFilesystem` | "not always achievable" | `true`, by moving the CLI caches into `$HOME` | `architecture.md` §14, `agentrun-crd.md` §11 |
 | R7 | The contract version | none | `HALIPHRON_CONTRACT`, major checked at startup | `runtime.go` |
 | R8 | The node's output schema | nothing said about how it reaches the pod | the reserved `output.schema.json` key in the role ConfigMap | `runtime.go` |
-| R9 | Log chunk numbering | unspecified | continuous across attempts, six digits with leading zeros | `state.schema.json` |
+| R9 | Log chunk numbering | unspecified | a thousand-number block per attempt, six digits with leading zeros | this document, §6 |
 | R10 | An undelivered webhook | unspecified | does not change the exit code | `api/runtime/v1/openapi.yaml` |
 | R11 | Classification of git failures | all git → 20, retried | 401/403/404 → 30; surmountable → 20 | this document, §4 |
 | R12 | Checking the prompt digest | "makes it possible to verify" | mandatory, a mismatch → 30 | `runtime.go` |
-| R13 | `.haliphron` in the working tree | not considered | `.git/info/exclude` before the agent starts | this document, §2.3 |
-| R14 | Redacting secrets from what is uploaded | not considered | a filter on every byte going to storage | this document, §10 |
+| R13 | `.haliphron` in the working tree | not considered | `.git/info/exclude` before the agent starts | this document, §3 |
+| R14 | Redacting secrets from what is uploaded | not considered | a filter on every byte leaving the pod | this document, §11 |
 | R15 | The agent child process's environment | inherits everything | reduced to the model key and the MCP headers | this document, §2.2 |
 | R16 | The name of the runtime switch | `AGENT_TYPE` (from nib) | `HALIPHRON_AGENT` | `runtime.go` |
 
 ---
 
-## 18. Contract test checklist
+## 19. Contract test checklist
 
 The image is verified **without a cluster and without a backend**: `docker run`,
-a directory of secret files instead of a volume, presigned object storage and an
-HTTP stub instead of the controller. That harness — `FakeControlPlane` — ships
-as part of the contract, like `FakeBackend` and `FakeController` in the first
-two: without it the "image" track cannot proceed in parallel.
+a directory of secret files instead of a volume, and an HTTP stub that serves
+both halves of the artifact port. That harness — `FakeControlPlane` — ships as
+part of the contract, like `FakeBackend` and `FakeController` in the first two:
+without it the "image" track cannot proceed in parallel.
 
-Its storage is not MinIO: objects live in a map and the links are signed with
-HMAC over the method, the key and the expiry. What the image must get right is
-the shape of the exchange and the answers it gets when the exchange goes wrong —
-403 on an expired signature, 404 on a checkpoint nobody has written yet, a POST
-policy that refuses a key outside its prefix — and each of those is a row below.
-Where a real S3 would differ in a way the image can observe, the fake says so in
-a comment. The row that MinIO alone can settle, that the presigned links also
-work against a real implementation, belongs to the first integration and not to
-this checklist.
+**The checklist runs twice**, once per artifact mode. The image implements both
+and an installation will run one of them; a checklist that exercised only the
+optimisation would let the default path ship untested. Relay is the fake's
+default, matching what an installation gets with nothing configured.
+
+Its object storage is not MinIO: objects live in a map and the links are signed
+with HMAC over the method, the key and the expiry. What the image must get right
+is the shape of the exchange and the answers it gets when the exchange goes
+wrong — 403 on an expired signature, a POST policy that refuses a key outside
+its prefix, a 413 on a spent artifact budget — and each of those is a row below.
+Where a real S3 or a real controller would differ in a way the image can
+observe, the fake says so in a comment. The row that MinIO alone can settle,
+that the presigned links also work against a real implementation, belongs to the
+first integration and not to this checklist.
+
+One difference the fake cannot reproduce and states outright: it sets
+`HALIPHRON_PROMPT` as a literal, where a cluster sets it through
+`valueFrom.secretKeyRef`. The variable inside the container is identical; the
+difference is in what `kubectl describe pod` would show, and reproducing that
+needs a kubelet.
 
 **Configuration and startup:**
 
@@ -718,26 +910,52 @@ this checklist.
 - [ ] `docker run --read-only` with tmpfs on the four directories → the run completes end to end
 - [ ] the container starts as non-root and requires no write outside an emptyDir
 
-**Prompt and storage:**
+**Prompt:**
 
+- [ ] `HALIPHRON_PROMPT` is missing → 30 at `validate`, before the model is called and before any network call
 - [ ] the prompt digest did not match → 30, `PromptDigestMismatch`, the model was never called
-- [ ] a presigned GET of `state.json` returned 404 → that is `skipped`, not a failure
+- [ ] the prompt is written under `/haliphron/run/` and never passed as a command-line argument
+- [ ] the prompt does not appear in `result.md`'s redaction pass — it is the customer's text, not a credential, and redacting it would empty the log of what the agent was asked to do
+
+**The artifact path, both modes:**
+
+- [ ] every object of the layout in section 9 lands under `runs/{runID}/`, with identical keys in both modes
+- [ ] an upload failure → 21, class `infra`, retryable — never 30
+- [ ] `HALIPHRON_ARTIFACT_MODE` unset → relay, not a failure and not object-store
+
+**Relay mode:**
+
+- [ ] the pod waits for the acknowledgement before it treats an object as durable
+- [ ] the acknowledgement's `ref` is what the report carries, verbatim, rather than one the pod constructed
+- [ ] the controller unreachable → 21, retryable, and the exit code is not 30
+- [ ] a 413 on a spent artifact budget → the object is dropped, the run carries on, the log says so
+- [ ] a 409 (the run is configured for object storage) → 30, not retried
+- [ ] no `presigned.json` in the secret mount → the run proceeds; the absence is the mode, not a defect
+- [ ] the digest header matches the body, and a corrupted body is refused by the fake
+
+**Object-store mode:**
+
 - [ ] a presigned PUT returned 403 (an expired signature) → 21, not 30
-- [ ] promptURL is unreachable over the network → 21, retryable
+- [ ] the bundle carries no GET keys, and the run needs none
+- [ ] `presigned.json` missing while the mode says object-store → 30, naming the key
 
 **Resumption:**
 
-- [ ] `state.json` with `run: ok` and an attempt lower than the current one → the `run` phase is skipped, the model was never called
-- [ ] `state.json` from a different `runID` → a full run, somebody else's state is not used
-- [ ] `state.json` with a higher contract major → a full run
-- [ ] `state.json` with `run: ok` but an unreachable `artifacts.result` → a full run
-- [ ] a resumed attempt continues the chunk numbering instead of overwriting earlier chunks
+- [ ] `HALIPHRON_COMPLETED_PHASES` containing `run` and `persist`, with attempt > 1 → the `run` phase is skipped, the model was never called
+- [ ] the same list with attempt 1 → a full run: this pod has none of that attempt's product to report
+- [ ] a list containing `run` but not `persist` → a full run, because the previous attempt's output never became durable
+- [ ] a list containing a phase name this image does not recognise → the name is dropped, and an unrecognised `run` cannot cause a skip
+- [ ] an absent variable → `checkpoint` is `skipped`, not failed
+- [ ] a resumed attempt numbers its chunks past the previous attempt's instead of overwriting them
+- [ ] a resumed attempt's report still names `result.md` and `output.json`, reconstructed from the fixed layout
+- [ ] every phase that completes `ok` is reported to the controller as it happens, in execution order
+- [ ] a phase report that fails to deliver is logged and does not fail the run
 
 **Ordering and durability:**
 
-- [ ] `push` fails after a successful run → `result.md` and `output.json` are already in storage
-- [ ] a failure at `pr` → everything but the PR link is in storage; the second attempt does not pay for the model
-- [ ] `completion.json` in storage is byte-for-byte equal to the webhook body
+- [ ] `push` fails after a successful run → `result.md` and `output.json` are already durable
+- [ ] a failure at `pr` → everything but the PR link is durable; the second attempt does not pay for the model
+- [ ] `completion.json` in the store is byte-for-byte equal to the webhook body
 - [ ] the controller is unreachable for all 60 seconds of retries → the exit code is the same as it would have been on successful delivery
 
 **Git:**
@@ -778,7 +996,7 @@ this checklist.
 
 ---
 
-## 19. Deferred
+## 20. Deferred
 
 | # | Question | Decision | Condition for revisiting |
 |---|---|---|---|

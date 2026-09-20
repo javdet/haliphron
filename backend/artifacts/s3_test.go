@@ -85,42 +85,93 @@ func TestPresignRejectsAnImpossibleTTL(t *testing.T) {
 
 // The bundle's expiry is what the controller compares against the expected
 // duration of the next attempt. Reporting anything but the minimum would let a
-// bundle be judged fresh while the key the pod reads first has expired.
+// bundle be judged fresh while the key the pod writes first has expired.
 func TestBundleCarriesTheContractsKeysAndTheEarliestExpiry(t *testing.T) {
 	store := NewMemory("haliphron", "http://storage.invalid")
 	id := runv1.ULID("01J0000000000000000000000X")
 
-	bundle, err := Bundle(store, id, time.Hour)
+	bundle, err := Bundle(store, id, time.Hour, 0)
 	if err != nil {
 		t.Fatalf("bundle: %v", err)
 	}
+	if bundle.Mode != runv1.ArtifactModeObjectStore {
+		t.Fatalf("mode = %q, want object-store from a store that presigns", bundle.Mode)
+	}
 
 	for _, key := range []string{
-		runv1.StorageKeyOutput, runv1.StorageKeyResult, runv1.StorageKeyState,
+		runv1.StorageKeyOutput, runv1.StorageKeyResult,
 		runv1.StorageKeyCompletion, runv1.StorageKeyAgentLog,
 	} {
 		if _, ok := bundle.Put[key]; !ok {
 			t.Errorf("bundle has no PUT capability for %s", key)
 		}
 	}
-	// Two mandatory reads: without prompt.txt the pod has no task, and without
-	// state.json an idempotent retry cannot know the agent phase is done.
-	for _, key := range []string{runv1.StorageKeyPrompt, runv1.StorageKeyState} {
-		if _, ok := bundle.Get[key]; !ok {
-			t.Errorf("bundle has no GET capability for %s", key)
-		}
+	// No reads at all, and that is the property worth pinning rather than an
+	// omission worth tolerating. The two objects the pod used to read —
+	// prompt.txt and state.json — are gone from this store, and with them exit
+	// code 21's most common cause: a run that could not start because a
+	// signature had expired.
+	if len(bundle.Post) != 2 {
+		t.Errorf("want POST policies over the chunk and artifact prefixes, got %+v", bundle.Post)
 	}
-	if len(bundle.Post) != 1 || !strings.HasSuffix(bundle.Post[0].Prefix, runv1.StoragePrefixChunks) {
-		t.Errorf("bundle has no POST policy over the log chunk prefix: %+v", bundle.Post)
+	var prefixes []string
+	for _, p := range bundle.Post {
+		prefixes = append(prefixes, p.Prefix)
+	}
+	for _, want := range []string{runv1.StoragePrefixChunks, runv1.StoragePrefixArtifacts} {
+		found := false
+		for _, got := range prefixes {
+			if strings.HasSuffix(got, want) {
+				found = true
+			}
+		}
+		if !found {
+			t.Errorf("bundle has no POST policy over %s: %v", want, prefixes)
+		}
 	}
 	if want := "runs/" + string(id) + "/"; bundle.KeyPrefix != want {
 		t.Errorf("keyPrefix = %s, want %s", bundle.KeyPrefix, want)
+	}
+	if bundle.MaxBytesPerRun <= 0 {
+		t.Error("a bundle with no stated budget lets a run fill the store")
 	}
 
 	for key, u := range bundle.Put {
 		if u.ExpiresAt.Before(bundle.ExpiresAt) {
 			t.Errorf("%s expires at %s, before the bundle's stated %s", key, u.ExpiresAt, bundle.ExpiresAt)
 		}
+	}
+}
+
+// Relay mode's bundle is the absence of everything above, and the absence is
+// the contract: a lease that carried a bucket, an endpoint or a signature in
+// relay mode would be telling the pod about a store it must not address.
+func TestRelayBundleCarriesNoCapabilities(t *testing.T) {
+	store, err := NewDisk(DiskConfig{Root: t.TempDir()})
+	if err != nil {
+		t.Fatalf("disk store: %v", err)
+	}
+	bundle, err := Bundle(store, runv1.ULID("01J0000000000000000000000X"), time.Hour, 1<<20)
+	if err != nil {
+		t.Fatalf("bundle: %v", err)
+	}
+
+	switch {
+	case bundle.Mode != runv1.ArtifactModeRelay:
+		t.Errorf("mode = %q, want relay", bundle.Mode)
+	case bundle.Bucket != "":
+		t.Errorf("relay bundle names a bucket %q", bundle.Bucket)
+	case bundle.Endpoint != "":
+		t.Errorf("relay bundle names an endpoint %q", bundle.Endpoint)
+	case len(bundle.Put) != 0 || len(bundle.Post) != 0:
+		t.Errorf("relay bundle carries capabilities: %+v", bundle)
+	case !bundle.ExpiresAt.IsZero():
+		t.Errorf("relay bundle expires at %s; nothing in it can expire", bundle.ExpiresAt)
+	case bundle.MaxBytesPerRun != 1<<20:
+		t.Errorf("maxBytesPerRun = %d, want the stated 1 MiB", bundle.MaxBytesPerRun)
+	}
+	if !bundle.Relay() {
+		t.Error("Relay() is false on a relay bundle")
 	}
 }
 

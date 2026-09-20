@@ -38,8 +38,15 @@ var significantKeys = []string{
 // Fields the controller adds when it turns a lease into a CR. They exist in the
 // CRD and cannot exist in RenderedRunSpec: the backend does not know a
 // cluster-local callback URL, and the epoch is its own to hand out.
+//
+// artifactMode and maxArtifactBytes are the other kind: the backend does know
+// them, and states them in the lease's ArtifactBundle. The controller lifts
+// them out of that bundle and into the spec because they are not secret and
+// because the pod is told the mode outright — so they belong in the CRD and not
+// in RenderedRunSpec, which is the schema the *lease* carries.
 var controllerOnlyFields = map[string]bool{
 	"runID": true, "leaseEpoch": true, "materials": true, "callbackURL": true,
+	"artifactMode": true, "maxArtifactBytes": true,
 }
 
 func TestOpenAPIAndCRDAgreeOnRenderedRunSpec(t *testing.T) {

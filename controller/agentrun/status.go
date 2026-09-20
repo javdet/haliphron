@@ -149,6 +149,17 @@ func reportSettled(cr *agentrunv1alpha1.AgentRun) bool {
 	if reported.Attempt != cr.Status.Attempt || reported.Phase != cr.Status.Phase {
 		return false
 	}
+	// Artifacts before the report. In relay mode this controller is holding the
+	// only copy of what the run produced until the backend takes it, and
+	// collecting the CR would take the run's Secret, its Job and its pod with
+	// it — while the spool still had the result. The condition is False from
+	// the first spooled object and True when the last one is forwarded, so an
+	// absent condition is a run that relayed nothing and has nothing to wait
+	// for.
+	if c := meta.FindStatusCondition(cr.Status.Conditions,
+		agentrunv1alpha1.ConditionArtifactsRelayed); c != nil && c.Status != metav1.ConditionTrue {
+		return false
+	}
 	if meta.IsStatusConditionTrue(cr.Status.Conditions, agentrunv1alpha1.ConditionResultReported) {
 		return reported.CompletionDelivered
 	}

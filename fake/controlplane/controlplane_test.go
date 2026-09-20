@@ -2,6 +2,8 @@ package controlplane_test
 
 import (
 	"bytes"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"io"
 	"io/fs"
@@ -81,58 +83,89 @@ func put(t *testing.T, link clusterv1.PresignedURL, body string) (*http.Response
 	return do(t, req)
 }
 
-func TestPresignedGETReturnsThePromptTheBackendWrote(t *testing.T) {
+func TestThePromptReachesThePodInTheEnvironmentAndTheSecret(t *testing.T) {
 	t.Parallel()
 	cp := newPlane(t)
 	p := cp.Prepare(controlplane.RunRequest{Prompt: "add a postgres database"})
 
-	resp, body := get(t, p.Bundle.Get[runv1.StorageKeyPrompt])
-	if resp.StatusCode != http.StatusOK {
-		t.Fatalf("prompt GET: got %d, want 200 (%s)", resp.StatusCode, body)
+	if got := p.Env[runv1.EnvPrompt]; got != "add a postgres database" {
+		t.Fatalf("%s = %q", runv1.EnvPrompt, got)
 	}
-	if string(body) != "add a postgres database" {
-		t.Fatalf("prompt body: got %q", body)
+	// And in the Secret, under the key the controller sources the variable
+	// from. A cluster sets the variable through valueFrom.secretKeyRef; this
+	// fake sets it literally, which is the one difference it cannot reproduce
+	// without a kubelet — so it reproduces both halves of the input instead.
+	if got := p.Secrets[runv1.SecretKeyPrompt]; got != "add a postgres database" {
+		t.Fatalf("secret key %s = %q", runv1.SecretKeyPrompt, got)
 	}
-	// The digest the pod is told to check against is the digest of what is
-	// actually there. If these two ever diverge the image fails every run with
+
+	// The digest the pod is told to check against is the digest of what it was
+	// given. If these two ever diverge the image fails every run with
 	// PromptDigestMismatch and the cause is the harness.
-	if p.Env[runv1.EnvPromptSHA256] == "" {
-		t.Fatal("no prompt digest in the environment: the pod cannot verify what it runs")
+	sum := sha256.Sum256([]byte("add a postgres database"))
+	if want := hex.EncodeToString(sum[:]); p.Env[runv1.EnvPromptSHA256] != want {
+		t.Fatalf("%s = %q, want %q", runv1.EnvPromptSHA256, p.Env[runv1.EnvPromptSHA256], want)
+	}
+
+	// The prompt is not in the store at all any more. An object there is what
+	// put an object store on the path to *starting* a run.
+	if body, ok := cp.Object(p.Prefix + "prompt.txt"); ok {
+		t.Fatalf("the prompt was written to the store as well: %q", body)
 	}
 }
 
-func TestACheckpointThatWasNeverWrittenIs404(t *testing.T) {
+// The default is relay, matching what an installation gets with nothing
+// configured — and what the image must therefore work against without being
+// told anything.
+func TestRelayIsTheDefaultAndCarriesNoBundle(t *testing.T) {
 	t.Parallel()
 	cp := newPlane(t)
 	p := cp.Prepare(controlplane.RunRequest{Prompt: "hello"})
 
-	resp, _ := get(t, p.Bundle.Get[runv1.StorageKeyState])
-	if resp.StatusCode != http.StatusNotFound {
-		t.Fatalf("state.json on a first attempt: got %d, want 404 — a 500 here "+
-			"would teach the image to treat the normal case as a failure", resp.StatusCode)
+	switch {
+	case p.Env[runv1.EnvArtifactMode] != string(runv1.ArtifactModeRelay):
+		t.Errorf("%s = %q, want relay", runv1.EnvArtifactMode, p.Env[runv1.EnvArtifactMode])
+	case p.Bundle.Mode != runv1.ArtifactModeRelay:
+		t.Errorf("bundle mode = %q", p.Bundle.Mode)
+	case len(p.Bundle.Put) != 0 || len(p.Bundle.Post) != 0:
+		t.Errorf("a relay bundle carries capabilities: %+v", p.Bundle)
+	}
+	// presigned.json is absent, and its absence is the mode rather than a
+	// defect the image should infer one from.
+	if _, ok := p.Secrets[runv1.SecretKeyPresigned]; ok {
+		t.Error("a relay run was given a presigned bundle in its Secret")
+	}
+	// There is no bucket variable in either mode: a name the pod is told is a
+	// name it could leak.
+	if _, ok := p.Env["HALIPHRON_STORAGE_BUCKET"]; ok {
+		t.Error("the pod was told a bucket name")
 	}
 }
 
-func TestAGETCapabilityCannotWrite(t *testing.T) {
+// The checkpoint reaches the pod as a variable. An absent one is the first
+// attempt, and it is a normal answer rather than a 404 that could have been a
+// 403 from an expired signature.
+func TestTheCheckpointReachesThePodInTheEnvironment(t *testing.T) {
 	t.Parallel()
 	cp := newPlane(t)
-	p := cp.Prepare(controlplane.RunRequest{Prompt: "hello"})
 
-	// The signature covers the method. Without that, the split between Get and
-	// Put in the bundle is documentation rather than a boundary.
-	link := p.Bundle.Get[runv1.StorageKeyPrompt]
-	resp, body := put(t, link, "rewritten")
-	if resp.StatusCode != http.StatusForbidden {
-		t.Fatalf("PUT through a GET link: got %d, want 403 (%s)", resp.StatusCode, body)
+	first := cp.Prepare(controlplane.RunRequest{Prompt: "hello"})
+	if v, ok := first.Env[runv1.EnvCompletedPhases]; ok {
+		t.Errorf("a first attempt was handed a checkpoint of %q", v)
 	}
-	if stored, _ := cp.Object(p.Prefix + runv1.StorageKeyPrompt); string(stored) != "hello" {
-		t.Fatalf("the prompt was overwritten through a read capability: %q", stored)
+
+	resumed := cp.Prepare(controlplane.RunRequest{
+		Prompt: "hello", Attempt: 2,
+		CompletedPhases: []runv1.RuntimePhase{runv1.RuntimePhaseRun, runv1.RuntimePhasePersist},
+	})
+	if got := resumed.Env[runv1.EnvCompletedPhases]; got != "run,persist" {
+		t.Errorf("%s = %q, want run,persist", runv1.EnvCompletedPhases, got)
 	}
 }
 
 func TestATamperedSignatureIsRefused(t *testing.T) {
 	t.Parallel()
-	cp := newPlane(t)
+	cp := newPlane(t, controlplane.WithArtifactMode(runv1.ArtifactModeObjectStore))
 	p := cp.Prepare(controlplane.RunRequest{Prompt: "hello"})
 
 	link := p.Bundle.Put[runv1.StorageKeyResult]
@@ -147,7 +180,7 @@ func TestATamperedSignatureIsRefused(t *testing.T) {
 
 func TestAnExpiredSignatureIs403AndAReissuedBundleWorks(t *testing.T) {
 	t.Parallel()
-	cp := newPlane(t, controlplane.WithSignatureTTL(10*time.Minute))
+	cp := newPlane(t, controlplane.WithArtifactMode(runv1.ArtifactModeObjectStore), controlplane.WithSignatureTTL(10*time.Minute))
 	p := cp.Prepare(controlplane.RunRequest{Prompt: "hello"})
 
 	cp.Advance(11 * time.Minute)
@@ -207,7 +240,7 @@ func postChunk(t *testing.T, policy clusterv1.PresignedPostPolicy, key, body str
 
 func TestAPOSTPolicyCoversItsPrefixAndNothingElse(t *testing.T) {
 	t.Parallel()
-	cp := newPlane(t)
+	cp := newPlane(t, controlplane.WithArtifactMode(runv1.ArtifactModeObjectStore))
 	mine := cp.Prepare(controlplane.RunRequest{Prompt: "hello"})
 	theirs := cp.Prepare(controlplane.RunRequest{Prompt: "somebody else's run"})
 
@@ -234,7 +267,7 @@ func TestAPOSTPolicyCoversItsPrefixAndNothingElse(t *testing.T) {
 
 func TestChunkKeysSortInUploadOrder(t *testing.T) {
 	t.Parallel()
-	cp := newPlane(t)
+	cp := newPlane(t, controlplane.WithArtifactMode(runv1.ArtifactModeObjectStore))
 	p := cp.Prepare(controlplane.RunRequest{Prompt: "hello"})
 	policy := p.Bundle.Post[0]
 
@@ -363,7 +396,7 @@ func TestAReportFromAnEarlierAttemptCannotOverwriteALaterOne(t *testing.T) {
 
 func TestInjectedFaultsAreNarrowedByMethodAndKey(t *testing.T) {
 	t.Parallel()
-	cp := newPlane(t)
+	cp := newPlane(t, controlplane.WithArtifactMode(runv1.ArtifactModeObjectStore))
 	p := cp.Prepare(controlplane.RunRequest{Prompt: "hello"})
 
 	// The scenario the contract's phase ordering exists for: persist succeeds,
@@ -415,12 +448,15 @@ func TestMaterializeReproducesTheMountsTheControllerCreates(t *testing.T) {
 
 	layout := materialize(t, p)
 
-	// The five keys of the per-run Secret, as files. Not envFrom: none of these
-	// names is a valid variable name, and an image that expected variables
-	// would start with no git token and no links to storage.
+	// The keys of the per-run Secret, as files. Not envFrom: all but the prompt
+	// are invalid variable names, and an image that expected variables would
+	// start with no git token and no credentials at all.
+	//
+	// presigned.json is not among them, because this run is in the default
+	// relay mode and there is nothing to sign.
 	for _, key := range []string{
-		runv1.SecretKeyGitToken, runv1.SecretKeyLLMAPIKey, runv1.SecretKeyMCPConfig,
-		runv1.SecretKeyPresigned, runv1.SecretKeyCallbackToken,
+		runv1.SecretKeyPrompt, runv1.SecretKeyGitToken, runv1.SecretKeyLLMAPIKey,
+		runv1.SecretKeyMCPConfig, runv1.SecretKeyCallbackToken,
 	} {
 		info, err := os.Stat(filepath.Join(layout.SecretsDir, key))
 		if err != nil {
@@ -433,19 +469,19 @@ func TestMaterializeReproducesTheMountsTheControllerCreates(t *testing.T) {
 		}
 	}
 
-	var bundle clusterv1.ArtifactBundle
-	raw, err := os.ReadFile(filepath.Join(layout.SecretsDir, runv1.SecretKeyPresigned))
+	// The prompt is a Secret key, not an object: it is the one key in this
+	// mount that is not a credential, and the controller sources one
+	// environment variable from it.
+	prompt, err := os.ReadFile(filepath.Join(layout.SecretsDir, runv1.SecretKeyPrompt))
 	if err != nil {
-		t.Fatalf("presigned.json: %v", err)
+		t.Fatalf("the prompt did not reach the secret mount: %v", err)
 	}
-	if err := json.Unmarshal(raw, &bundle); err != nil {
-		t.Fatalf("presigned.json does not parse: %v", err)
+	if len(prompt) == 0 {
+		t.Fatal("the prompt in the secret mount is empty: the pod has no task")
 	}
-	if bundle.Get[runv1.StorageKeyPrompt].URL == "" {
-		t.Fatal("no presigned GET for prompt.txt: the pod has no task")
-	}
-	if bundle.Get[runv1.StorageKeyState].URL == "" {
-		t.Fatal("no presigned GET for state.json: an idempotent retry becomes impossible")
+	// And no presigned bundle, because the default mode has nothing to sign.
+	if _, err := os.Stat(filepath.Join(layout.SecretsDir, runv1.SecretKeyPresigned)); err == nil {
+		t.Error("a relay run was given a presigned bundle in its secret mount")
 	}
 
 	schema := filepath.Join(layout.RoleDir, runv1.RoleConfigKeyOutputSchema)

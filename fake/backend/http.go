@@ -23,6 +23,7 @@ func (b *Backend) routes() http.Handler {
 	mux.HandleFunc("POST "+p+"/leases/{runID}/artifacts", b.handleArtifacts)
 	mux.HandleFunc("POST "+p+"/ingest/status", b.handleIngestStatus)
 	mux.HandleFunc("POST "+p+"/ingest/completion", b.handleIngestCompletion)
+	mux.HandleFunc("POST "+p+"/ingest/artifacts", b.handleIngestArtifacts)
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if !b.preflight(w, r) {
 			return
@@ -59,14 +60,22 @@ func (b *Backend) preflight(w http.ResponseWriter, r *http.Request) bool {
 		return false
 	}
 
-	if r.ContentLength > clusterv1.MaxRequestBytes {
+	// The artifact relay is the one endpoint whose body is an object rather
+	// than a message, so it gets its own ceiling. Matching the real backend
+	// here matters more than it looks: a fake that refused a two-megabyte log
+	// would have a controller track building chunking nobody needs.
+	limit, name := int64(clusterv1.MaxRequestBytes), "1 MiB"
+	if strings.HasSuffix(r.URL.Path, "/ingest/artifacts") {
+		limit, name = clusterv1.MaxArtifactBytes, "256 MiB"
+	}
+	if r.ContentLength > limit {
 		b.writeProblem(w, http.StatusRequestEntityTooLarge, clusterv1.Problem{
-			Title: "body exceeds 1 MiB", Code: clusterv1.CodePayloadTooLarge,
+			Title: "body exceeds " + name, Code: clusterv1.CodePayloadTooLarge,
 			Action: clusterv1.ActionFatal,
 		})
 		return false
 	}
-	r.Body = http.MaxBytesReader(w, r.Body, clusterv1.MaxRequestBytes)
+	r.Body = http.MaxBytesReader(w, r.Body, limit)
 
 	// Mandatory on every request, including /register: in a multi-cluster
 	// installation there is otherwise no telling which version sent what, and

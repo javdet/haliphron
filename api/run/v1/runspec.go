@@ -49,12 +49,17 @@ type MoneyUSD string
 // +kubebuilder:validation:MaxLength=26
 type ULID string
 
-// ObjectRef points at an object in shared storage. Content never travels
+// ObjectRef points at an object in the artifact store. Content never travels
 // through these contracts; only the pointer does.
+//
+// There is deliberately no bucket. Which store holds the object is the
+// installation's business — a PVC on the backend in relay mode, S3 in
+// object-store mode — and the pod is told neither. A pod that never learns a
+// bucket name cannot leak one, and a key that means the same thing in both
+// modes is what lets the mode stay invisible above the ArtifactStore port.
 type ObjectRef struct {
-	// +kubebuilder:validation:MinLength=1
-	// +kubebuilder:validation:MaxLength=63
-	Bucket string `json:"bucket"`
+	// Key is relative to nothing: it is the full key under the layout in
+	// section 9.2, runs/{runID}/result.md and so on.
 	// +kubebuilder:validation:MinLength=1
 	// +kubebuilder:validation:MaxLength=1024
 	Key string `json:"key"`
@@ -68,6 +73,13 @@ type ObjectRef struct {
 	// +optional
 	// +kubebuilder:validation:MaxLength=128
 	ContentType string `json:"contentType,omitempty"`
+
+	// Uploaded is what the backend checks before believing a ref. In relay
+	// mode it is the controller's acknowledgement that the bytes reached a
+	// disk that is not the pod's; in object-store mode it is the pod's own
+	// PUT. A ref without it names a key nothing was ever written to.
+	// +optional
+	Uploaded bool `json:"uploaded,omitempty"`
 }
 
 // RenderedRunSpec is one run, fully resolved: role applied, policy intersected,
@@ -78,21 +90,29 @@ type ObjectRef struct {
 // AgentRunSpec in the CRD. That is the whole point: one schema on two carriers,
 // so the two contracts stay synchronised by construction.
 //
-// What is deliberately not here: secrets, presigned URLs, the prompt text and
-// the role config files. Those are materials — the controller turns them into a
-// Secret and a ConfigMap — and they travel beside the spec in the lease, never
-// inside it. The rule is mechanical: if `kubectl get agentrun -o yaml` must not
-// show it, it is not a spec field.
+// What is deliberately not here: secrets, the prompt text, the presigned bundle
+// of object-store mode and the role config files. Those are materials — the
+// controller turns them into a Secret and a ConfigMap — and they travel beside
+// the spec in the lease, never inside it. The rule is mechanical: if
+// `kubectl get agentrun -o yaml` must not show it, it is not a spec field.
 type RenderedRunSpec struct {
 	Agent AgentType `json:"agent"`
 
-	// Prompt points at runs/{runID}/prompt.txt, written by the backend at
-	// admission. It travels through object storage rather than the Secret
-	// because a workflow step's prompt absorbs the output of previous steps
-	// and has no natural ceiling, while a Secret is capped at 1 MiB for all
-	// keys together. The digest lets the pod verify it is executing exactly
-	// what the backend posted.
-	Prompt ObjectRef `json:"prompt"`
+	// PromptSHA256 is the digest of the prompt as the backend admitted it.
+	// The prompt text itself is not here and is not anywhere else in this
+	// type: it lives in runs.prompt in PostgreSQL, travels beside the spec in
+	// the lease, and reaches the pod as an environment variable sourced from
+	// the per-run Secret (ADR 30, 38).
+	//
+	// Leaving a field for it here would put customer prompts into
+	// `kubectl get agentrun -o yaml` and into every GitOps diff. The digest is
+	// enough to reason about which task a CR describes, and it is what the
+	// entrypoint verifies before it calls a model — a run that executes
+	// something other than what was admitted is worse than one that does not
+	// start.
+	// +kubebuilder:validation:Pattern=`^[a-f0-9]{64}$`
+	// +kubebuilder:validation:MaxLength=64
+	PromptSHA256 string `json:"promptSHA256"`
 
 	// Model is a provider-qualified identifier, e.g. anthropic/claude-opus-5.
 	// +kubebuilder:validation:MinLength=1
@@ -311,9 +331,10 @@ type BudgetSpec struct {
 type RetrySpec struct {
 	// MaxInfraRetries is how many extra attempts the controller starts on its
 	// own, without asking the backend. Only infra and git classes are retried,
-	// and the retry is idempotent thanks to runs/{runID}/state.json: a run that
-	// already finished the agent phase resumes at push, and does not pay for
-	// the model twice.
+	// and the retry is idempotent thanks to the attempt checkpoint of section
+	// 9.3 — the phases the previous attempt got through, replayed into the next
+	// Job as HALIPHRON_COMPLETED_PHASES. A run that already finished the agent
+	// phase resumes at push, and does not pay for the model twice.
 	// +optional
 	// +kubebuilder:default=3
 	// +kubebuilder:validation:Minimum=0

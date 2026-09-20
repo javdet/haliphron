@@ -45,8 +45,7 @@ func phaseInit(_ context.Context, r *Run) error {
 	r.logf("haliphron entrypoint: contract %s, image %s", runv1.ContractVersion, r.cfg.ImageVersion)
 	r.logf("run %s attempt %d, agent %s, model %s, role %q",
 		r.cfg.RunID, r.cfg.Attempt, r.cfg.Agent, r.cfg.Model, r.cfg.Role)
-	r.logf("storage %s/%s, bundle expires %s",
-		r.cfg.StorageBucket, r.cfg.StoragePrefix, r.storage.ExpiresAt().UTC().Format("2006-01-02T15:04:05Z"))
+	r.logf("artifacts: %s, prefix %s", r.uploader.Describe(), r.cfg.StoragePrefix)
 
 	// The clone occupies all of /workspace, which puts the run's own exchange
 	// directory inside the work tree where a forced commit would pick it up.
@@ -54,7 +53,7 @@ func phaseInit(_ context.Context, r *Run) error {
 	// has a .git — a resumed pod, an overlay image — gets no second chance.
 	r.excludeRunIO()
 
-	r.log.Start(context.Background(), r.storage, r.checkpoint, r.cfg.LogChunkInterval)
+	r.log.Start(context.Background(), r.uploader, r.checkpoint, r.cfg.LogChunkInterval)
 	return nil
 }
 
@@ -97,28 +96,8 @@ func (r *Run) excludeRunIO() {
 // phaseValidate checks everything that can be checked before anything costs
 // money — and, just as importantly, before anything is charged to a model.
 func phaseValidate(_ context.Context, r *Run) error {
-	// The capabilities the run cannot finish without. Discovering at the
-	// persist phase that the bundle has no PUT for result.md means discovering
-	// it after the model has been paid.
-	for _, key := range []string{
-		runv1.StorageKeyResult, runv1.StorageKeyOutput,
-		runv1.StorageKeyState, runv1.StorageKeyCompletion,
-	} {
-		if r.secrets.Bundle.Put[key].URL == "" {
-			return fail(runv1.ExitConfig, "MalformedSecret",
-				"the bundle has no presigned PUT for %s: this run could not persist its result", key)
-		}
-	}
-
-	// A bundle that expires before the run's own budget is a result lost on
-	// work that succeeded. The controller reissues before attempt two; there is
-	// nothing this pod can do about it except say so while the log is still
-	// being read for something else.
-	if deadline := r.clock().Add(r.cfg.Timeout); r.storage.ExpiresAt().Before(deadline) {
-		r.logf("warning: the bundle expires at %s, before this run's own budget runs out at %s; "+
-			"a long run will fail its uploads with exit %d",
-			r.storage.ExpiresAt().UTC().Format("15:04:05Z"), deadline.UTC().Format("15:04:05Z"),
-			runv1.ExitStorage)
+	if err := r.validateUploader(); err != nil {
+		return err
 	}
 
 	// One credential arrives under one name and three tools insist on their
@@ -131,6 +110,50 @@ func phaseValidate(_ context.Context, r *Run) error {
 
 	r.logf("configuration validated: %d allowed tools, %d denied, permission mode %q",
 		len(r.cfg.AllowedTools), len(r.cfg.DeniedTools), r.cfg.PermissionMode)
+	return nil
+}
+
+// validateUploader checks that this run can persist what it is about to pay
+// for, before it pays for it.
+//
+// Discovering at the persist phase that there is nowhere to write result.md
+// means discovering it after the model has been billed. What there is to check
+// depends on the mode, and the asymmetry is itself an argument: relay mode has
+// one thing that can be wrong and object-store mode has four capabilities and
+// an expiry.
+func (r *Run) validateUploader() error {
+	if r.cfg.ArtifactMode != runv1.ArtifactModeObjectStore {
+		// The relay's single precondition, and NewUploader already refused a
+		// run without it. Restated here so that the phase which is supposed to
+		// check preconditions is the phase that checks them.
+		if r.callback == nil {
+			return fail(runv1.ExitConfig, "MissingConfiguration",
+				"relay mode needs a callback URL and none was configured")
+		}
+		return nil
+	}
+
+	for _, key := range []string{
+		runv1.StorageKeyResult, runv1.StorageKeyOutput,
+		runv1.StorageKeyCompletion, runv1.StorageKeyAgentLog,
+	} {
+		if r.secrets.Bundle.Put[key].URL == "" {
+			return fail(runv1.ExitConfig, "MalformedSecret",
+				"the bundle has no presigned PUT for %s: this run could not persist its result", key)
+		}
+	}
+
+	// A bundle that expires before the run's own budget is a result lost on
+	// work that succeeded. The controller reissues before attempt two; there is
+	// nothing this pod can do about it except say so while the log is still
+	// being read for something else.
+	expires := r.secrets.Bundle.ExpiresAt
+	if deadline := r.clock().Add(r.cfg.Timeout); expires.Before(deadline) {
+		r.logf("warning: the bundle expires at %s, before this run's own budget runs out at %s; "+
+			"a long run will fail its uploads with exit %d",
+			expires.UTC().Format("15:04:05Z"), deadline.UTC().Format("15:04:05Z"),
+			runv1.ExitStorage)
+	}
 	return nil
 }
 
@@ -166,120 +189,103 @@ func (r *Run) checkProviderAgainstMCP() error {
 	return nil
 }
 
-// phaseFetch downloads the prompt and proves it is the one that was admitted.
+// phaseFetch reads the prompt out of the environment and proves it is the one
+// that was admitted.
 //
-// The digest check is mandatory (R12). A run that executes something other than
-// what the backend posted is worse than a run that does not start, and a
+// It used to be a presigned GET against runs/{id}/prompt.txt. It is now a
+// variable, and the phase survives the change deliberately: the names here key
+// the checkpoint, they are the phase field of PhaseTiming, and the UI groups a
+// run's timeline by them. Deleting a phase to save two lines would have been a
+// breaking change to three contracts in exchange for nothing.
+//
+// The digest check is mandatory and is the one property the presigned GET
+// bought that was worth keeping (R12). A run that executes something other than
+// what the backend admitted is worse than a run that does not start, and a
 // mismatch is not repaired by trying again — so it is exit 30 and the model is
 // never called.
-func phaseFetch(ctx context.Context, r *Run) error {
-	body, err := r.storage.Get(ctx, runv1.StorageKeyPrompt)
-	if errors.Is(err, ErrNotFound) {
-		return fail(runv1.ExitStorage, "PromptMissing",
-			"%s is not in storage: the backend did not write it, or this bundle points at the wrong prefix",
-			runv1.StorageKeyPrompt)
-	}
-	if err != nil {
-		return err
-	}
+func phaseFetch(_ context.Context, r *Run) error {
+	body := []byte(r.cfg.Prompt)
 
 	sum := sha256.Sum256(body)
 	got := hex.EncodeToString(sum[:])
 	if got != r.cfg.PromptSHA256 {
 		return fail(runv1.ExitConfig, "PromptDigestMismatch",
-			"%s hashes to %s and the controller said %s; refusing to run something other than "+
-				"what was admitted", runv1.StorageKeyPrompt, got, r.cfg.PromptSHA256)
+			"the prompt in %s hashes to %s and the controller said %s; refusing to run something "+
+				"other than what was admitted", runv1.EnvPrompt, got, r.cfg.PromptSHA256)
 	}
 	r.prompt = body
 
-	// Into the entrypoint's private directory, not the work tree. A prompt the
-	// agent can rewrite is a prompt the next attempt cannot trust.
+	// Written into the entrypoint's private directory, not the work tree. Two
+	// reasons: an agent CLI that takes its prompt from a file needs one, and a
+	// prompt the agent can rewrite is a prompt the next attempt cannot trust.
 	path := filepath.Join(r.layout.RunPrivate, "prompt.txt")
 	if err := os.WriteFile(path, body, 0o600); err != nil {
 		return failWrap(runv1.ExitConfig, "LayoutUnwritable", err, "writing %s", path)
 	}
-	r.logf("prompt fetched: %d bytes, sha256 %s", len(body), got)
+	r.logf("prompt read from the environment: %d bytes, sha256 %s", len(body), got)
 	return nil
 }
 
-// phaseCheckpoint reads the previous attempt's state. A 404 is the normal
-// answer on a first attempt and is a skip, not a failure.
-func phaseCheckpoint(ctx context.Context, r *Run) error {
-	prior, note, err := LoadCheckpoint(ctx, r.storage)
-	if err != nil {
-		return err
+// phaseCheckpoint reads what an earlier attempt of this run got through.
+//
+// An absent HALIPHRON_COMPLETED_PHASES is the normal answer on a first attempt
+// and is a skip, not a failure — the same non-event the old 404 on state.json
+// was, minus the round trip that could fail for unrelated reasons. That round
+// trip is why this used to be the phase that could kill a run before it
+// started: a presigned GET whose signature had expired answered 403, and 403
+// is indistinguishable from a forged link.
+func phaseCheckpoint(_ context.Context, r *Run) error {
+	if len(r.cfg.CompletedPhases) == 0 {
+		return skip("no checkpoint: this is the first attempt of this run under this lease")
 	}
-	if prior == nil {
-		return skip("%s", note)
-	}
-	r.prior = prior
+	r.logf("an earlier attempt reported: %s", joinPhaseNames(r.cfg.CompletedPhases))
 
-	// Carried across attempts even when the run is not resumed: numbering the
-	// chunks from zero again would overwrite the previous attempt's log, and
-	// the reader would see two runs spliced into one without a seam.
-	if prior.Log != nil {
-		r.checkpoint.Log.NextChunk = prior.Log.NextChunk
-		r.checkpoint.Log.BytesUploaded = prior.Log.BytesUploaded
-	}
-
-	resumable, why := prior.Resume(r.cfg)
+	resumable, why := r.checkpoint.Resume(r.cfg)
 	if !resumable {
 		r.logf("not resuming: %s", why)
 		return nil
 	}
-	if err := r.verifyPriorArtifacts(ctx, prior); err != nil {
-		r.logf("not resuming: %v", err)
-		return nil
-	}
 
+	// Resuming means skipping the one phase whose repetition costs money, and
+	// it is done on the control plane's word rather than on evidence this pod
+	// can gather. That is a deliberate narrowing from what the object-based
+	// checkpoint claimed to do: it recorded where the previous attempt's result
+	// went and this pod verified the object was readable. It could only ever
+	// verify that in object-store mode, and only when the bundle happened to
+	// grant a read — so the check succeeded on trust more often than not.
+	//
+	// What replaces it is a stricter rule, enforced above: resume only when the
+	// previous attempt completed *both* run and persist. persist is what made
+	// the model's product durable, so an attempt that reached it has a result
+	// in the store under a key this attempt's report will name, whether or not
+	// this pod can read it back.
 	r.resumed = true
-	r.agent = AgentResult{ExitCode: prior.Agent.exitCode(), SessionID: prior.Agent.sessionID()}
-	if prior.Agent != nil {
-		r.agent.Usage = prior.Agent.Usage
-	}
-	r.resultRef = prior.Artifacts.Result
-	r.outputRef = prior.Artifacts.Output
-	r.checkpoint.Agent = prior.Agent
-	r.checkpoint.Artifacts = prior.Artifacts
+	// The refs the report will name. They are reconstructed from the layout
+	// rather than carried over, and that is possible only because the keys are
+	// fixed: runs/{id}/result.md is where the previous attempt's persist phase
+	// put the result, whichever mode it used and whichever store it reached.
+	//
+	// Uploaded is set because an earlier attempt completed persist, which is
+	// exactly the condition Resume checks. The backend checks the same flag
+	// before believing a ref, so claiming it on any weaker evidence would be
+	// claiming something this pod cannot know.
+	prefix := sprintf(runv1.StoragePrefixRun, r.cfg.RunID)
+	r.resultRef = &runv1.ObjectRef{
+		Key: prefix + runv1.StorageKeyResult, ContentType: "text/markdown", Uploaded: true}
+	r.outputRef = &runv1.ObjectRef{
+		Key: prefix + runv1.StorageKeyOutput, ContentType: "application/json", Uploaded: true}
+
 	r.logf("resuming: %s; the model will not be called again", why)
 	return nil
 }
 
-// verifyPriorArtifacts checks that what the checkpoint claims is in storage is
-// actually there.
-//
-// It can only check what the bundle lets it read. The two mandatory GET keys
-// are the prompt and the checkpoint itself, so a bundle minted to the minimum
-// gives no way to confirm the result object — in which case the claim is taken
-// at its word and the log says so. Where the backend grants the read, the claim
-// is checked, and that is the difference between skipping a paid phase and
-// skipping it on evidence.
-func (r *Run) verifyPriorArtifacts(ctx context.Context, prior *Checkpoint) error {
-	for _, ref := range []*runv1.ObjectRef{prior.Artifacts.Result, prior.Artifacts.Output} {
-		key := strings.TrimPrefix(ref.Key, r.secrets.Bundle.KeyPrefix)
-		if r.secrets.Bundle.Get[key].URL == "" {
-			r.logf("the bundle grants no read of %s; the checkpoint's claim about it is taken on trust", key)
-			continue
-		}
-		if _, err := r.storage.Get(ctx, key); err != nil {
-			return errors.New("the checkpoint points at " + ref.Key + " and it is not readable: " + err.Error())
-		}
+// joinPhaseNames renders a checkpoint for a log line.
+func joinPhaseNames(phases []runv1.RuntimePhase) string {
+	names := make([]string, 0, len(phases))
+	for _, p := range phases {
+		names = append(names, string(p))
 	}
-	return nil
-}
-
-func (a *CheckpointAgent) exitCode() int32 {
-	if a == nil {
-		return 0
-	}
-	return a.ExitCode
-}
-
-func (a *CheckpointAgent) sessionID() string {
-	if a == nil {
-		return ""
-	}
-	return a.SessionID
+	return strings.Join(names, ", ")
 }
 
 // phaseRole resolves the role config chain and picks up the node's output

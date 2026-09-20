@@ -1,0 +1,42 @@
+{{- if (include "haliphron-runtime.spoolPVC" .) }}
+{{- /*
+The artifact spool: what a pod handed this controller, until the control plane
+has taken it.
+
+It is a PersistentVolumeClaim rather than an emptyDir because of what the
+controller promises a pod. In relay mode the pod uploads its result here and
+waits; the acknowledgement it gets back means "the bytes are on a disk that is
+not yours", and the pod exits on the strength of it. An emptyDir keeps that
+promise until the controller restarts, and then breaks it silently for anything
+not yet forwarded — the run's result is gone and the pod that trusted the
+acknowledgement was deleted an hour ago.
+
+ReadWriteOnce is right here in a way it is not on the control plane's side. The
+controller elects a leader, so the replicas that are not leading are standing by
+rather than serving; the callback Service does reach every replica, but a
+spooled artifact is forwarded by whichever replica received it, and that replica
+is the one holding the volume. Scaling this out needs an RWX class, and the
+failure without one is a second pod that does not schedule rather than data
+going astray.
+
+Twenty gigabytes by default: the spool holds one run's artifacts for as long as
+it takes to forward them, which is seconds when the control plane is up and as
+long as an outage lasts when it is not. The per-run cap the backend states in
+each lease is what bounds the worst case.
+*/}}
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: {{ include "haliphron-runtime.spoolClaim" . }}
+  labels:
+    {{- include "haliphron-runtime.labels" . | nindent 4 }}
+spec:
+  accessModes:
+    - {{ .Values.controller.spool.persistence.accessMode }}
+  resources:
+    requests:
+      storage: {{ .Values.controller.spool.persistence.size }}
+  {{- with .Values.controller.spool.persistence.storageClass }}
+  storageClassName: {{ . | quote }}
+  {{- end }}
+{{- end }}

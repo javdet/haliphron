@@ -122,7 +122,7 @@ func (h *harness) postCompletion(report runv1.CompletionReport, token string) *h
 	if err != nil {
 		h.t.Fatalf("marshal report: %v", err)
 	}
-	req := httptest.NewRequest(http.MethodPost, h.Callback.Path, bytes.NewReader(body))
+	req := httptest.NewRequest(http.MethodPost, runv1.CallbackPathCompletion, bytes.NewReader(body))
 	req.Header.Set("Content-Type", "application/json")
 	if token != "" {
 		req.Header.Set("Authorization", "Bearer "+token)
@@ -143,16 +143,14 @@ func (h *harness) callbackToken(id runv1.ULID) string {
 
 func sampleReport(id runv1.ULID) runv1.CompletionReport {
 	return runv1.CompletionReport{
-		RunID:    id,
-		Attempt:  1,
-		Status:   runv1.CompletionSuccess,
-		ExitCode: 0,
-		Agent:    runv1.AgentClaudeCode,
-		Model:    "anthropic/claude-opus-5",
-		Summary:  "renamed the widget, opened a pull request",
-		ResultRef: &runv1.ObjectRef{
-			Bucket: "haliphron", Key: "runs/" + string(id) + "/result.md",
-		},
+		RunID:     id,
+		Attempt:   1,
+		Status:    runv1.CompletionSuccess,
+		ExitCode:  0,
+		Agent:     runv1.AgentClaudeCode,
+		Model:     "anthropic/claude-opus-5",
+		Summary:   "renamed the widget, opened a pull request",
+		ResultRef: &runv1.ObjectRef{Key: "runs/" + string(id) + "/result.md"},
 		Repo: &runv1.RepoResult{
 			Pushed: true, TargetBranch: "haliphron/run-x",
 			PRURL: "https://github.com/acme/widgets/pull/42", PRAction: runv1.PRActionCreated,

@@ -69,6 +69,19 @@ type RunObservation struct {
 	// +optional
 	FailureClass runv1.FailureClass `json:"failureClass,omitempty"`
 
+	// CompletedPhases is the attempt checkpoint of section 9.3: the entrypoint
+	// phases this attempt has got through, as the pod reported them to the
+	// controller. It rides on the observation rather than on a channel of its
+	// own because it is the same fact about the same attempt, and a second
+	// channel would need the same epoch check, the same ordering rule and the
+	// same batching.
+	//
+	// The backend unions it into run_attempts.completed_phases rather than
+	// replacing: reports arrive reordered, and a heartbeat carrying an earlier
+	// snapshot must not shorten a list the fast path already grew.
+	// +optional
+	CompletedPhases []runv1.RuntimePhase `json:"completedPhases,omitempty"`
+
 	// ObservedAt is diagnostic only. Ordering is by (attempt, phase rank),
 	// never by time: cluster clocks are not synchronised, so a timestamp cannot
 	// decide which of two reports is newer.

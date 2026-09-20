@@ -15,10 +15,17 @@
 --
 --   observation status, observed_phase, the result fields. Written by ingest.
 --
--- The one thing this table does not hold is content: prompts, logs, results and
--- artifacts live in object storage under a prefix derived from id, and the
--- only exception is result_summary, duplicated here so that listing runs does
--- not mean one storage round trip per row.
+-- What this table does not hold is unbounded content: logs, results and
+-- artifacts live in the artifact store under a prefix derived from id, and the
+-- exception is result_summary, duplicated here so that listing runs does not
+-- mean one storage round trip per row.
+--
+-- The prompt is held here, and that is a deliberate reversal. It used to be an
+-- object in a bucket, which made an object store a prerequisite for *starting*
+-- a run rather than for finishing one — the one thing section 9.2 of the
+-- architecture set out to remove. It is a column with a stated ceiling instead:
+-- bounded content in the system of record, which already holds everything else
+-- about a run.
 
 -- +goose Up
 
@@ -48,9 +55,29 @@ CREATE TABLE runs (
   -- the parsed object, not the bytes — and jsonb is the smaller, queryable one.
   spec                jsonb         NOT NULL CHECK (jsonb_typeof(spec) = 'object'),
 
-  -- Digest of runs/{id}/prompt.txt as the backend posted it. The pod refuses
-  -- to run on a mismatch, so this column is what "the run executed what was
-  -- admitted" is provable from after the fact.
+  -- The task. Written at admission and frozen with the rest of the group.
+  --
+  -- The ceiling is real, is stated here rather than discovered, and is checked
+  -- again at admission so that the caller gets a 413 naming the limit instead
+  -- of a constraint violation. 512 KiB, because the value has to fit in the
+  -- per-run Secret beside the git token, the model key and mcp.json, and a
+  -- Secret is hard-capped at 1 MiB across all of its keys together. A workflow
+  -- step whose accumulated context outgrows that is a real case, and the answer
+  -- is to summarise upstream output into the step's input rather than to grow
+  -- the envelope.
+  --
+  -- text and not bytea: it is UTF-8 that a human reads in the UI and greps in
+  -- psql. Large enough to TOAST, which is what keeps it off the run list's
+  -- pages provided the run list does not select it — the same rule as
+  -- result_summary, and a rule about the query rather than about the schema.
+  prompt              text          NOT NULL
+                        CHECK (octet_length(prompt) <= 524288),
+
+  -- Digest of prompt above, as the backend computed it at admission. The pod
+  -- verifies the value it receives against this and refuses to run on a
+  -- mismatch, so the column is what "the run executed what was admitted" is
+  -- provable from after the fact. It is stored rather than derived because a
+  -- derived digest proves only that the row is self-consistent.
   prompt_sha256       sha256        NOT NULL,
 
   -- Promoted out of spec because the UI filters and sorts on them and because
@@ -150,6 +177,15 @@ CREATE TABLE runs (
   -- of line past ~2 KiB, so a wide column here costs the run list nothing —
   -- provided the run list does not select it. The rule is about the query.
   result_summary      text          CHECK (octet_length(result_summary) <= 65536),
+
+  -- Where the full result actually is, as a URI carrying its scheme:
+  -- file://runs/01J8.../result.md or s3://haliphron/runs/01J8.../result.md.
+  --
+  -- The scheme is the point. An installation that migrates between artifact
+  -- modes keeps its old runs readable instead of orphaning them, because a
+  -- stored row says which store wrote it rather than leaving the reader to
+  -- assume the mode that is configured today.
+  result_ref          text          CHECK (length(result_ref) <= 2048),
   pr_url              text          CHECK (length(pr_url) <= 512),
   pr_number           integer,
   pr_action           pr_action,
@@ -215,6 +251,26 @@ CREATE TABLE run_attempts (
 
   exit_code            integer,
   failure_class        failure_class NOT NULL DEFAULT 'none',
+
+  -- The idempotent-retry checkpoint, and what used to be runs/{id}/state.json.
+  --
+  -- It moved here because it is a fact about the run's progress and the run's
+  -- progress already lives in this schema — observed_phase, observed_rank, the
+  -- phase column above. Keeping a second copy in an object store meant two
+  -- writers for one piece of state, and it put that store on the critical path
+  -- of *starting* an attempt rather than finishing one.
+  --
+  -- The controller accumulates it from the pod's phase reports and hands it to
+  -- the next attempt's Job as HALIPHRON_COMPLETED_PHASES; the entrypoint skips
+  -- what is already done, and if 'run' is in the list the retry does not call
+  -- the model. Two properties the object never had fall out: it survives the
+  -- pod's prefix being unreadable, because it never lived there, and it is
+  -- visible — "how far did this get before it died" is a SELECT.
+  --
+  -- Unioned on write, never replaced. Reports arrive reordered, and a heartbeat
+  -- carrying an earlier snapshot must not shorten a list the ingest path
+  -- already grew.
+  completed_phases     runtime_phase[] NOT NULL DEFAULT '{}',
 
   started_at           timestamptz,
   finished_at          timestamptz,
@@ -333,7 +389,8 @@ BEGIN
     RAISE EXCEPTION 'run %: spec is immutable', OLD.id
       USING ERRCODE = 'integrity_constraint_violation';
   END IF;
-  IF NEW.prompt_sha256 IS DISTINCT FROM OLD.prompt_sha256
+  IF NEW.prompt IS DISTINCT FROM OLD.prompt
+     OR NEW.prompt_sha256 IS DISTINCT FROM OLD.prompt_sha256
      OR NEW.agent IS DISTINCT FROM OLD.agent
      OR NEW.model IS DISTINCT FROM OLD.model
      OR NEW.timeout_seconds IS DISTINCT FROM OLD.timeout_seconds THEN
@@ -375,8 +432,76 @@ $$;
 CREATE TRIGGER runs_guard BEFORE UPDATE ON runs
   FOR EACH ROW EXECUTE FUNCTION runs_guard();
 
+-- ---------------------------------------------------------------------------
+-- The duplicate guard: at most one live attempt per run.
+--
+-- Preventing two live attempts is a constraint, not a convention. Kubernetes
+-- already contributes restartPolicy: Never and backoffLimit: 0, so every
+-- attempt is a Job some controller created deliberately — but backoffLimit
+-- constrains one Job, not two controllers, and a rule that lives only in the
+-- controller's code is a rule the second controller does not know about. A
+-- constraint in the system of record is the only place it cannot be forgotten.
+--
+-- The controller is the monitor in the sense that it is the side that finds
+-- out: the row is opened by the lease and by the first observation of a new
+-- attempt, and a conflict comes back as a refusal it can act on. A conflict
+-- means somebody else's attempt is still open, which is either a zombie
+-- controller — answered by the epoch — or its own duplicate reconcile, which
+-- is answered by doing nothing.
+--
+-- This bounds duplicate *attempts*. It does not and cannot bound duplicate
+-- *execution* across a fencing boundary; that is what the epoch is for, and
+-- the honest formulation still stands: at-least-once execution with converging
+-- side effects.
+CREATE UNIQUE INDEX run_attempts_one_live ON run_attempts (run_id)
+  WHERE finished_at IS NULL;
+
+-- ---------------------------------------------------------------------------
+-- Raising the epoch closes the open attempt.
+--
+-- Without this the index above is a trap. A controller that vanished mid-run
+-- leaves finished_at IS NULL behind, and the cluster the work is reassigned to
+-- can never take the row — the run becomes permanently unrunnable by the very
+-- mechanism meant to keep it from running twice.
+--
+-- So every event that raises lease_epoch — ack expiry, negative ack,
+-- reassignment, operator retry — finishes the outstanding attempt. As a trigger
+-- rather than as a line in each of those statements, for the same reason the
+-- rule above is a constraint: there are four call sites today and the fifth is
+-- the one that forgets.
+--
+-- The accounting record survives, which is the point of keeping the epoch in
+-- the attempt key: what is released is the claim, not the history of what was
+-- spent. failure_class is 'infra' because the attempt was ended by the
+-- platform's fence and not by anything the agent or the user did, and the
+-- reason names the fence so that "why does this attempt say Failed when the
+-- run succeeded on the next cluster" has an answer in the row itself.
+-- +goose StatementBegin
+CREATE FUNCTION close_attempt_on_new_epoch() RETURNS trigger
+LANGUAGE plpgsql AS $$
+BEGIN
+  UPDATE run_attempts
+  SET finished_at   = now(),
+      failure_class = CASE WHEN failure_class = 'none' THEN 'infra'
+                           ELSE failure_class END,
+      reason        = COALESCE(reason, 'OwnershipRevoked'),
+      message       = COALESCE(message,
+                        format('lease_epoch rose from %s to %s; the claim was released',
+                               OLD.lease_epoch, NEW.lease_epoch))
+  WHERE run_id = NEW.id
+    AND finished_at IS NULL;
+  RETURN NULL;
+END;
+$$;
+-- +goose StatementEnd
+
+CREATE TRIGGER runs_close_attempt AFTER UPDATE OF lease_epoch ON runs
+  FOR EACH ROW WHEN (NEW.lease_epoch > OLD.lease_epoch)
+  EXECUTE FUNCTION close_attempt_on_new_epoch();
+
 -- +goose Down
 DROP TABLE run_cluster_exclusions;
 DROP TABLE run_attempts;
 DROP TABLE runs;
 DROP FUNCTION runs_guard();
+DROP FUNCTION close_attempt_on_new_epoch();

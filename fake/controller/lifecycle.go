@@ -327,7 +327,11 @@ func (c *Controller) retryLocally(ctx context.Context, id runv1.ULID, out Outcom
 	// The bundle's links must outlive the new attempt. An expired signature
 	// surfaces as a lost result on work that actually succeeded, so the check
 	// happens before the Job exists rather than after the upload fails.
-	needsBundle := !r.lease.Artifacts.ExpiresAt.After(c.now())
+	//
+	// Object-store mode only: in relay mode there is nothing signed to expire —
+	// the pod posts to this controller's Service — and asking for a bundle
+	// would be a round trip that answers the same thing every time.
+	needsBundle := !r.lease.Artifacts.Relay() && !r.lease.Artifacts.ExpiresAt.After(c.now())
 	c.mu.Unlock()
 
 	if needsBundle {

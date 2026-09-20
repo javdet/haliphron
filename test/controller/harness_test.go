@@ -54,6 +54,7 @@ import (
 	"github.com/automagicops/haliphron/controller/lease"
 	"github.com/automagicops/haliphron/controller/materialize"
 	"github.com/automagicops/haliphron/controller/report"
+	"github.com/automagicops/haliphron/controller/spool"
 )
 
 const controllerVersion = "0.1.0"
@@ -148,6 +149,8 @@ type harness struct {
 	Namespace string
 	ClusterID runv1.ULID
 	Store     *memoryStore
+	Spool     *spool.Spool
+	SpoolRoot string
 }
 
 type harnessOptions struct {
@@ -159,6 +162,9 @@ type harnessOptions struct {
 	backend      *fakebackend.Backend
 	backendURL   string
 	faults       *faults
+	spoolRoot    string
+	budget       int64
+	artifactMode runv1.ArtifactMode
 }
 
 type harnessOption func(*harnessOptions)
@@ -197,6 +203,30 @@ func withBackend(b *fakebackend.Backend, url string) harnessOption {
 	return func(o *harnessOptions) { o.backend, o.backendURL = b, url }
 }
 
+// withObjectStore runs the harness against the other half of the artifact port.
+//
+// Relay is the default, matching what an installation gets with nothing
+// configured, so most rows exercise it without asking. The rows that use this
+// are the ones that only exist in object-store mode — a presigned bundle to
+// reissue, a signature to expire.
+func withObjectStore() harnessOption {
+	return func(o *harnessOptions) { o.artifactMode = runv1.ArtifactModeObjectStore }
+}
+
+// withArtifactBudget caps what one run may relay. Small values are the point: a
+// controller's enforcement of the cap is otherwise only testable by uploading a
+// gigabyte.
+func withArtifactBudget(bytes int64) harnessOption {
+	return func(o *harnessOptions) { o.budget = bytes }
+}
+
+// withSpoolRoot reuses a directory across a restart. The spool is the
+// controller's copy of what a pod handed it, and "a restart does not lose an
+// upload it acknowledged" is only testable if the restart keeps the volume.
+func withSpoolRoot(root string) harnessOption {
+	return func(o *harnessOptions) { o.spoolRoot = root }
+}
+
 func newHarness(t *testing.T, opts ...harnessOption) *harness {
 	t.Helper()
 	options := harnessOptions{preflightJob: true}
@@ -219,7 +249,14 @@ func newHarness(t *testing.T, opts ...harnessOption) *harness {
 	backend := options.backend
 	backendURL := options.backendURL
 	if backend == nil {
-		backend = fakebackend.New(fakebackend.WithTimings(timing))
+		backendOpts := []fakebackend.Option{fakebackend.WithTimings(timing)}
+		if options.budget > 0 {
+			backendOpts = append(backendOpts, fakebackend.WithArtifactBudget(options.budget))
+		}
+		if options.artifactMode != "" {
+			backendOpts = append(backendOpts, fakebackend.WithArtifactMode(options.artifactMode))
+		}
+		backend = fakebackend.New(backendOpts...)
 		var handler http.Handler = backend.Handler()
 		if options.faults != nil {
 			handler = options.faults.wrap(handler)
@@ -291,10 +328,23 @@ func newHarness(t *testing.T, opts ...harnessOption) *harness {
 		DeadlineSlackSeconds: 600,
 	}
 
+	// The spool survives a restart(), because that is the whole property it
+	// exists for: a controller that came back holds the only copy of whatever it
+	// acknowledged and had not yet forwarded.
+	spoolRoot := options.spoolRoot
+	if spoolRoot == "" {
+		spoolRoot = t.TempDir()
+	}
+	artifactSpool, err := spool.Open(spool.Config{Root: spoolRoot, Clock: clk.Now})
+	if err != nil {
+		t.Fatalf("spool: %v", err)
+	}
+
 	reporter, err := report.New(report.Config{
 		API: api, K8s: k8s, Timings: timings,
 		Namespace: namespace, ClusterID: id.ClusterID(),
-		Capacity: 4, Version: controllerVersion, Clock: clk.Now, Log: log,
+		Capacity: 4, Version: controllerVersion, Spool: artifactSpool,
+		Clock: clk.Now, Log: log,
 	})
 	if err != nil {
 		t.Fatalf("reporter: %v", err)
@@ -311,7 +361,7 @@ func newHarness(t *testing.T, opts ...harnessOption) *harness {
 
 	materializer := &materialize.Materializer{
 		Client: k8s, Namespace: namespace, ClusterID: id.ClusterID(),
-		CallbackURL:  "http://haliphron-controller." + namespace + ".svc:8083/completion",
+		CallbackURL:  "http://haliphron-controller." + namespace + ".svc:8083",
 		Builder:      builder,
 		PreflightJob: options.preflightJob,
 		Clock:        clk.Now,
@@ -330,6 +380,7 @@ func newHarness(t *testing.T, opts ...harnessOption) *harness {
 	callbackServer, err := callback.New(callback.Config{
 		K8s: k8s, Namespace: namespace, Sink: reporter,
 		CallbackURL: materializer.CallbackURL, Clock: clk.Now, Log: log,
+		Spent: reporter.Spent,
 	})
 	if err != nil {
 		t.Fatalf("callback server: %v", err)
@@ -342,6 +393,7 @@ func newHarness(t *testing.T, opts ...harnessOption) *harness {
 		Material: materializer,
 		Clock:    clk, Timings: timings,
 		Namespace: namespace, ClusterID: id.ClusterID(), Store: store,
+		Spool: artifactSpool, SpoolRoot: spoolRoot,
 	}
 }
 
@@ -351,7 +403,7 @@ func (h *harness) restart() *harness {
 	h.t.Helper()
 	return newHarness(h.t,
 		withClient(h.K8s), withStore(h.Store), withNamespace(h.Namespace),
-		withBackend(h.Backend, h.BackendURL))
+		withBackend(h.Backend, h.BackendURL), withSpoolRoot(h.SpoolRoot))
 }
 
 // faults fails chosen endpoints without taking the control plane down.
@@ -691,10 +743,13 @@ func (h *harness) deletePod(pod *corev1.Pod) {
 func sampleSpec() runv1.RenderedRunSpec {
 	createPR := true
 	return runv1.RenderedRunSpec{
-		Agent:  runv1.AgentClaudeCode,
-		Prompt: runv1.ObjectRef{Bucket: "haliphron", Key: "runs/x/prompt.txt", SHA256: strings.Repeat("a", 64)},
-		Model:  "anthropic/claude-opus-5",
-		Image:  "ghcr.io/automagicops/agent:1.0.0",
+		Agent: runv1.AgentClaudeCode,
+		// PromptSHA256 is deliberately left unset: FakeBackend fills it from
+		// the prompt it enqueues, so the two halves of a lease agree by
+		// construction. A fixture that set its own digest would be refused by
+		// the materializer, which is the check working rather than a problem.
+		Model: "anthropic/claude-opus-5",
+		Image: "ghcr.io/automagicops/agent:1.0.0",
 		Repo: runv1.RepoSpec{
 			URL:          "https://github.com/acme/widgets",
 			Provider:     runv1.GitProviderGitHub,

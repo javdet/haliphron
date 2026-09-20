@@ -60,6 +60,28 @@ type Lease struct {
 
 	Spec runv1.RenderedRunSpec `json:"spec"`
 
+	// Prompt is the task, in the clear, exactly as runs.prompt holds it.
+	//
+	// It travels here rather than through the artifact store because the store
+	// is optional and the prompt is not: putting it there would make an object
+	// store a prerequisite for *starting* a run, which is the one thing
+	// section 9.2 set out to remove. The backend caps it at
+	// Defaults.MaxPromptBytes at admission, so a lease can never carry a value
+	// the controller then fails to fit into a Secret.
+	//
+	// The controller writes it into the per-run Secret under
+	// runv1.SecretKeyPrompt and nowhere else. Like Secrets below, it is
+	// no-store, never logged, never a span attribute — not because it is a
+	// credential but because it is the customer's text.
+	Prompt string `json:"prompt"`
+
+	// PromptSHA256 duplicates Spec.PromptSHA256, and the duplication is the
+	// point: the digest in the spec is what the CR carries and the pod
+	// verifies, and this one is what the controller checks the value above
+	// against before it writes a Secret. A lease whose two halves disagree is
+	// caught at materialisation rather than by a pod that refuses to start.
+	PromptSHA256 string `json:"promptSHA256"`
+
 	// Secrets become a single per-run Secret with an ownerReference to the CR,
 	// so that deleting the CR collects them and no long-lived secret is left in
 	// the agent namespace. Known keys are the SecretKey* constants in run/v1;
@@ -68,7 +90,25 @@ type Lease struct {
 	// The invariant, checked by admission on the controller's side: no value
 	// from here ever reaches the CR's spec. `get agentruns` must not be a way
 	// to read tokens.
+	//
+	// The prompt is not in here. It has a field of its own because it is not a
+	// credential and the two are governed by different rules: every key in this
+	// map becomes a file under MountSecrets and none of them may become an
+	// environment variable, while the prompt becomes exactly one.
 	Secrets map[string]string `json:"secrets"`
+
+	// CompletedPhases is the attempt checkpoint of section 9.3, as the backend
+	// holds it in run_attempts.completed_phases for this run's current epoch.
+	//
+	// It is normally empty: a lease is normally the first anyone has executed
+	// this run. It is not empty when the backend is re-issuing work whose
+	// previous controller reported progress and then lost its CRs, and in that
+	// case it is what stops the replacement attempt paying for the model again.
+	// The CR's own .status.completedPhases is the copy the controller reads
+	// while the backend is unreachable; this is where it comes back from after
+	// the CR is gone.
+	// +optional
+	CompletedPhases []runv1.RuntimePhase `json:"completedPhases,omitempty"`
 
 	// RoleConfig is the role's fallback files, keyed by the filename mounted
 	// into /haliphron/role/. It sits beside the spec rather than inside it
@@ -81,40 +121,61 @@ type Lease struct {
 	Artifacts ArtifactBundle `json:"artifacts"`
 }
 
-// ArtifactBundleRequest asks for a fresh bundle for an active lease.
+// ArtifactBundleRequest asks for a fresh bundle for an active lease. Meaningful
+// only in object-store mode; in relay mode there is no signature to expire and
+// the call is never made.
 type ArtifactBundleRequest struct {
 	Epoch   int64 `json:"epoch"`
 	Attempt int32 `json:"attempt"`
 }
 
-// ArtifactBundle is the pod's capability access to storage without storage
-// credentials (ADR 14): it can write into its own prefix and read nothing else.
-// The bundle is secret material and belongs in the per-run Secret.
+// ArtifactBundle says how this run's results reach durable storage.
+//
+// In the default relay mode it holds Mode and nothing else: the pod posts its
+// artifacts to the controller Service it already posts the completion to, and
+// there is no bucket, no endpoint and no signature anywhere in the lease. Every
+// other field below is object-store mode.
+//
+// In object-store mode it is the pod's whole access to the store and it holds
+// no credential (ADR 14): capabilities to write into its own prefix, and no
+// reads at all — the two objects the pod used to read, prompt.txt and
+// state.json, are both gone from this store. That removes exit code 21's most
+// common cause and one whole class of "the run failed and the reason was a URL
+// expiry". Being bearer capabilities, the bundle is secret material and belongs
+// in the per-run Secret.
 type ArtifactBundle struct {
-	Bucket string `json:"bucket"`
+	// Mode is which half of the port is in force. An empty value reads as
+	// relay: a controller newer than its backend must default to the mode that
+	// needs no configuration, not to the one that needs a bucket.
+	// +optional
+	Mode runv1.ArtifactMode `json:"mode,omitempty"`
+
+	// MaxBytesPerRun caps what one run may store, and is enforced by the
+	// controller in relay mode so the transfer is not paid for twice — once
+	// into the spool and once into a refusal. Zero means the installation's
+	// default.
+	// +optional
+	MaxBytesPerRun int64 `json:"maxBytesPerRun,omitempty"`
+
+	// +optional
+	Bucket string `json:"bucket,omitempty"`
 	// +optional
 	Region string `json:"region,omitempty"`
 	// Endpoint is set for MinIO and other S3-compatible stores.
 	// +optional
-	Endpoint  string `json:"endpoint,omitempty"`
-	KeyPrefix string `json:"keyPrefix"`
+	Endpoint string `json:"endpoint,omitempty"`
+	// +optional
+	KeyPrefix string `json:"keyPrefix,omitempty"`
 
 	// Put is keyed by the storage keys known in advance: output.json,
-	// result.md, state.json, completion.json, logs/agent.log.
+	// result.md, completion.json, logs/agent.log.
 	//
 	// completion.json is the copy that makes the report survivable. The webhook
 	// and its forwarding live in the controller's memory; a crash between them
 	// loses the cost and the PR link, and neither result.md nor output.json
 	// carries either. One extra PUT makes the loss recoverable.
-	Put map[string]PresignedURL `json:"put"`
-
-	// Get has two mandatory keys: prompt.txt, without which the pod has no
-	// task, and state.json, without which an idempotent retry is impossible —
-	// the pod cannot learn that the run phase is already done and pays for the
-	// model a second time. A 404 on state.json is the normal first-attempt
-	// answer, not a failure.
 	// +optional
-	Get map[string]PresignedURL `json:"get,omitempty"`
+	Put map[string]PresignedURL `json:"put,omitempty"`
 
 	// Post covers prefixes whose object names are not known in advance: log
 	// chunks and free-form artifacts.
@@ -124,9 +185,16 @@ type ArtifactBundle struct {
 	// ExpiresAt is the minimum over every link's expiry. Before creating the
 	// Job for attempt > 1 the controller compares it with the expected duration
 	// and mints a new bundle if it falls short — an expired signature surfaces
-	// as a lost result on work that actually succeeded.
-	ExpiresAt time.Time `json:"expiresAt"`
+	// as a lost result on work that actually succeeded. Zero in relay mode,
+	// where nothing expires.
+	// +optional
+	ExpiresAt time.Time `json:"expiresAt,omitempty"`
 }
+
+// Relay reports whether this run's artifacts travel through the controller. An
+// unset mode reads as relay, so a lease from a backend that predates the field
+// takes the path that needs no configuration.
+func (b ArtifactBundle) Relay() bool { return b.Mode != runv1.ArtifactModeObjectStore }
 
 // PresignedURL is a bearer capability on someone else's bucket prefix. Treated
 // as a secret everywhere: in the Secret, never in the CR, never in an

@@ -103,6 +103,16 @@ spec:
                 - codex
                 maxLength: 32
                 type: string
+              artifactMode:
+                description: |-
+                  ArtifactMode is how this run's results reach durable storage. It is in
+                  the spec rather than in the materials because it is not secret and the
+                  pod is told it outright: an empty value reads as relay.
+                enum:
+                - relay
+                - object-store
+                maxLength: 16
+                type: string
               budget:
                 properties:
                   maxCostUSD:
@@ -116,9 +126,14 @@ spec:
                 type: object
               callbackURL:
                 description: |-
-                  CallbackURL is where the pod posts its completion report. The value is
-                  cluster-local — a Service in the controller's namespace — so the backend
-                  cannot supply it and the controller fills it in.
+                  CallbackURL is the base the pod posts to: its completion, its phase
+                  transitions, and — in relay mode — its artifacts, each on a path from
+                  runv1.CallbackPath*. A base rather than one endpoint because there are
+                  three of them now and a CR carrying three URLs that differ in their last
+                  segment is three chances to disagree.
+
+                  The value is cluster-local — a Service in the controller's namespace — so
+                  the backend cannot supply it and the controller fills it in.
                 maxLength: 512
                 pattern: ^https?://
                 type: string
@@ -171,13 +186,28 @@ spec:
                     type: string
                   secretName:
                     description: |-
-                      SecretName holds git-token, llm-api-key, mcp.json, presigned.json and the
-                      controller-minted callback-token.
+                      SecretName holds the prompt, git-token, llm-api-key, mcp.json, the
+                      controller-minted callback-token, and — in object-store mode only —
+                      presigned.json.
                     maxLength: 253
                     type: string
                 required:
                 - secretName
                 type: object
+              maxArtifactBytes:
+                description: |-
+                  MaxArtifactBytes is what this run may store across every object it
+                  produces, as the backend stated it in the lease.
+
+                  It is per run and therefore on the run, rather than a setting on the
+                  controller: the cap is the control plane's policy, and a controller that
+                  substituted its own would enforce a limit the backend never agreed to.
+                  The controller is where it is *enforced*, one hop from the pod, so that
+                  an over-large upload is refused before it crosses the network to the
+                  control plane. Zero means the contract's default.
+                format: int64
+                minimum: 0
+                type: integer
               model:
                 description: Model is a provider-qualified identifier, e.g. anthropic/claude-opus-5.
                 maxLength: 253
@@ -199,38 +229,23 @@ spec:
                     maxLength: 256
                     type: string
                 type: object
-              prompt:
+              promptSHA256:
                 description: |-
-                  Prompt points at runs/{runID}/prompt.txt, written by the backend at
-                  admission. It travels through object storage rather than the Secret
-                  because a workflow step's prompt absorbs the output of previous steps
-                  and has no natural ceiling, while a Secret is capped at 1 MiB for all
-                  keys together. The digest lets the pod verify it is executing exactly
-                  what the backend posted.
-                properties:
-                  bucket:
-                    maxLength: 63
-                    minLength: 1
-                    type: string
-                  contentType:
-                    maxLength: 128
-                    type: string
-                  key:
-                    maxLength: 1024
-                    minLength: 1
-                    type: string
-                  sha256:
-                    maxLength: 64
-                    pattern: ^[a-f0-9]{64}$
-                    type: string
-                  sizeBytes:
-                    format: int64
-                    minimum: 0
-                    type: integer
-                required:
-                - bucket
-                - key
-                type: object
+                  PromptSHA256 is the digest of the prompt as the backend admitted it.
+                  The prompt text itself is not here and is not anywhere else in this
+                  type: it lives in runs.prompt in PostgreSQL, travels beside the spec in
+                  the lease, and reaches the pod as an environment variable sourced from
+                  the per-run Secret (ADR 30, 38).
+
+                  Leaving a field for it here would put customer prompts into
+                  `kubectl get agentrun -o yaml` and into every GitOps diff. The digest is
+                  enough to reason about which task a CR describes, and it is what the
+                  entrypoint verifies before it calls a model — a run that executes
+                  something other than what was admitted is worse than one that does not
+                  start.
+                maxLength: 64
+                pattern: ^[a-f0-9]{64}$
+                type: string
               repo:
                 description: |-
                   RepoSpec describes the repository the agent works in. An empty URL means a
@@ -281,9 +296,10 @@ spec:
                     description: |-
                       MaxInfraRetries is how many extra attempts the controller starts on its
                       own, without asking the backend. Only infra and git classes are retried,
-                      and the retry is idempotent thanks to runs/{runID}/state.json: a run that
-                      already finished the agent phase resumes at push, and does not pay for
-                      the model twice.
+                      and the retry is idempotent thanks to the attempt checkpoint of section
+                      9.3 — the phases the previous attempt got through, replayed into the next
+                      Job as HALIPHRON_COMPLETED_PHASES. A run that already finished the agent
+                      phase resumes at push, and does not pay for the model twice.
                     format: int32
                     maximum: 10
                     minimum: 0
@@ -498,7 +514,7 @@ spec:
             - leaseEpoch
             - materials
             - model
-            - prompt
+            - promptSHA256
             - repo
             - runID
             - runtime
@@ -522,6 +538,55 @@ spec:
                 format: int32
                 minimum: 1
                 type: integer
+              completedPhases:
+                description: |-
+                  CompletedPhases is the one piece of run progress the controller owns
+                  locally: the entrypoint phases any attempt of this run has reported
+                  getting through, in execution order. It is written from the pod's phase
+                  reports and handed to the next attempt's Job as
+                  HALIPHRON_COMPLETED_PHASES, so an infrastructure retry is idempotent
+                  while the backend is unreachable (P4).
+
+                  It accumulates across attempts and is never reset, which is the whole
+                  point: attempt 2 skips the model precisely because attempt 1 got through
+                  the run phase. It is scoped to the epoch by the object it lives on — a
+                  new epoch is a new AgentRun, so new ownership starts from nothing.
+
+                  Only RuntimePhase.Resumable() phases change what the next attempt does.
+                  The rest are here because the checkpoint is also the answer to "how far
+                  did this get before it died", which previously required fetching an
+                  object out of a bucket.
+
+                  It is a cache of what run_attempts.completed_phases stores. PostgreSQL
+                  remains the system of record, and a controller that lost its CRs recovers
+                  the list from the lease rather than from here.
+                items:
+                  description: |-
+                    RuntimePhase names one step of the entrypoint. The names are contract, not
+                    logging: they key the checkpoint, they are the phase field of PhaseTiming,
+                    and the UI groups a run's timeline by them.
+                  enum:
+                  - init
+                  - validate
+                  - fetch
+                  - checkpoint
+                  - auth
+                  - clone
+                  - role
+                  - mcp-prepare
+                  - mcp-verify
+                  - run
+                  - parse
+                  - output
+                  - persist
+                  - commit
+                  - push
+                  - pr
+                  - finalize
+                  - notify
+                  type: string
+                maxItems: 32
+                type: array
               conditions:
                 description: |-
                   Conditions carry the reconcile steps: Validated, JobCreated, Completed,
@@ -680,23 +745,22 @@ spec:
               result:
                 description: |-
                   Result points at what the pod uploaded. Pointers only — the result text
-                  belongs in object storage, and a 64 KiB summary in etcd would be read on
-                  every reconcile of every run.
+                  belongs in the artifact store, and a 64 KiB summary in etcd would be read
+                  on every reconcile of every run.
                 properties:
                   completion:
                     description: |-
-                      Completion is the full report, also written to storage by the pod. It is
+                      Completion is the full report, also written to the artifact store. It is
                       the reason a controller crash between the callback and the ingest costs
-                      nothing: the backend reads the same report from the bucket.
+                      nothing: the backend reads the same report back out.
                     properties:
-                      bucket:
-                        maxLength: 63
-                        minLength: 1
-                        type: string
                       contentType:
                         maxLength: 128
                         type: string
                       key:
+                        description: |-
+                          Key is relative to nothing: it is the full key under the layout in
+                          section 9.2, runs/{runID}/result.md and so on.
                         maxLength: 1024
                         minLength: 1
                         type: string
@@ -708,23 +772,34 @@ spec:
                         format: int64
                         minimum: 0
                         type: integer
+                      uploaded:
+                        description: |-
+                          Uploaded is what the backend checks before believing a ref. In relay
+                          mode it is the controller's acknowledgement that the bytes reached a
+                          disk that is not the pod's; in object-store mode it is the pod's own
+                          PUT. A ref without it names a key nothing was ever written to.
+                        type: boolean
                     required:
-                    - bucket
                     - key
                     type: object
                   log:
                     description: |-
-                      ObjectRef points at an object in shared storage. Content never travels
+                      ObjectRef points at an object in the artifact store. Content never travels
                       through these contracts; only the pointer does.
+
+                      There is deliberately no bucket. Which store holds the object is the
+                      installation's business — a PVC on the backend in relay mode, S3 in
+                      object-store mode — and the pod is told neither. A pod that never learns a
+                      bucket name cannot leak one, and a key that means the same thing in both
+                      modes is what lets the mode stay invisible above the ArtifactStore port.
                     properties:
-                      bucket:
-                        maxLength: 63
-                        minLength: 1
-                        type: string
                       contentType:
                         maxLength: 128
                         type: string
                       key:
+                        description: |-
+                          Key is relative to nothing: it is the full key under the layout in
+                          section 9.2, runs/{runID}/result.md and so on.
                         maxLength: 1024
                         minLength: 1
                         type: string
@@ -736,23 +811,34 @@ spec:
                         format: int64
                         minimum: 0
                         type: integer
+                      uploaded:
+                        description: |-
+                          Uploaded is what the backend checks before believing a ref. In relay
+                          mode it is the controller's acknowledgement that the bytes reached a
+                          disk that is not the pod's; in object-store mode it is the pod's own
+                          PUT. A ref without it names a key nothing was ever written to.
+                        type: boolean
                     required:
-                    - bucket
                     - key
                     type: object
                   output:
                     description: |-
-                      ObjectRef points at an object in shared storage. Content never travels
+                      ObjectRef points at an object in the artifact store. Content never travels
                       through these contracts; only the pointer does.
+
+                      There is deliberately no bucket. Which store holds the object is the
+                      installation's business — a PVC on the backend in relay mode, S3 in
+                      object-store mode — and the pod is told neither. A pod that never learns a
+                      bucket name cannot leak one, and a key that means the same thing in both
+                      modes is what lets the mode stay invisible above the ArtifactStore port.
                     properties:
-                      bucket:
-                        maxLength: 63
-                        minLength: 1
-                        type: string
                       contentType:
                         maxLength: 128
                         type: string
                       key:
+                        description: |-
+                          Key is relative to nothing: it is the full key under the layout in
+                          section 9.2, runs/{runID}/result.md and so on.
                         maxLength: 1024
                         minLength: 1
                         type: string
@@ -764,23 +850,41 @@ spec:
                         format: int64
                         minimum: 0
                         type: integer
+                      uploaded:
+                        description: |-
+                          Uploaded is what the backend checks before believing a ref. In relay
+                          mode it is the controller's acknowledgement that the bytes reached a
+                          disk that is not the pod's; in object-store mode it is the pod's own
+                          PUT. A ref without it names a key nothing was ever written to.
+                        type: boolean
                     required:
-                    - bucket
                     - key
                     type: object
+                  relayed:
+                    description: |-
+                      Relayed means these objects went through this controller's spool rather
+                      than straight from the pod to an object store. It is the difference
+                      between "the backend has them" and "the backend can fetch them", which is
+                      what an operator reading a stuck run needs to know first.
+                    type: boolean
                   result:
                     description: |-
-                      ObjectRef points at an object in shared storage. Content never travels
+                      ObjectRef points at an object in the artifact store. Content never travels
                       through these contracts; only the pointer does.
+
+                      There is deliberately no bucket. Which store holds the object is the
+                      installation's business — a PVC on the backend in relay mode, S3 in
+                      object-store mode — and the pod is told neither. A pod that never learns a
+                      bucket name cannot leak one, and a key that means the same thing in both
+                      modes is what lets the mode stay invisible above the ArtifactStore port.
                     properties:
-                      bucket:
-                        maxLength: 63
-                        minLength: 1
-                        type: string
                       contentType:
                         maxLength: 128
                         type: string
                       key:
+                        description: |-
+                          Key is relative to nothing: it is the full key under the layout in
+                          section 9.2, runs/{runID}/result.md and so on.
                         maxLength: 1024
                         minLength: 1
                         type: string
@@ -792,36 +896,14 @@ spec:
                         format: int64
                         minimum: 0
                         type: integer
+                      uploaded:
+                        description: |-
+                          Uploaded is what the backend checks before believing a ref. In relay
+                          mode it is the controller's acknowledgement that the bytes reached a
+                          disk that is not the pod's; in object-store mode it is the pod's own
+                          PUT. A ref without it names a key nothing was ever written to.
+                        type: boolean
                     required:
-                    - bucket
-                    - key
-                    type: object
-                  state:
-                    description: |-
-                      ObjectRef points at an object in shared storage. Content never travels
-                      through these contracts; only the pointer does.
-                    properties:
-                      bucket:
-                        maxLength: 63
-                        minLength: 1
-                        type: string
-                      contentType:
-                        maxLength: 128
-                        type: string
-                      key:
-                        maxLength: 1024
-                        minLength: 1
-                        type: string
-                      sha256:
-                        maxLength: 64
-                        pattern: ^[a-f0-9]{64}$
-                        type: string
-                      sizeBytes:
-                        format: int64
-                        minimum: 0
-                        type: integer
-                    required:
-                    - bucket
                     - key
                     type: object
                 type: object

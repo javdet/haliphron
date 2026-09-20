@@ -1,11 +1,13 @@
 package artifacts
 
 import (
+	"bytes"
 	"context"
 	"crypto/hmac"
 	"crypto/sha256"
 	"encoding/hex"
 	"fmt"
+	"io"
 	"maps"
 	"net/url"
 	"slices"
@@ -15,16 +17,21 @@ import (
 	"time"
 
 	clusterv1 "github.com/automagicops/haliphron/api/cluster/v1"
+	runv1 "github.com/automagicops/haliphron/api/run/v1"
 )
 
-// Memory is the ArtifactStore held in a map.
+// Memory is the object-store half of the port, held in a map.
 //
-// It exists for the contract tests, where the properties under test are the
-// backend's: that the prompt is written before the run is admitted, that its
-// digest is what the pod will verify against, that a terminal status without a
-// completion recovers the report from storage. None of those need a real
-// object store, and a test that needs MinIO running is a test that gets
+// It exists for the contract tests, where the property under test is the
+// backend's: that a terminal status without a completion recovers the report
+// from the store, that a bundle is scoped to one run's prefix, that the expiry
+// arithmetic is what the controller will compare against. None of those need a
+// real object store, and a test that needs MinIO running is a test that gets
 // skipped.
+//
+// It reports object-store mode, because that is the half it stands in for. The
+// relay half needs no double: Disk over a t.TempDir() is the real
+// implementation and costs a line.
 //
 // The signatures it mints are real HMACs over the same material an S3
 // signature covers — method, key and expiry — so that a bundle from here has
@@ -60,6 +67,13 @@ func NewMemory(bucket, baseURL string) *Memory {
 // Bucket is the bucket name the bundle advertises.
 func (m *Memory) Bucket() string { return m.bucket }
 
+// Scheme is s3: this stands in for the object-store half, and a result_ref
+// written in a test should have the shape one written in production has.
+func (m *Memory) Scheme() string { return runv1.SchemeS3 }
+
+// Mode is object-store.
+func (m *Memory) Mode() runv1.ArtifactMode { return runv1.ArtifactModeObjectStore }
+
 // Endpoint is the base URL the bundle advertises.
 func (m *Memory) Endpoint() string { return m.baseURL }
 
@@ -70,6 +84,43 @@ func (m *Memory) Put(_ context.Context, key string, body []byte, contentType str
 	m.objects[key] = memObject{
 		body: slices.Clone(body), contentType: contentType, modified: m.now(),
 	}
+	return nil
+}
+
+// PutStream stores an object from a reader.
+func (m *Memory) PutStream(ctx context.Context, key string, body io.Reader, contentType string) (runv1.ObjectRef, error) {
+	buf, err := io.ReadAll(body)
+	if err != nil {
+		return runv1.ObjectRef{}, fmt.Errorf("artifacts: read the body for %s: %w", key, err)
+	}
+	if err := m.Put(ctx, key, buf, contentType); err != nil {
+		return runv1.ObjectRef{}, err
+	}
+	sum := sha256.Sum256(buf)
+	return runv1.ObjectRef{
+		Key:         key,
+		SizeBytes:   int64(len(buf)),
+		SHA256:      hex.EncodeToString(sum[:]),
+		ContentType: contentType,
+		Uploaded:    true,
+	}, nil
+}
+
+// Open streams an object out.
+func (m *Memory) Open(ctx context.Context, key string) (io.ReadCloser, error) {
+	body, err := m.Get(ctx, key)
+	if err != nil {
+		return nil, err
+	}
+	return io.NopCloser(bytes.NewReader(body)), nil
+}
+
+// Delete removes an object. A key that was never there is not an error: the
+// reaper deleting twice is ordinary.
+func (m *Memory) Delete(_ context.Context, key string) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	delete(m.objects, key)
 	return nil
 }
 

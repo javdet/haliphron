@@ -1,7 +1,7 @@
 package v1
 
 // CompletionReport is what the pod says happened. It travels twice: once to the
-// controller over the in-cluster webhook, and once into storage as
+// controller over the in-cluster webhook, and once into the artifact store as
 // completion.json, unchanged. The controller forwards it to the backend without
 // editing it, so the three copies are byte-identical and any of them can be the
 // one that survives.
@@ -14,9 +14,9 @@ package v1
 // scope for v1.
 type CompletionReport struct {
 	// RunID and Attempt are here as well as in the ingest envelope, because
-	// completion.json is read from the bucket without an envelope when the
-	// controller dies between the webhook and the ingest. A report that cannot
-	// say which run it belongs to is not a fallback.
+	// completion.json is read back from the artifact store without an envelope
+	// when the controller dies between the webhook and the ingest. A report
+	// that cannot say which run it belongs to is not a fallback.
 	RunID   ULID  `json:"runID"`
 	Attempt int32 `json:"attempt"`
 
@@ -42,18 +42,35 @@ type CompletionReport struct {
 	// +optional
 	Runtime *RuntimeInfo `json:"runtime,omitempty"`
 
+	// The refs name keys rather than buckets: which store holds them is the
+	// installation's business, not the pod's. ObjectRef.Uploaded is what the
+	// backend checks before believing one — in relay mode it is the
+	// controller's acknowledgement, in object-store mode the pod's own PUT.
+	//
+	// There is no stateRef. The checkpoint is a column in run_attempts now
+	// (section 9.3), not an object this pod wrote.
 	// +optional
 	ResultRef *ObjectRef `json:"resultRef,omitempty"`
 	// +optional
 	OutputRef *ObjectRef `json:"outputRef,omitempty"`
 	// +optional
 	LogRef *ObjectRef `json:"logRef,omitempty"`
+
+	// CompletedPhases is what this attempt got through, in execution order.
+	// The controller records it on the CR and forwards it to /ingest/status,
+	// where it lands in run_attempts.completed_phases and becomes the next
+	// attempt's HALIPHRON_COMPLETED_PHASES.
+	//
+	// The pod reports phases as it passes them, so this is a summary rather
+	// than the only copy: a pod killed before notify has already told the
+	// controller everything up to where it died.
 	// +optional
-	StateRef *ObjectRef `json:"stateRef,omitempty"`
+	// +kubebuilder:validation:MaxItems=32
+	CompletedPhases []RuntimePhase `json:"completedPhases,omitempty"`
 
 	// Summary is the first 64 KiB of result.md and the only content in this
 	// contract. It is duplicated into runs.result_summary so that the run list
-	// in the UI does not reach into storage once per row.
+	// in the UI does not reach into the artifact store once per row.
 	// +optional
 	Summary string `json:"summary,omitempty"`
 

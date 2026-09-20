@@ -20,6 +20,7 @@ import (
 	"syscall"
 	"time"
 
+	runv1 "github.com/automagicops/haliphron/api/run/v1"
 	"github.com/automagicops/haliphron/backend/app"
 	"github.com/automagicops/haliphron/backend/artifacts"
 	"github.com/automagicops/haliphron/backend/clusterapi"
@@ -29,6 +30,34 @@ import (
 	"github.com/automagicops/haliphron/backend/store"
 	"github.com/automagicops/haliphron/backend/version"
 )
+
+// openArtifacts builds whichever half of the ArtifactStore port this
+// installation runs.
+//
+// The default needs no credentials and no external service, which is the point:
+// `helm install` with nothing set produces a control plane that can run an
+// agent end to end. Choosing object-store mode is a deliberate act, and the
+// configuration refuses the halfway state — that mode without a bucket — at
+// startup rather than as a run that works for an hour and cannot upload.
+func openArtifacts(cfg config.Config, log *slog.Logger) (artifacts.Store, error) {
+	if cfg.Artifacts.Mode == runv1.ArtifactModeObjectStore {
+		store, err := artifacts.NewS3(cfg.Artifacts.S3)
+		if err != nil {
+			return nil, err
+		}
+		log.Info("artifacts: object-store mode",
+			"bucket", store.Bucket(), "endpoint", store.Endpoint())
+		return store, nil
+	}
+
+	store, err := artifacts.NewDisk(artifacts.DiskConfig{Root: cfg.Artifacts.VolumePath})
+	if err != nil {
+		return nil, err
+	}
+	log.Info("artifacts: relay mode; results are written to this volume",
+		"path", store.Root())
+	return store, nil
+}
 
 func main() {
 	if err := run(); err != nil {
@@ -76,7 +105,7 @@ func run() error {
 		log.Info("schema applied", "took", time.Since(start))
 	}
 
-	objects, err := artifacts.NewS3(cfg.Storage)
+	objects, err := openArtifacts(cfg, log)
 	if err != nil {
 		return err
 	}
@@ -142,9 +171,20 @@ func run() error {
 	// would be harmless, since both statements are idempotent, but doubles the
 	// scan for nothing.
 	if cfg.Mode.Serves(config.ModeCluster) {
-		wg.Add(2)
+		wg.Add(3)
 		go func() { defer wg.Done(); service.RunSweeper(ctx, cfg.SweepInterval) }()
 		go func() { defer wg.Done(); service.RunReaper(ctx, cfg.ReapInterval) }()
+		// Retention for the artifact volume. A no-op in object-store mode,
+		// where the chart generated lifecycle rules and the store applies them
+		// itself.
+		go func() {
+			defer wg.Done()
+			service.ReapArtifacts(ctx, cfg.ReapInterval, app.Retention{
+				Logs:    cfg.Artifacts.RetainLogs,
+				Results: cfg.Artifacts.RetainResults,
+				Other:   cfg.Artifacts.RetainOther,
+			})
+		}()
 	}
 
 	<-ctx.Done()

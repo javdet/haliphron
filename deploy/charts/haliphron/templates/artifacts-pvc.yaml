@@ -1,0 +1,35 @@
+{{- if (include "haliphron.artifactPVC" .) }}
+{{- /*
+The artifact volume: results, logs and the agents' own output, in relay mode.
+
+This is what makes object storage optional. The bytes arrive relayed from a
+controller rather than pushed by a pod, and they land here rather than in a
+bucket an installation would otherwise have to stand up before it could run its
+first agent.
+
+The claim is deliberately not part of the Deployment as a volumeClaimTemplate:
+the backend is a Deployment and not a StatefulSet, because everything else about
+it scales freely on SKIP LOCKED. A separate claim keeps that true — the artifact
+writer is pinned by the volume's access mode, not by the workload kind.
+
+It is also not annotated with a helm.sh/resource-policy of keep. A chart that
+silently retains a PVC on uninstall leaves a customer paying for storage they
+believe they deleted; an operator who wants the data kept after an uninstall
+uses artifacts.pvc.existingClaim, which the chart never owns and never removes.
+*/}}
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: {{ include "haliphron.artifactClaim" . }}
+  labels:
+    {{- include "haliphron.labels" . | nindent 4 }}
+spec:
+  accessModes:
+    - {{ .Values.artifacts.pvc.accessMode }}
+  resources:
+    requests:
+      storage: {{ .Values.artifacts.pvc.size }}
+  {{- with .Values.artifacts.pvc.storageClass }}
+  storageClassName: {{ . | quote }}
+  {{- end }}
+{{- end }}

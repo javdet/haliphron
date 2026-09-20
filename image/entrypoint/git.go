@@ -213,7 +213,6 @@ func phaseCommit(ctx context.Context, r *Run) error {
 	head, code, err := r.git(ctx, "rev-parse", "HEAD")
 	if err == nil && code == 0 {
 		r.repo.CommitSHA = strings.TrimSpace(head)
-		r.checkpoint.Repo = &CheckpointRepo{CommitSHA: r.repo.CommitSHA}
 	}
 
 	// Nothing to push is a legitimate outcome: an analysis run changes no files
@@ -235,7 +234,7 @@ func phasePush(ctx context.Context, r *Run) error {
 	if !r.cfg.HasRepo() {
 		return skip("this run has no repository")
 	}
-	if r.checkpoint.Phases[runv1.RuntimePhaseCommit].Outcome == runv1.PhaseOutcomeSkipped {
+	if r.outcome(runv1.RuntimePhaseCommit) == runv1.PhaseOutcomeSkipped {
 		return skip("nothing was committed")
 	}
 
@@ -249,10 +248,6 @@ func phasePush(ctx context.Context, r *Run) error {
 	}
 
 	r.repo.Pushed = true
-	if r.checkpoint.Repo == nil {
-		r.checkpoint.Repo = &CheckpointRepo{}
-	}
-	r.checkpoint.Repo.Pushed = true
 	return nil
 }
 
@@ -285,7 +280,6 @@ func phasePR(ctx context.Context, r *Run) error {
 	if err == nil && result.ExitCode == 0 {
 		if url, number, found := parseExistingPR(out.Bytes()); found {
 			r.repo.PRURL, r.repo.PRNumber, r.repo.PRAction = url, number, runv1.PRActionUpdated
-			r.recordPR()
 			r.logf("pull request %d already exists and was updated: %s", number, url)
 			return nil
 		}
@@ -307,17 +301,8 @@ func phasePR(ctx context.Context, r *Run) error {
 
 	r.repo.PRURL = strings.TrimSpace(lastNonEmptyLine(text))
 	r.repo.PRAction = runv1.PRActionCreated
-	r.recordPR()
 	r.logf("pull request opened: %s", r.repo.PRURL)
 	return nil
-}
-
-func (r *Run) recordPR() {
-	if r.checkpoint.Repo == nil {
-		r.checkpoint.Repo = &CheckpointRepo{}
-	}
-	r.checkpoint.Repo.PRURL = r.repo.PRURL
-	r.checkpoint.Repo.PRNumber = int(r.repo.PRNumber)
 }
 
 func (r *Run) forgeListCommand() (string, []string, bool) {

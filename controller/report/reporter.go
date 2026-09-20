@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"log/slog"
 	"sync"
 	"time"
@@ -21,6 +22,7 @@ import (
 	"github.com/automagicops/haliphron/controller/agentrun"
 	"github.com/automagicops/haliphron/controller/clusterapi"
 	"github.com/automagicops/haliphron/controller/config"
+	"github.com/automagicops/haliphron/controller/spool"
 )
 
 // API is the part of the Cluster API the reporter uses.
@@ -28,6 +30,11 @@ type API interface {
 	Heartbeat(ctx context.Context, req clusterv1.HeartbeatRequest) (*clusterv1.HeartbeatResponse, error)
 	IngestStatus(ctx context.Context, req clusterv1.StatusIngestRequest) (*clusterv1.StatusIngestResponse, error)
 	IngestCompletion(ctx context.Context, req clusterv1.CompletionIngestRequest) (*clusterv1.CompletionIngestResponse, error)
+	// IngestArtifact streams one relayed object. It takes a reader rather than
+	// bytes because the objects on this path can be hundreds of megabytes, and
+	// a controller that buffered each one would be a controller an agent can
+	// exhaust with one log.
+	IngestArtifact(ctx context.Context, req clusterv1.ArtifactIngestRequest, body io.Reader) (*clusterv1.ArtifactIngestResponse, error)
 }
 
 // Reporter is everything the controller says. Two loops share one queue: the
@@ -48,6 +55,10 @@ type Reporter struct {
 	ClusterID runv1.ULID
 	Capacity  int32
 	Version   string
+	// Spool is the controller's copy of what pods handed it, in relay mode.
+	// Nil in object-store mode, where the pod writes straight to the store and
+	// nothing passes through here.
+	Spool *spool.Spool
 
 	Clock func() time.Time
 	Log   *slog.Logger
@@ -83,6 +94,7 @@ type Config struct {
 	ClusterID runv1.ULID
 	Capacity  int32
 	Version   string
+	Spool     *spool.Spool
 	Clock     func() time.Time
 	Log       *slog.Logger
 }
@@ -113,6 +125,7 @@ func New(cfg Config) (*Reporter, error) {
 		ClusterID: cfg.ClusterID,
 		Capacity:  cfg.Capacity,
 		Version:   cfg.Version,
+		Spool:     cfg.Spool,
 		Clock:     cfg.Clock,
 		Log:       cfg.Log,
 		wake:      make(chan struct{}, 1),
@@ -218,12 +231,26 @@ func (r *Reporter) ingestLoop(ctx context.Context) {
 	}
 }
 
-// Flush delivers everything waiting: the pods' completion reports first,
-// because a report is owed to a run that has already finished, then the phase
-// observations.
+// Flush delivers everything waiting, in the one order that is safe.
+//
+// Artifacts first, because a completion names references the backend resolves:
+// forwarding the report ahead of the objects it describes leaves a window in
+// which the control plane holds a result pointing at nothing, and the
+// CompletedWithoutResult recovery path reads that window as a lost result.
+//
+// Then completions, because a report is owed to a run that has already
+// finished. Then the phase observations, which the heartbeat would carry anyway.
+//
+// A failure at any step stops the rest. That is deliberate rather than
+// pessimistic: every one of these failures is the same failure — the control
+// plane is unreachable — and pressing on would turn one error into three and
+// three retries into nine.
 //
 // It is exported so that the delivery path can be driven a step at a time.
 func (r *Reporter) Flush(ctx context.Context) error {
+	if err := r.flushArtifacts(ctx); err != nil {
+		return err
+	}
 	if err := r.flushCompletions(ctx); err != nil {
 		return err
 	}
@@ -505,6 +532,9 @@ func (r *Reporter) recordCommands(ctx context.Context, commands []clusterv1.Comm
 
 func (r *Reporter) abandon(ctx context.Context, runID runv1.ULID) {
 	r.Forget(runID)
+	// The artifacts go with the claim. They belong to whoever holds the run
+	// now, and forwarding ours would overwrite theirs under the same key.
+	r.ForgetArtifacts(runID)
 	r.recordCommands(ctx, []clusterv1.Command{{Type: clusterv1.CommandAbandon, RunID: runID}})
 }
 
@@ -598,7 +628,13 @@ func observationOf(cr *agentrunv1alpha1.AgentRun, now time.Time) clusterv1.RunOb
 		NodeName:     cr.Status.NodeName,
 		ExitCode:     cr.Status.ExitCode,
 		FailureClass: cr.Status.FailureClass,
-		ObservedAt:   ptrUTC(now),
+		// The checkpoint rides on the observation rather than on a channel of
+		// its own: it is the same fact about the same attempt, and a second
+		// channel would need the same epoch check, the same ordering rule and
+		// the same batching. The backend unions it, so sending the whole list
+		// on every observation is idempotent rather than wasteful.
+		CompletedPhases: cr.Status.CompletedPhases,
+		ObservedAt:      ptrUTC(now),
 	}
 	if cr.Status.StartedAt != nil {
 		obs.StartedAt = ptrUTC(cr.Status.StartedAt.Time)

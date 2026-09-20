@@ -13,6 +13,20 @@ const (
 	MaxStatusReports = 100     // one ingest batch
 	MaxHeartbeatRuns = 500     // the cluster capacity ceiling, with room
 	MaxSummaryBytes  = 64 << 10
+
+	// MaxArtifactBytes bounds one relayed object, and is the one limit here
+	// that is not about a JSON body: an artifact is the body. Generous against
+	// any single log or result, and finite, because relay mode puts the
+	// backend in the artifact data path and an unbounded POST is a way to fill
+	// a control plane's volume from inside an agent.
+	//
+	// The per-run total is a separate and smaller budget, enforced by the
+	// controller from ArtifactBundle.MaxBytesPerRun so the transfer is not
+	// paid for twice.
+	MaxArtifactBytes = 256 << 20 // 256 MiB
+
+	// DefaultMaxBytesPerRun is artifacts.maxBytesPerRun's default.
+	DefaultMaxBytesPerRun = 1 << 30 // 1 GiB
 )
 
 // StatusIngestRequest is the low-latency path for a phase change. It duplicates
@@ -83,6 +97,62 @@ type CompletionIngestResponse struct {
 	Commands []Command `json:"commands,omitempty"`
 }
 
+// ArtifactIngestRequest is one relayed object. The metadata is here and the
+// bytes are the request body, for the reason the pod's own upload puts them
+// there: base64 in a JSON field costs a third of the size on the one path in
+// this system that carries gigabytes.
+//
+// The fields travel as query parameters and headers; this type is the shape
+// they parse into, so that the controller and the backend agree on the names
+// without either of them holding a second copy of the list.
+type ArtifactIngestRequest struct {
+	ClusterID runv1.ULID `json:"clusterID"`
+	RunID     runv1.ULID `json:"runID"`
+	Epoch     int64      `json:"epoch"`
+	Attempt   int32      `json:"attempt"`
+
+	// Key is relative to the run's prefix — "result.md", "logs/chunks/7.log".
+	// The backend stamps runs/{runID}/ onto it from the envelope it
+	// authenticated, exactly as the controller did from the CR: neither side
+	// lets the producer of the bytes choose the prefix they land under.
+	Key string `json:"key"`
+	// +optional
+	ContentType string `json:"contentType,omitempty"`
+	// SHA256 is verified against the body before anything is written. A
+	// truncated relay is refused rather than stored, because a half-written
+	// result.md under the right key is worse than none: the recovery path
+	// would read it and believe it.
+	// +optional
+	SHA256 string `json:"sha256,omitempty"`
+	// +optional
+	SizeBytes int64 `json:"sizeBytes,omitempty"`
+}
+
+// ArtifactIngestResponse confirms one object is on the backend's volume.
+//
+// The controller does not delete its spooled copy until this arrives, which is
+// what keeps the relay at-least-once across a backend outage. A Duplicate is a
+// success for the same reason it is on the completion path: the call is retried
+// on any network error, and the second write of identical bytes under an
+// identical key changed nothing.
+type ArtifactIngestResponse struct {
+	RunID runv1.ULID      `json:"runID"`
+	Ref   runv1.ObjectRef `json:"ref"`
+	// +optional
+	Duplicate bool `json:"duplicate,omitempty"`
+}
+
+// Query parameter and header names on /ingest/artifacts. Constants because the
+// controller writes them and the backend reads them.
+const (
+	QueryRunID   = "runID"
+	QueryEpoch   = "epoch"
+	QueryAttempt = "attempt"
+	QueryKey     = "key"
+
+	HeaderArtifactSHA256 = "X-Haliphron-SHA256"
+)
+
 // Backend run statuses. The controller never names these — it reports the CR
 // phases from run/v1 — but it reads them out of AckResponse.Status and
 // StatusIngestResult.AppliedStatus, so the spellings belong in the shared
@@ -106,8 +176,8 @@ const (
 	// rather than guessing at with Failed.
 	StatusUnknown = "Unknown"
 	// StatusCompletedWithoutResult is a terminal phase observed with no
-	// completion report. The contents are recoverable from storage, so this is
-	// a reconciliation task and not a failure.
+	// completion report. The contents are recoverable from the artifact store,
+	// so this is a reconciliation task and not a failure.
 	StatusCompletedWithoutResult = "CompletedWithoutResult"
 )
 

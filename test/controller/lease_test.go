@@ -128,8 +128,18 @@ func TestSecretMaterialNeverReachesTheAgentRun(t *testing.T) {
 	if string(secret.Data[runv1.SecretKeyGitToken]) != token {
 		t.Fatal("the git token did not reach the Secret")
 	}
-	if len(secret.Data[runv1.SecretKeyPresigned]) == 0 {
-		t.Fatal("the presigned bundle did not reach the Secret; the pod could not upload a result")
+	// The prompt is a Secret key rather than a spec field. It is not a
+	// credential, and it is here for the reason the credentials are: in the
+	// spec it would land in `kubectl get agentrun -o yaml` and in every GitOps
+	// diff.
+	if len(secret.Data[runv1.SecretKeyPrompt]) == 0 {
+		t.Fatal("the prompt did not reach the Secret; the pod would have no task")
+	}
+	// And no presigned bundle, because this run is in the default relay mode:
+	// there is nothing to sign, and an empty bundle would give the entrypoint a
+	// mode to misread.
+	if len(secret.Data[runv1.SecretKeyPresigned]) != 0 {
+		t.Fatal("a relay run was given a presigned bundle")
 	}
 	if len(secret.Data[runv1.SecretKeyCallbackToken]) == 0 {
 		t.Fatal("no callback token was minted; any pod in the namespace could forge a completion")
@@ -193,7 +203,10 @@ func TestAnUnacceptableSpecIsRefusedBeforeAnythingIsSpent(t *testing.T) {
 // and the upload fails with 403 on a link that lapsed ten minutes earlier. The
 // work is gone and the logs say "storage error".
 func TestTheBundleIsReissuedBeforeTheJobStarts(t *testing.T) {
-	h := newHarness(t)
+	// Object-store mode: this whole failure only exists there. In relay mode
+	// there is no signature to expire — the pod posts to a Service — which is
+	// one of the quieter reasons the default is what it is.
+	h := newHarness(t, withObjectStore())
 	id := h.Backend.Enqueue(sampleSpec())
 	h.poll()
 

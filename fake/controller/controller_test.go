@@ -45,10 +45,10 @@ func setup(t *testing.T, opts ...controller.Option) (*backend.Backend, *controll
 
 func sampleSpec() runv1.RenderedRunSpec {
 	return runv1.RenderedRunSpec{
-		Agent:  runv1.AgentClaudeCode,
-		Prompt: runv1.ObjectRef{Bucket: "haliphron", Key: "runs/x/prompt.txt", SHA256: strings.Repeat("a", 64)},
-		Model:  "anthropic/claude-opus-5",
-		Image:  "ghcr.io/automagicops/agent-runtime@sha256:" + strings.Repeat("b", 64),
+		Agent:        runv1.AgentClaudeCode,
+		PromptSHA256: strings.Repeat("a", 64),
+		Model:        "anthropic/claude-opus-5",
+		Image:        "ghcr.io/automagicops/agent-runtime@sha256:" + strings.Repeat("b", 64),
 		Repo: runv1.RepoSpec{
 			URL: "https://github.com/acme/widgets.git", Provider: runv1.GitProviderGitHub,
 			BaseBranch: "main", TargetBranch: "haliphron/01j8-add-rds",

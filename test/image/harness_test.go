@@ -45,10 +45,38 @@ func withCommands(handle func(entrypoint.Command) (entrypoint.CommandResult, err
 	return func(h *harness) { h.commander.handle = handle }
 }
 
+// artifactMode is the package-level switch the whole suite runs under, set by
+// TestMain. It is a variable rather than a harness option because the point is
+// to run *every* row against both halves of the port: an option would mean
+// choosing, per test, which mode the row belongs to, and the rows do not divide
+// that way — "a refused upload is infra, not config" is true in both and worth
+// checking in both.
+var artifactMode = runv1.ArtifactModeRelay
+
+// TestMain runs the checklist twice, once per artifact mode.
+//
+// The image implements both and an installation runs one of them. Relay is the
+// default and is what an installation gets with nothing configured, so a suite
+// that exercised only the optimisation would let the default path ship
+// untested — and object-store mode has failure modes relay does not, which is
+// the other half of the argument.
+func TestMain(m *testing.M) {
+	for _, mode := range []runv1.ArtifactMode{
+		runv1.ArtifactModeRelay, runv1.ArtifactModeObjectStore,
+	} {
+		artifactMode = mode
+		fmt.Fprintf(os.Stderr, "=== artifact mode: %s ===\n", mode)
+		if code := m.Run(); code != 0 {
+			os.Exit(code)
+		}
+	}
+	os.Exit(0)
+}
+
 func newHarness(t *testing.T, req controlplane.RunRequest, opts ...harnessOption) *harness {
 	t.Helper()
 
-	cp, srv := controlplane.NewServer()
+	cp, srv := controlplane.NewServer(controlplane.WithArtifactMode(artifactMode))
 	t.Cleanup(srv.Close)
 
 	h := &harness{
@@ -173,14 +201,21 @@ func (h *harness) envelope() runv1.OutputEnvelope {
 	return out
 }
 
-// phase returns how one phase ended, from the checkpoint the run wrote.
+// phase returns how one phase ended, from the timings the run recorded.
+//
+// The timings rather than the checkpoint, now that the checkpoint holds only
+// what completed: "skipped" and "failed" are outcomes a test asks about and the
+// checkpoint deliberately does not record, because a later attempt may not
+// assume a skipped phase was done.
 func (h *harness) phase(run *entrypoint.Run, p runv1.RuntimePhase) runv1.PhaseOutcome {
 	h.t.Helper()
-	rec, ok := run.Checkpoint().Phases[p]
-	if !ok {
-		h.t.Fatalf("phase %s is missing from the checkpoint entirely", p)
+	for _, t := range run.Timings() {
+		if t.Phase == p {
+			return t.Outcome
+		}
 	}
-	return rec.Outcome
+	h.t.Fatalf("phase %s is missing from the timings entirely", p)
+	return ""
 }
 
 // writeOutput puts a payload where the agent would have left it.

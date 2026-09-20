@@ -1,6 +1,8 @@
 package backend
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
 	"net/http"
 	"sync"
 	"testing"
@@ -126,9 +128,19 @@ func TestTheFirstLeaseIssuesEpochOneAndACompleteBundle(t *testing.T) {
 		t.Errorf("run = %s, want %s", lease.RunID, admitted.ID)
 	}
 
-	// Everything needed to execute without calling back (principle P4).
-	if lease.Spec.Prompt.Key == "" || lease.Spec.Prompt.SHA256 == "" {
-		t.Errorf("the spec does not point at a verifiable prompt: %+v", lease.Spec)
+	// Everything needed to execute without calling back (principle P4) — and
+	// the prompt is now part of "everything", rather than a reference to an
+	// object the pod would have to fetch before it could start.
+	if lease.Prompt == "" {
+		t.Error("the lease carries no prompt: the pod would have no task")
+	}
+	sum := sha256.Sum256([]byte(lease.Prompt))
+	if want := hex.EncodeToString(sum[:]); lease.PromptSHA256 != want {
+		t.Errorf("lease digest = %q, want %q", lease.PromptSHA256, want)
+	}
+	if lease.Spec.PromptSHA256 != lease.PromptSHA256 {
+		t.Errorf("the spec's digest %q disagrees with the lease's %q",
+			lease.Spec.PromptSHA256, lease.PromptSHA256)
 	}
 	if lease.Secrets[runv1.SecretKeyLLMAPIKey] == "" {
 		t.Error("the lease carries no model credential")
@@ -139,18 +151,19 @@ func TestTheFirstLeaseIssuesEpochOneAndACompleteBundle(t *testing.T) {
 	if lease.Secrets[runv1.SecretKeyMCPConfig] == "" {
 		t.Error("the lease carries no MCP configuration, so a child run cannot be attributed")
 	}
+	// The harness runs the object-store half, because that is the half with a
+	// bundle to check. The four keys the pod writes, and no reads at all: the
+	// two objects it used to read are gone from this store.
 	for _, key := range []string{
-		runv1.StorageKeyOutput, runv1.StorageKeyResult, runv1.StorageKeyState,
+		runv1.StorageKeyOutput, runv1.StorageKeyResult,
 		runv1.StorageKeyCompletion, runv1.StorageKeyAgentLog,
 	} {
 		if _, ok := lease.Artifacts.Put[key]; !ok {
 			t.Errorf("the bundle has no PUT capability for %s", key)
 		}
 	}
-	for _, key := range []string{runv1.StorageKeyPrompt, runv1.StorageKeyState} {
-		if _, ok := lease.Artifacts.Get[key]; !ok {
-			t.Errorf("the bundle has no GET capability for %s", key)
-		}
+	if lease.Artifacts.MaxBytesPerRun <= 0 {
+		t.Error("the lease states no artifact budget, so the controller has nothing to enforce")
 	}
 	if !lease.AckDeadline.Before(lease.LeaseDeadline) {
 		t.Errorf("ackDeadline %s should fall before leaseDeadline %s",

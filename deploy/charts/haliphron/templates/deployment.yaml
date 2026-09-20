@@ -106,12 +106,33 @@ spec:
               mountPath: /haliphron/kek
               readOnly: true
             {{- end }}
+            {{- if not (include "haliphron.objectStore" .) }}
+            # The artifact volume. readOnlyRootFilesystem is on, so this is one
+            # of exactly two writable paths the process has — and the one that
+            # has to survive a restart, because in relay mode it holds results
+            # the control plane has already told a pod were safe.
+            - name: artifacts
+              mountPath: {{ .Values.artifacts.mountPath }}
+            {{- end }}
             {{- with .Values.backend.extraVolumeMounts }}
             {{- toYaml . | nindent 12 }}
             {{- end }}
       volumes:
         - name: tmp
           emptyDir: {}
+        {{- if not (include "haliphron.objectStore" .) }}
+        - name: artifacts
+          {{- if or .Values.artifacts.pvc.enabled .Values.artifacts.pvc.existingClaim }}
+          persistentVolumeClaim:
+            claimName: {{ include "haliphron.artifactClaim" . }}
+          {{- else }}
+          # No claim: results live for as long as the pod does. The chart
+          # refuses this combination by default; it is reachable only when an
+          # operator has explicitly disabled the volume, and it is right for a
+          # CI run of the chart and for nothing else.
+          emptyDir: {}
+          {{- end }}
+        {{- end }}
         {{- if (include "haliphron.kekEnabled" .) }}
         - name: kek
           secret:

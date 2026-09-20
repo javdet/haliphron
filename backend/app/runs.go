@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"strings"
 	"time"
 
@@ -61,13 +62,33 @@ func (s *Service) Runs(ctx context.Context, f store.RunFilter) ([]store.Run, err
 	return s.store.ListRuns(ctx, f)
 }
 
-// ResultLink hands out a presigned GET for a run's result.
+// ResultAccess is how a caller gets at one stored object. Exactly one of the
+// two halves is set.
 //
-// A link rather than the bytes: proxying a result through the control plane
-// would put every byte of every run through one process, and the object store
-// is already reachable from wherever the caller is — it is where the pod wrote
-// it from inside a cluster.
-func (s *Service) ResultLink(ctx context.Context, id runv1.ULID, key string, ttl time.Duration) (string, error) {
+// Two halves rather than one, because the two modes have genuinely different
+// right answers and pretending otherwise would make one of them bad. With an
+// object store the caller should fetch the bytes from it directly — proxying a
+// gigabyte of log through the control plane to save a redirect is not a
+// simplification. Without one there is nothing to redirect to, and the backend
+// that holds the volume is the only thing that can serve it.
+type ResultAccess struct {
+	// RedirectURL is set in object-store mode: a presigned GET the caller
+	// follows.
+	RedirectURL string
+	// Body is set in relay mode. The caller closes it.
+	Body io.ReadCloser
+
+	Key         string
+	ContentType string
+	SizeBytes   int64
+}
+
+// Result opens one of a run's stored objects.
+//
+// The mode is resolved here rather than in the transport, so that the REST
+// handler and the UI behind it are written once against "here is the object"
+// instead of once per storage configuration.
+func (s *Service) Result(ctx context.Context, id runv1.ULID, key string, ttl time.Duration) (ResultAccess, error) {
 	if ttl <= 0 {
 		ttl = 15 * time.Minute
 	}
@@ -75,27 +96,59 @@ func (s *Service) ResultLink(ctx context.Context, id runv1.ULID, key string, ttl
 		key = runv1.StorageKeyResult
 	}
 	if !allowedResultKey(key) {
-		return "", &run.InvalidRequestError{
+		return ResultAccess{}, &run.InvalidRequestError{
 			Field: "key", Detail: fmt.Sprintf("%q is not a result of a run", key)}
 	}
-
 	if _, err := s.store.RunByID(ctx, id); err != nil {
-		return "", err
+		return ResultAccess{}, err
 	}
-	signed, err := s.artifacts.PresignGet(artifacts.Key(id, key), ttl)
+
+	full := artifacts.Key(id, key)
+	access := ResultAccess{Key: full, ContentType: contentTypeFor(key)}
+
+	if s.artifacts.Mode() == runv1.ArtifactModeObjectStore {
+		signed, err := s.artifacts.PresignGet(full, ttl)
+		if err != nil {
+			return ResultAccess{}, err
+		}
+		access.RedirectURL = signed.URL
+		return access, nil
+	}
+
+	body, err := s.artifacts.Open(ctx, full)
 	if err != nil {
-		return "", err
+		return ResultAccess{}, err
 	}
-	return signed.URL, nil
+	access.Body = body
+	return access, nil
 }
 
-// allowedResultKey bounds what a caller may ask to be signed. Without it the
-// endpoint is a way to mint a capability for any key in the bucket, including
-// another run's prefix, by sending "../".
+// contentTypeFor is the type of a key whose name is fixed by the layout. Only
+// the four objects allowedResultKey admits reach it, so a lookup beats sniffing
+// the bytes — and sniffing a result.md that begins with a code fence gets it
+// wrong.
+func contentTypeFor(key string) string {
+	switch key {
+	case runv1.StorageKeyResult:
+		return "text/markdown; charset=utf-8"
+	case runv1.StorageKeyOutput, runv1.StorageKeyCompletion:
+		return "application/json"
+	default:
+		return "text/plain; charset=utf-8"
+	}
+}
+
+// allowedResultKey bounds what a caller may ask for. Without it the endpoint is
+// a way to read any key under the store — including another run's prefix, by
+// sending "../" — and in object-store mode a way to mint a capability for one.
+//
+// state.json is not in the list any more because it does not exist: the
+// checkpoint is a column in run_attempts, and the ledger endpoint is where a
+// caller reads it.
 func allowedResultKey(key string) bool {
 	switch key {
 	case runv1.StorageKeyResult, runv1.StorageKeyOutput,
-		runv1.StorageKeyState, runv1.StorageKeyCompletion, runv1.StorageKeyAgentLog:
+		runv1.StorageKeyCompletion, runv1.StorageKeyAgentLog:
 		return true
 	}
 	return false
@@ -106,15 +159,20 @@ type LogChunk struct {
 	Key       string    `json:"key"`
 	SizeBytes int64     `json:"size_bytes"`
 	At        time.Time `json:"at"`
-	URL       string    `json:"url"`
+	// URL is where to fetch it: a presigned GET in object-store mode, and this
+	// backend's own chunk endpoint in relay mode. The caller follows it either
+	// way and does not learn which store answered.
+	URL string `json:"url"`
 }
 
 // Logs pages over a run's log chunks.
 //
 // The listing is a LIST by prefix rather than a table, which is the reason
 // there is no artifacts table in the schema: the keys are derived from the run
-// identifier, and an index that has to be kept in agreement with a bucket is a
-// source of divergence rather than a source of answers.
+// identifier, and an index that has to be kept in agreement with the store is a
+// source of divergence rather than a source of answers. It reads the same way
+// over a bucket and over a directory, which is most of why the mode can stay
+// invisible above the port.
 func (s *Service) Logs(ctx context.Context, id runv1.ULID, after string, limit int, ttl time.Duration) ([]LogChunk, error) {
 	if limit <= 0 || limit > 500 {
 		limit = 100
@@ -131,6 +189,7 @@ func (s *Service) Logs(ctx context.Context, id runv1.ULID, after string, limit i
 	if err != nil {
 		return nil, err
 	}
+	objectStore := s.artifacts.Mode() == runv1.ArtifactModeObjectStore
 
 	out := make([]LogChunk, 0, limit)
 	for _, obj := range objects {
@@ -140,19 +199,42 @@ func (s *Service) Logs(ctx context.Context, id runv1.ULID, after string, limit i
 		if after != "" && obj.Key <= after {
 			continue
 		}
-		signed, err := s.artifacts.PresignGet(obj.Key, ttl)
-		if err != nil {
-			return nil, err
-		}
-		out = append(out, LogChunk{
+		chunk := LogChunk{
 			Key: strings.TrimPrefix(obj.Key, prefix), SizeBytes: obj.SizeBytes,
-			At: obj.LastModified, URL: signed.URL,
-		})
+			At: obj.LastModified,
+		}
+		if objectStore {
+			signed, err := s.artifacts.PresignGet(obj.Key, ttl)
+			if err != nil {
+				return nil, err
+			}
+			chunk.URL = signed.URL
+		} else {
+			chunk.URL = fmt.Sprintf("/api/v1/runs/%s/logs/%s", id, chunk.Key)
+		}
+		out = append(out, chunk)
 		if len(out) >= limit {
 			break
 		}
 	}
 	return out, nil
+}
+
+// LogChunkBody opens one chunk. Relay mode only: with an object store the
+// listing hands out presigned links and the caller never comes back here.
+//
+// The chunk name is checked rather than trusted. It arrives from a URL path,
+// and the one thing a name from there must not be able to do is leave the
+// run's own log prefix.
+func (s *Service) LogChunkBody(ctx context.Context, id runv1.ULID, name string) (io.ReadCloser, error) {
+	if name == "" || strings.ContainsAny(name, "/\\") || strings.Contains(name, "..") {
+		return nil, &run.InvalidRequestError{
+			Field: "chunk", Detail: fmt.Sprintf("%q is not a log chunk of this run", name)}
+	}
+	if _, err := s.store.RunByID(ctx, id); err != nil {
+		return nil, err
+	}
+	return s.artifacts.Open(ctx, artifacts.RunPrefix(id)+runv1.StoragePrefixChunks+name)
 }
 
 // Attempts returns a run's ledger: one row per attempt, with what it cost.

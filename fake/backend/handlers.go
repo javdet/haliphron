@@ -2,7 +2,14 @@ package backend
 
 import (
 	"crypto/ed25519"
+	"crypto/sha256"
+	"encoding/hex"
+	"errors"
+	"fmt"
+	"io"
 	"net/http"
+	"strconv"
+	"strings"
 	"time"
 
 	clusterv1 "github.com/automagicops/haliphron/api/cluster/v1"
@@ -542,4 +549,142 @@ func (b *Backend) epochProblem(w http.ResponseWriter, r2 *run, got int64) {
 		Action: clusterv1.ActionAbandon, RunID: r2.id,
 		CurrentEpoch: r2.epoch, CurrentStatus: r2.status,
 	})
+}
+
+// handleIngestArtifacts accepts one relayed object.
+//
+// The fake keeps the bytes in a map rather than writing them anywhere. What a
+// controller track needs to assert is that the object arrived under the right
+// key, with the digest the controller claimed, exactly once — and none of that
+// needs a filesystem. The real backend writes to a volume; the difference is
+// below the property under test.
+func (b *Backend) handleIngestArtifacts(w http.ResponseWriter, r *http.Request) {
+	q := r.URL.Query()
+	runID := runv1.ULID(q.Get(clusterv1.QueryRunID))
+	key := q.Get(clusterv1.QueryKey)
+	epoch, _ := strconv.ParseInt(q.Get(clusterv1.QueryEpoch), 10, 64)
+
+	if runID == "" || key == "" {
+		b.badRequest(w, "an artifact must name its run and its key")
+		return
+	}
+	// The cluster comes from the token rather than from a parameter. Every
+	// other endpoint cross-checks a decoded body; here there is no body to
+	// read it from, and taking it from the query would let a caller name a
+	// cluster it cannot sign for.
+	c, ok := b.authenticate(w, r, "")
+	if !ok {
+		return
+	}
+
+	body, err := io.ReadAll(r.Body)
+	if err != nil {
+		var tooLarge *http.MaxBytesError
+		if errors.As(err, &tooLarge) {
+			b.writeProblem(w, http.StatusRequestEntityTooLarge, clusterv1.Problem{
+				Title: "the artifact exceeds 256 MiB", Code: clusterv1.CodePayloadTooLarge,
+				Action: clusterv1.ActionFatal, RunID: runID,
+			})
+			return
+		}
+		b.badRequest(w, "the artifact body could not be read")
+		return
+	}
+
+	sum := sha256.Sum256(body)
+	digest := hex.EncodeToString(sum[:])
+	if want := r.Header.Get(clusterv1.HeaderArtifactSHA256); want != "" && !strings.EqualFold(want, digest) {
+		// Retry rather than fatal: the likely cause is a connection cut
+		// mid-transfer, and the controller still holds the whole object.
+		b.writeProblem(w, http.StatusBadRequest, clusterv1.Problem{
+			Title:  "the artifact does not match its digest",
+			Detail: fmt.Sprintf("%s hashes to %s and the controller said %s", key, digest, want),
+			Code:   clusterv1.CodeInvalidRequest, Action: clusterv1.ActionRetry, RunID: runID,
+		})
+		return
+	}
+
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	b.sweep()
+
+	run, ok := b.runs[runID]
+	if !ok {
+		b.runNotFound(w, runID)
+		return
+	}
+	if epoch != run.epoch {
+		// A cluster that lost this run must not overwrite the result of the
+		// cluster that now holds it.
+		b.epochProblem(w, run, epoch)
+		return
+	}
+	if run.holder != "" && run.holder != c.id {
+		b.writeProblem(w, http.StatusForbidden, clusterv1.Problem{
+			Title: "run is leased by another cluster", Code: clusterv1.CodeRunLeasedByAnotherCluster,
+			Action: clusterv1.ActionAbandon, RunID: runID, CurrentEpoch: run.epoch,
+		})
+		return
+	}
+
+	// The run prefix is stamped here, from the envelope this call
+	// authenticated, exactly as the controller stamped it from the CR. The
+	// producer of the bytes never gets to choose the prefix they land under.
+	full := "runs/" + string(runID) + "/" + strings.TrimPrefix(key, "/")
+	_, duplicate := b.artifacts[full]
+	b.artifacts[full] = body
+	if !run.sawArtifact {
+		run.sawArtifact = true
+		run.artifactsFirst = run.completion == nil
+	}
+	b.logf("artifact relayed run=%s key=%s bytes=%d", runID, key, len(body))
+
+	b.writeJSON(w, http.StatusOK, clusterv1.ArtifactIngestResponse{
+		RunID:     runID,
+		Duplicate: duplicate,
+		Ref: runv1.ObjectRef{
+			Key:         full,
+			SizeBytes:   int64(len(body)),
+			SHA256:      digest,
+			ContentType: r.Header.Get("Content-Type"),
+			Uploaded:    true,
+		},
+	})
+}
+
+// Artifact is what a controller relayed under one key, for a test to assert on.
+// The key is relative to the run, as the pod names it.
+func (b *Backend) Artifact(id runv1.ULID, key string) ([]byte, bool) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	body, ok := b.artifacts["runs/"+string(id)+"/"+key]
+	return body, ok
+}
+
+// ArtifactPrecededCompletion reports whether the run's first artifact reached
+// the control plane before its completion did.
+//
+// The property, not the timestamps: what matters is that a report never arrives
+// describing objects the backend does not have, and the controller's flush
+// order — artifacts, then completions, then observations — is what guarantees
+// it.
+func (b *Backend) ArtifactPrecededCompletion(id runv1.ULID) bool {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	run, ok := b.runs[id]
+	return ok && run.artifactsFirst
+}
+
+// Artifacts lists what a controller has relayed for a run, by relative key.
+func (b *Backend) Artifacts(id runv1.ULID) map[string][]byte {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	prefix := "runs/" + string(id) + "/"
+	out := map[string][]byte{}
+	for key, body := range b.artifacts {
+		if strings.HasPrefix(key, prefix) {
+			out[strings.TrimPrefix(key, prefix)] = body
+		}
+	}
+	return out
 }

@@ -26,14 +26,25 @@ import (
 // it was rendered once at admission and is handed out byte-for-byte, so
 // decoding and re-encoding it here would be a chance to change it.
 type Leased struct {
-	RunID          runv1.ULID
-	Epoch          int64
-	Attempt        int32
-	Priority       int32
-	Spec           json.RawMessage
+	RunID    runv1.ULID
+	Epoch    int64
+	Attempt  int32
+	Priority int32
+	Spec     json.RawMessage
+	// Prompt and PromptSHA256 travel with the work. The digest is also inside
+	// Spec; it is scanned out separately so the lease handler can check the two
+	// against each other without decoding the spec it is about to hand on
+	// byte-for-byte.
+	Prompt         string
+	PromptSHA256   []byte
 	AckDeadline    time.Time
 	LeaseDeadline  time.Time
 	TimeoutSeconds int32
+	// CompletedPhases is what a previous attempt of this run got through under
+	// the current epoch. Normally empty; not empty when the work is being
+	// re-issued after its controller lost the CRs that held the checkpoint, and
+	// in that case it is what stops the replacement paying for the model again.
+	CompletedPhases []runv1.RuntimePhase
 }
 
 // EpochError is a message whose epoch is not the current one. Current and
@@ -52,6 +63,22 @@ func (e *EpochError) Error() string {
 // Stale reports whether the message is behind. Ahead is a different failure:
 // the backend never issued that epoch, so no retry can help.
 func (e *EpochError) Stale() bool { return e.Got < e.Current }
+
+// LiveAttemptError is run_attempts_one_live refusing a second open attempt.
+//
+// It means somebody else's attempt for this run has not finished — a zombie
+// controller, which the epoch answers, or a duplicate reconcile, which is
+// answered by doing nothing. Either way it is not a condition the caller
+// repairs by retrying the same statement, so it is a named error rather than a
+// constraint violation surfacing as "store: open attempt ledger".
+type LiveAttemptError struct {
+	RunID runv1.ULID
+	Epoch int64
+}
+
+func (e *LiveAttemptError) Error() string {
+	return fmt.Sprintf("store: run %s already has a live attempt under epoch %d", e.RunID, e.Epoch)
+}
 
 // OwnershipError is a cluster acting on a run that belongs to another one.
 type OwnershipError struct {
@@ -90,6 +117,7 @@ func (s *Store) Lease(ctx context.Context, clusterID runv1.ULID, runtimes []runv
 		for rows.Next() {
 			var l Leased
 			if err := rows.Scan(&l.RunID, &l.Epoch, &l.Attempt, &l.Priority, &l.Spec,
+				&l.Prompt, &l.PromptSHA256,
 				&l.AckDeadline, &l.LeaseDeadline, &l.TimeoutSeconds); err != nil {
 				return fmt.Errorf("store: scan lease: %w", err)
 			}
@@ -103,14 +131,35 @@ func (s *Store) Lease(ctx context.Context, clusterID runv1.ULID, runtimes []runv
 		// report, because its started_at is what the usage audit compares the
 		// pod's self-declared duration against. A row created when the report
 		// arrives would make that comparison trivially true.
-		for _, l := range out {
+		//
+		// It is also where the duplicate guard bites first: run_attempts_one_live
+		// refuses a second open row for the same run, so a lease handed out
+		// while somebody's attempt is still running cannot open a second
+		// ledger. That cannot happen through this statement — a run in Queued
+		// has had its epoch raised, and raising it closed the old attempt — and
+		// the constraint is what makes "cannot happen" true across two backends
+		// rather than within one.
+		for i := range out {
+			l := &out[i]
 			if _, err := tx.ExecContext(ctx, `
 				INSERT INTO run_attempts (run_id, lease_epoch, attempt, cluster_id, started_at)
 				VALUES ($1, $2, $3, $4, now())
 				ON CONFLICT (run_id, lease_epoch, attempt) DO NOTHING`,
 				l.RunID, l.Epoch, l.Attempt, clusterID); err != nil {
+				if isUniqueViolation(err, "run_attempts_one_live") {
+					return &LiveAttemptError{RunID: l.RunID, Epoch: l.Epoch}
+				}
 				return fmt.Errorf("store: open attempt ledger for %s: %w", l.RunID, err)
 			}
+
+			// The checkpoint an earlier owner accumulated under this epoch. It
+			// is read back rather than carried in memory because the point of
+			// the column is to survive the controller that wrote it.
+			phases, err := completedPhases(ctx, tx, l.RunID, l.Epoch)
+			if err != nil {
+				return err
+			}
+			l.CompletedPhases = phases
 		}
 		return nil
 	})

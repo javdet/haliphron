@@ -11,6 +11,13 @@ cluster's own private ranges. In particular it does not include
 kubernetes.default: a pod that reaches the API server has already gone wrong,
 and it carries no token to use there anyway.
 
+In the default relay artifact mode that list is the whole of it, and the
+omission is worth naming: there is no egress rule for storage, because the pod
+never talks to any. Its results go to the controller on the same port its
+completion does. Object-store mode is what adds an S3 endpoint to
+allowedCIDRs — one more reachable network for the least trusted component in
+the system, and one of the quieter reasons the default is what it is.
+
 There is no filtering by hostname, and there cannot be: NetworkPolicy matches
 addresses, and FQDN policies are not available on every CNI. An agent that
 reaches a permitted CIDR can reach any host inside it. That is a known,
@@ -40,9 +47,13 @@ spec:
           protocol: UDP
         - port: 53
           protocol: TCP
-    # The completion report. Without this the run finishes, the result is
-    # already durable in object storage, and the controller learns about it
-    # only from the Job — which is the CompletedWithoutResult path.
+    # The controller: the completion report, the phase transitions, and — in
+    # relay mode — every artifact the run produces. One port for all three.
+    #
+    # Without this rule in relay mode the run cannot persist anything at all.
+    # Without it in object-store mode the result is still durable and the
+    # controller learns of the run's end only from the Job, which is the
+    # CompletedWithoutResult path.
     - to:
         - namespaceSelector:
             matchLabels:

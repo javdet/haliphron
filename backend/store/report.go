@@ -227,13 +227,40 @@ func writeObservation(ctx context.Context, tx *sql.Tx, locked lockedRun,
 func upsertAttempt(ctx context.Context, tx *sql.Tx, obs clusterv1.RunObservation,
 	clusterID runv1.ULID, epoch int64) error {
 
+	// A terminal phase closes the row whether or not the controller sent a
+	// finishedAt. It is the unique index that makes this matter: an attempt
+	// left open because one optional timestamp was absent is a run nobody can
+	// ever attempt again, and the failure would surface as a lease the backend
+	// refuses to open a ledger for, minutes and one reassignment later.
+	finished := obs.FinishedAt
+	if finished == nil && obs.Phase.IsTerminal() {
+		now := time.Now()
+		finished = &now
+	}
+
+	// A higher attempt means the previous one is over, and the controller is the
+	// only thing that raises the number — it does so only after an attempt
+	// ended. Closing the earlier row here is the same rule the epoch trigger
+	// applies one level up, and it is needed for the same reason: a local infra
+	// retry never reports a terminal phase for the attempt it is replacing
+	// (there is nothing to say about it that the next attempt will not say
+	// better), so without this the row stays open and run_attempts_one_live
+	// refuses the retry — turning a recoverable OOM into a run nobody can
+	// attempt again.
+	//
+	// Strictly lower, because reports arrive reordered: a late observation of
+	// attempt 1 must not close attempt 2.
+	if err := closeSupersededAttempts(ctx, tx, obs.RunID, epoch, obs.Attempt); err != nil {
+		return err
+	}
+
 	_, err := tx.ExecContext(ctx, `
 		INSERT INTO run_attempts (run_id, lease_epoch, attempt, cluster_id, phase,
 		                          reason, message, job_name, pod_name, node_name,
-		                          exit_code, failure_class,
+		                          exit_code, failure_class, completed_phases,
 		                          started_at, finished_at, cluster_observed_at)
 		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11,
-		        COALESCE($12, 'none'), $13, $14, $15)
+		        COALESCE($12, 'none'), $13::text[]::runtime_phase[], $14, $15, $16)
 		ON CONFLICT (run_id, lease_epoch, attempt) DO UPDATE SET
 			phase               = COALESCE(EXCLUDED.phase, run_attempts.phase),
 			reason              = COALESCE(EXCLUDED.reason, run_attempts.reason),
@@ -244,6 +271,14 @@ func upsertAttempt(ctx context.Context, tx *sql.Tx, obs clusterv1.RunObservation
 			exit_code           = COALESCE(EXCLUDED.exit_code, run_attempts.exit_code),
 			failure_class       = CASE WHEN EXCLUDED.failure_class = 'none'
 			                           THEN run_attempts.failure_class ELSE EXCLUDED.failure_class END,
+			-- Unioned, never replaced. Reports arrive reordered, and a
+			-- heartbeat carrying an earlier snapshot must not shorten a list
+			-- the low-latency path already grew: that would hand the next
+			-- attempt a checkpoint saying the model had not run when it had.
+			-- The order DISTINCT leaves behind does not matter; the reader
+			-- sorts into the contract's execution order.
+			completed_phases    = ARRAY(SELECT DISTINCT unnest(
+			                        run_attempts.completed_phases || EXCLUDED.completed_phases)),
 			started_at          = COALESCE(run_attempts.started_at, EXCLUDED.started_at),
 			finished_at         = COALESCE(EXCLUDED.finished_at, run_attempts.finished_at),
 			cluster_observed_at = COALESCE(EXCLUDED.cluster_observed_at, run_attempts.cluster_observed_at)`,
@@ -251,11 +286,71 @@ func upsertAttempt(ctx context.Context, tx *sql.Tx, obs clusterv1.RunObservation
 		nullString(obs.Reason), nullString(truncate(obs.Message, 1024)),
 		nullString(obs.JobName), nullString(obs.PodName), nullString(obs.NodeName),
 		nullInt32(obs.ExitCode), nullString(string(obs.FailureClass)),
-		nullTime(obs.StartedAt), nullTime(obs.FinishedAt), nullTime(obs.ObservedAt))
+		runtimePhaseArray(obs.CompletedPhases),
+		nullTime(obs.StartedAt), nullTime(finished), nullTime(obs.ObservedAt))
 	if err != nil {
+		if isUniqueViolation(err, "run_attempts_one_live") {
+			// Another attempt of this run is still open. Within one controller
+			// that is a duplicate reconcile and doing nothing is right; across
+			// two it is the zombie the epoch exists to fence, and the caller
+			// turns this into an abandon rather than a retry.
+			return &LiveAttemptError{RunID: obs.RunID, Epoch: epoch}
+		}
 		return fmt.Errorf("store: record attempt %d of %s: %w", obs.Attempt, obs.RunID, err)
 	}
 	return nil
+}
+
+// closeSupersededAttempts finishes the open attempts a newer one replaced.
+//
+// The accounting record survives — that is the point of keeping the epoch and
+// the attempt in the key — and only the claim is released. The class is infra
+// and the reason names what happened, so that "why does attempt 1 say Failed
+// when the run succeeded on attempt 2" has an answer in the row itself.
+func closeSupersededAttempts(ctx context.Context, tx *sql.Tx, id runv1.ULID,
+	epoch int64, attempt int32) error {
+
+	if attempt <= 1 {
+		return nil
+	}
+	_, err := tx.ExecContext(ctx, `
+		UPDATE run_attempts
+		SET finished_at   = now(),
+		    failure_class = CASE WHEN failure_class = 'none' THEN 'infra'
+		                         ELSE failure_class END,
+		    reason        = COALESCE(reason, 'SupersededByRetry'),
+		    message       = COALESCE(message, format('attempt %s superseded it', $3::int))
+		WHERE run_id = $1 AND lease_epoch = $2 AND attempt < $3
+		  AND finished_at IS NULL`,
+		id, epoch, attempt)
+	if err != nil {
+		return fmt.Errorf("store: close the attempts superseded by %d of %s: %w", attempt, id, err)
+	}
+	return nil
+}
+
+// completedPhases reads the checkpoint accumulated under one epoch, across
+// every attempt of it.
+//
+// Across attempts, because that is what makes a retry cheap: attempt 2 skips
+// the model precisely because attempt 1 got through the run phase. Within one
+// epoch, because a new epoch is new ownership and inherits nothing — the
+// attempt counter resets with it, and so does what anyone is entitled to
+// assume was already done.
+func completedPhases(ctx context.Context, tx *sql.Tx, id runv1.ULID, epoch int64) ([]runv1.RuntimePhase, error) {
+	var raw []string
+	err := tx.QueryRowContext(ctx, `
+		SELECT COALESCE(array_agg(DISTINCT p::text), '{}')
+		FROM run_attempts a, LATERAL unnest(a.completed_phases) AS p
+		WHERE a.run_id = $1 AND a.lease_epoch = $2`,
+		id, epoch).Scan(pgArray(&raw))
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, fmt.Errorf("store: read the checkpoint for %s: %w", id, err)
+	}
+	return runtimePhases(raw), nil
 }
 
 // Completion is one report from a pod, with the envelope the controller put
@@ -339,10 +434,14 @@ func (s *Store) ApplyCompletion(ctx context.Context, c Completion) (CompletionOu
 			                          completion_received_at, cost_usd,
 			                          input_tokens, output_tokens,
 			                          cache_read_tokens, cache_write_tokens,
-			                          declared_duration_ms, observed_duration_ms, finished_at)
+			                          declared_duration_ms, observed_duration_ms,
+			                          completed_phases, finished_at)
 			VALUES ($1, $2, $3, $4, $5, COALESCE($6, 'none'), $7::jsonb, now(),
-			        COALESCE($8::numeric, 0), $9, $10, $11, $12, $13, $14, now())
+			        COALESCE($8::numeric, 0), $9, $10, $11, $12, $13, $14,
+			        $15::text[]::runtime_phase[], now())
 			ON CONFLICT (run_id, lease_epoch, attempt) DO UPDATE SET
+				completed_phases      = ARRAY(SELECT DISTINCT unnest(
+				                          run_attempts.completed_phases || EXCLUDED.completed_phases)),
 				exit_code             = EXCLUDED.exit_code,
 				failure_class         = CASE WHEN EXCLUDED.failure_class = 'none'
 				                             THEN run_attempts.failure_class ELSE EXCLUDED.failure_class END,
@@ -360,7 +459,8 @@ func (s *Store) ApplyCompletion(ctx context.Context, c Completion) (CompletionOu
 			nullInt32(&c.Report.ExitCode), nullString(string(c.Report.FailureClass)),
 			[]byte(c.Raw), nullString(string(usage.TotalCostUSD)),
 			usage.InputTokens, usage.OutputTokens, usage.CacheReadTokens, usage.CacheWriteTokens,
-			nullInt64(usage.DurationMs), nullInt64(out.ObservedMs)); err != nil {
+			nullInt64(usage.DurationMs), nullInt64(out.ObservedMs),
+			runtimePhaseArray(c.Report.CompletedPhases)); err != nil {
 			return fmt.Errorf("store: record completion for %s: %w", c.RunID, err)
 		}
 

@@ -1,6 +1,8 @@
 package backend
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
 	"time"
 
 	clusterv1 "github.com/automagicops/haliphron/api/cluster/v1"
@@ -14,6 +16,14 @@ import (
 
 // RunOption adjusts a queued run.
 type RunOption func(*run)
+
+// WithPrompt sets the task. The digest in the spec is derived from it at
+// Enqueue, so a test cannot produce a lease whose two halves disagree by
+// accident — and a test that wants exactly that sets the spec's digest with an
+// option of its own afterwards.
+func WithPrompt(prompt string) RunOption {
+	return func(r *run) { r.prompt = prompt }
+}
 
 // WithSecrets sets the secret material the lease will carry. The defaults are
 // placeholders shaped like the real thing; a test that cares what the
@@ -52,15 +62,19 @@ func (b *Backend) Enqueue(spec runv1.RenderedRunSpec, opts ...RunOption) runv1.U
 		epoch:    0,
 		excluded: map[runv1.ULID]bool{},
 	}
-	if r.spec.Prompt.Bucket == "" {
-		r.spec.Prompt = runv1.ObjectRef{
-			Bucket: b.storage.bucket,
-			Key:    storageKey(id, runv1.StorageKeyPrompt),
-		}
-	}
 	for _, opt := range opts {
 		opt(r)
 	}
+	if r.prompt == "" {
+		r.prompt = "fake prompt for " + string(id)
+	}
+	// The digest is over the prompt as it will be handed out, and the two
+	// copies — the one in the spec and the one beside it in the lease — are
+	// filled from the same bytes. The real backend has the same obligation and
+	// the controller checks both, so a fake that set only one would let a
+	// controller bug through.
+	sum := sha256.Sum256([]byte(r.prompt))
+	r.spec.PromptSHA256 = hex.EncodeToString(sum[:])
 	b.runs[id] = r
 	b.queue = append(b.queue, id)
 	b.logf("enqueued run=%s", id)

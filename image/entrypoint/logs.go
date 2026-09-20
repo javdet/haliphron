@@ -17,12 +17,13 @@ import (
 // `kubectl logs` does not. The cost is upload latency, and that is a parameter.
 //
 // The entrypoint tees the agent's combined stream to a file and ships the
-// increments. The key is logs/chunks/{seq}.log with seq six digits and leading
-// zeros — the padding is not cosmetic, because S3 listing is lexicographic and
-// without it the tenth chunk sorts between the first and the second. The
-// numbering runs continuously across attempts, so the second attempt of a run
-// does not overwrite the first one's log and leave the reader with two runs
-// spliced seamlessly into one.
+// increments through whichever half of the Uploader port this run is using. The
+// key is logs/chunks/{seq}.log with seq six digits and leading zeros — the
+// padding is not cosmetic, because a listing is lexicographic over a bucket and
+// over a directory alike, and without it the tenth chunk sorts between the
+// first and the second. Each attempt numbers within a block of its own, so the
+// second attempt of a run does not overwrite the first one's log and leave the
+// reader with two runs spliced seamlessly into one.
 
 // chunkSizeTrigger ships a chunk early when the log has grown by this much,
 // whichever comes first with the interval. A chatty agent should not be able to
@@ -102,20 +103,17 @@ func (l *LogSink) commit(n int) {
 // not fatal: losing a fragment of log is a nuisance, and losing the run because
 // a fragment of log could not be uploaded is a fault. The final agent.log in
 // finalize carries the same bytes anyway.
-func (l *LogSink) Flush(ctx context.Context, s *Storage, cp *Checkpoint) error {
+func (l *LogSink) Flush(ctx context.Context, up Uploader, cp *Checkpoint) error {
 	body := l.pending()
 	if len(body) == 0 {
 		return nil
 	}
 	seq := cp.nextChunk()
-	ref, err := s.PostUnder(ctx, runv1.StoragePrefixChunks, fmt.Sprintf("%06d.log", seq), body, "text/plain")
-	if err != nil {
+	if _, err := up.PostUnder(ctx, runv1.StoragePrefixChunks,
+		fmt.Sprintf("%06d.log", seq), body, "text/plain"); err != nil {
 		return err
 	}
 	l.commit(len(body))
-	if cp.Log != nil {
-		cp.Log.BytesUploaded += ref.SizeBytes
-	}
 	return nil
 }
 
@@ -123,7 +121,7 @@ func (l *LogSink) Flush(ctx context.Context, s *Storage, cp *Checkpoint) error {
 // whole run rather than only during the agent phase: a clone of a monorepo
 // takes minutes and produces output, and a pod evicted during it should not
 // leave the reader with nothing.
-func (l *LogSink) Start(ctx context.Context, s *Storage, cp *Checkpoint, interval time.Duration) {
+func (l *LogSink) Start(ctx context.Context, up Uploader, cp *Checkpoint, interval time.Duration) {
 	l.stop = make(chan struct{})
 	l.done = make(chan struct{})
 
@@ -141,21 +139,21 @@ func (l *LogSink) Start(ctx context.Context, s *Storage, cp *Checkpoint, interva
 			case <-ctx.Done():
 				return
 			case <-ticker.C:
-				l.tryFlush(ctx, s, cp)
+				l.tryFlush(ctx, up, cp)
 			case <-size.C:
 				l.mu.Lock()
 				grown := len(l.buf) - l.uploaded
 				l.mu.Unlock()
 				if grown >= chunkSizeTrigger {
-					l.tryFlush(ctx, s, cp)
+					l.tryFlush(ctx, up, cp)
 				}
 			}
 		}
 	}()
 }
 
-func (l *LogSink) tryFlush(ctx context.Context, s *Storage, cp *Checkpoint) {
-	if err := l.Flush(ctx, s, cp); err != nil {
+func (l *LogSink) tryFlush(ctx context.Context, up Uploader, cp *Checkpoint) {
+	if err := l.Flush(ctx, up, cp); err != nil {
 		// Deliberately only to the local log. Writing it anywhere else would
 		// mean an upload failure that produces more to upload.
 		l.Printf("log chunk upload failed: %v", err)

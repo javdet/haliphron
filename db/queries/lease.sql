@@ -17,6 +17,12 @@
 -- A run with cancel_requested_at set is not handed out: cancelling work that
 -- has not started is a state change here, not a Job created in a cluster so
 -- that a command can go down and kill it.
+--
+-- prompt is returned because the lease is where it travels. It used to be an
+-- object the pod fetched with a presigned GET, which put the artifact store on
+-- the path to *starting* a run; it is bounded at admission, so returning it
+-- here adds at most 512 KiB to a message that already carries a git token, a
+-- model key and mcp.json, and it removes the store from that path entirely.
 WITH picked AS (
   SELECT id
   FROM runs
@@ -39,4 +45,5 @@ SET status         = 'Leased',
 FROM picked
 WHERE r.id = picked.id
 RETURNING r.id, r.lease_epoch, r.attempt, r.priority, r.spec,
+          r.prompt, r.prompt_sha256,
           r.ack_deadline, r.lease_deadline, r.timeout_seconds;

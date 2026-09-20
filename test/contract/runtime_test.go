@@ -239,23 +239,38 @@ func TestExitCodeTableMatchesGo(t *testing.T) {
 // The JSON Schemas the image validates against.
 // ---------------------------------------------------------------------------
 
-func TestStateSchemaCoversEveryPhase(t *testing.T) {
-	schema := loadJSON(t, filepath.Join(repoRoot(), "api", "runtime", "v1", "state.schema.json"))
-	props, ok := dig(t, schema, "properties", "phases", "properties").(map[string]any)
-	if !ok {
-		t.Fatal("state.schema.json: phases has no properties")
+// The checkpoint's phase names used to be enumerated in state.schema.json, and
+// the schema is gone with the object it described. The set is now a domain in
+// the store — run_attempts.completed_phases is runtime_phase[] — so the drift
+// that test guarded against is caught here instead: a phase renamed in Go and
+// not in the schema would be a checkpoint the database refuses to record, and
+// a retry that never learns the model already ran.
+func TestRuntimePhaseDomainMatchesGo(t *testing.T) {
+	raw, err := os.ReadFile(filepath.Join(repoRoot(), "db", "migrations", "0001_domains.sql"))
+	if err != nil {
+		t.Fatalf("read the domains migration: %v", err)
 	}
-	keys := make([]string, 0, len(props))
-	for k := range props {
-		keys = append(keys, k)
-	}
-	assertSameSet(t, "checkpoint phases", phaseStrings(), keys)
 
-	// additionalProperties:false is the point of the enumeration: a phase
-	// renamed in Go and not here must fail loudly, not be accepted as an extra.
-	if v, ok := dig(t, schema, "properties", "phases", "additionalProperties").(bool); !ok || v {
-		t.Error("phases accepts unknown keys, which makes the enumeration decorative")
+	// The CHECK list of the runtime_phase domain, read back out of the DDL.
+	// Reading the text rather than the database keeps this test in the contract
+	// suite, which has no PostgreSQL; test/store asserts the same set against a
+	// live server.
+	const marker = "CREATE DOMAIN runtime_phase AS text"
+	ddl := string(raw)
+	idx := strings.Index(ddl, marker)
+	if idx < 0 {
+		t.Fatal("0001_domains.sql declares no runtime_phase domain; " +
+			"run_attempts.completed_phases has nothing to constrain it")
 	}
+	body := ddl[idx : idx+strings.Index(ddl[idx:], ";")]
+
+	var names []string
+	for _, quoted := range strings.Split(body, "'") {
+		if quoted != "" && !strings.ContainsAny(quoted, "(), \n\t") {
+			names = append(names, quoted)
+		}
+	}
+	assertSameSet(t, "runtime_phase domain", phaseStrings(), names)
 }
 
 func TestRuntimePhaseEnumMatchesGo(t *testing.T) {

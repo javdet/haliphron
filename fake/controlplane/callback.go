@@ -1,7 +1,10 @@
 package controlplane
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
+	"fmt"
 	"io"
 	"net/http"
 	"strings"
@@ -137,6 +140,15 @@ func (c *ControlPlane) callbackError(w http.ResponseWriter, status int, code, me
 	_ = json.NewEncoder(w).Encode(map[string]string{"code": code, "message": message})
 }
 
+// writeCallbackJSON answers a callback with a JSON body.
+func (c *ControlPlane) writeCallbackJSON(w http.ResponseWriter, status int, body any) {
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(status)
+	if err := json.NewEncoder(w).Encode(body); err != nil {
+		c.logf("writing a callback response: %v", err)
+	}
+}
+
 // bearer extracts the token, case-insensitively on the scheme as RFC 7235
 // requires. An image that sends "bearer" lowercase is not wrong, and a fake
 // that rejects it sends its author hunting for a bug that is the fake's.
@@ -201,4 +213,183 @@ func reverse[T any](s []T) []T {
 		out[len(s)-1-i] = v
 	}
 	return out
+}
+
+// handlePhase records one entrypoint phase the pod got through.
+//
+// This is what replaced the image writing state.json, and a fake that did not
+// serve it would let the image ship without the one path that makes an
+// idempotent retry possible. What a test asserts on is Phases: that the phases
+// the image claims to have completed are the ones it actually completed, in the
+// order the contract fixes.
+func (c *ControlPlane) handlePhase(w http.ResponseWriter, r *http.Request) {
+	body, err := io.ReadAll(io.LimitReader(r.Body, 64<<10))
+	if err != nil {
+		c.callbackError(w, http.StatusBadRequest, "MalformedBody", err.Error())
+		return
+	}
+
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	run, ok := c.authenticatedRun(w, r)
+	if !ok {
+		return
+	}
+
+	var report runv1.PhaseReport
+	if err := json.Unmarshal(body, &report); err != nil {
+		c.callbackError(w, http.StatusBadRequest, "MalformedBody", err.Error())
+		return
+	}
+	if report.RunID != run.id {
+		c.callbackError(w, http.StatusConflict, "RunMismatch",
+			"the token is bound to "+string(run.id)+" and the report names "+string(report.RunID))
+		return
+	}
+
+	// Only an ok outcome goes on the record, as in the real controller: a
+	// failed or skipped phase is not something a later attempt may assume was
+	// done, and the one phase whose replay costs money is exactly where getting
+	// that wrong would skip a model call that never happened.
+	if report.Outcome == runv1.PhaseOutcomeOK {
+		run.phases = append(run.phases, report.Phase)
+		c.logf("phase %s reported by run %s", report.Phase, run.id)
+	}
+	w.WriteHeader(http.StatusAccepted)
+}
+
+// handleRelay accepts one artifact in relay mode.
+//
+// It answers what a controller answers, including the two refusals the image
+// has to distinguish: a 413 when the run has spent its artifact budget, which
+// the image drops the object over and carries on, and a 409 when the run is
+// configured for object storage and should not be relaying at all, which is a
+// defect a retry repeats.
+//
+// The run prefix is stamped here, from the token this call authenticated —
+// exactly as the real controller stamps it from the CR. A pod that could name
+// an absolute key could name another run's.
+func (c *ControlPlane) handleRelay(w http.ResponseWriter, r *http.Request) {
+	key := r.URL.Query().Get(runv1.QueryKey)
+	if key == "" {
+		c.callbackError(w, http.StatusBadRequest, "MissingKey", "an artifact must name its key")
+		return
+	}
+	body, err := io.ReadAll(io.LimitReader(r.Body, maxObjectBytes+1))
+	if err != nil {
+		c.callbackError(w, http.StatusBadRequest, "MalformedBody", err.Error())
+		return
+	}
+
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	run, ok := c.authenticatedRun(w, r)
+	if !ok {
+		return
+	}
+	if c.artifactModeOrRelay() == runv1.ArtifactModeObjectStore {
+		c.callbackError(w, http.StatusConflict, "ArtifactModeMismatch",
+			"this run uploads to object storage, not to the controller")
+		return
+	}
+	// Storage faults, not callback faults. FailCallback is about the completion
+	// webhook, and a relayed artifact is the pod's *write* path — the same path
+	// a presigned PUT is in the other mode. Keeping one control for both is
+	// what lets a checklist row like "a refused upload is infra, not config"
+	// run unchanged in either mode, which is the whole point of the port.
+	if status, code := c.storageFault(http.MethodPut, key); status != 0 {
+		c.logf("relay of %s -> injected %d", key, status)
+		c.callbackError(w, status, code, "injected fault")
+		return
+	}
+
+	sum := sha256.Sum256(body)
+	digest := hex.EncodeToString(sum[:])
+	// Verified before anything is stored, as the real relay does: a truncated
+	// transfer under the right key is worse than none, because the recovery
+	// path would read it and believe it.
+	if want := r.Header.Get(runv1.HeaderSHA256); want != "" && !strings.EqualFold(want, digest) {
+		c.callbackError(w, http.StatusBadRequest, "DigestMismatch",
+			"the body hashes to "+digest+" and the pod said "+want)
+		return
+	}
+
+	if c.maxBytesPerRun > 0 && run.relayed+int64(len(body)) > c.maxBytesPerRun {
+		c.logf("run %s reached its artifact budget at %d bytes", run.id, run.relayed)
+		c.callbackError(w, http.StatusRequestEntityTooLarge, "ArtifactBudgetSpent",
+			"this run has spent its artifact budget")
+		return
+	}
+	run.relayed += int64(len(body))
+
+	// The same map the presigned path writes into, under the same key. That is
+	// the point of the fake serving both halves: a test asserts on what was
+	// stored without knowing which mode put it there, which is exactly the
+	// property the port is supposed to give.
+	full := fmt.Sprintf(runv1.StoragePrefixRun, run.id) + strings.TrimPrefix(key, "/")
+	c.store(full, body, r.Header.Get("Content-Type"))
+	c.logf("relayed %s (%d bytes) for run %s", full, len(body), run.id)
+
+	c.writeCallbackJSON(w, http.StatusOK, runv1.ArtifactAck{
+		Ref: runv1.ObjectRef{
+			Key:         full,
+			SizeBytes:   int64(len(body)),
+			SHA256:      digest,
+			ContentType: r.Header.Get("Content-Type"),
+			Uploaded:    true,
+		},
+		BytesRemaining: c.remainingBudget(run),
+	})
+}
+
+// authenticatedRun resolves the bearer token to the run it was minted for.
+//
+// The check is the same for all three callback paths and is shared for the
+// reason the real controller shares it: a phase endpoint that authenticated by
+// namespace rather than by run would let any pod mark another run's expensive
+// phase as done, and that run's next attempt would skip its model call. The
+// caller holds the lock.
+func (c *ControlPlane) authenticatedRun(w http.ResponseWriter, r *http.Request) (*runState, bool) {
+	token := bearer(r.Header.Get("Authorization"))
+	if token == "" {
+		c.callbackError(w, http.StatusUnauthorized, "TokenMissing", "no bearer token")
+		return nil, false
+	}
+	id, known := c.byToken[token]
+	if !known {
+		c.callbackError(w, http.StatusUnauthorized, "TokenMismatch",
+			"token is not one this controller minted")
+		return nil, false
+	}
+	run, ok := c.runs[id]
+	if !ok {
+		c.callbackError(w, http.StatusConflict, "RunNotFound", "no such run in this cluster")
+		return nil, false
+	}
+	return run, true
+}
+
+func (c *ControlPlane) remainingBudget(run *runState) int64 {
+	if c.maxBytesPerRun <= 0 {
+		return 0
+	}
+	if left := c.maxBytesPerRun - run.relayed; left > 0 {
+		return left
+	}
+	return 0
+}
+
+// Phases is what a run reported getting through, in the order it reported them.
+// This is the assertion surface that replaced reading state.json out of the
+// bucket.
+func (c *ControlPlane) Phases(id runv1.ULID) []runv1.RuntimePhase {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	run, ok := c.runs[id]
+	if !ok {
+		return nil
+	}
+	return append([]runv1.RuntimePhase(nil), run.phases...)
 }

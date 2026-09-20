@@ -13,9 +13,9 @@ import (
 // The order is contract rather than implementation detail, for a reason that
 // only shows up on a retry: the checkpoint's resume rule is "every phase before
 // the first unfinished one is done", which is meaningless against a sequence
-// that can be reordered. The names are contract too — state.json is keyed by
-// them, phaseTimings enumerates them, and the UI groups a run's timeline by
-// them.
+// that can be reordered. The names are contract too — run_attempts.completed_phases
+// holds them, phaseTimings enumerates them, and the UI groups a run's timeline
+// by them.
 
 // step is one phase and what it costs when it fails without saying so.
 type step struct {
@@ -27,8 +27,8 @@ type step struct {
 	defaultCode int32
 	// epilogue marks a phase that runs even after the work has been abandoned.
 	// Between them they produce the three things a failed run still owes
-	// somebody: a result object under the fixed key, a report in storage and a
-	// report to the controller.
+	// somebody: a result object under the fixed key, a durable copy of the
+	// report, and the report to the controller.
 	epilogue bool
 }
 
@@ -96,7 +96,7 @@ func (r *Run) Execute(ctx context.Context) int32 {
 
 	for _, s := range steps() {
 		if abandoned && !s.epilogue {
-			r.record(s.phase, runv1.PhaseOutcomeSkipped, 0,
+			r.record(ctx, s.phase, runv1.PhaseOutcomeSkipped, 0,
 				"the run was abandoned at "+string(r.failure.Phase))
 			continue
 		}
@@ -107,7 +107,7 @@ func (r *Run) Execute(ctx context.Context) int32 {
 
 		switch {
 		case err == nil:
-			r.record(s.phase, runv1.PhaseOutcomeOK, elapsed, "")
+			r.record(ctx, s.phase, runv1.PhaseOutcomeOK, elapsed, "")
 
 		case errors.Is(err, errSkip):
 			var sk *skipped
@@ -115,14 +115,14 @@ func (r *Run) Execute(ctx context.Context) int32 {
 			if errors.As(err, &sk) {
 				reason = sk.reason
 			}
-			r.record(s.phase, runv1.PhaseOutcomeSkipped, elapsed, reason)
+			r.record(ctx, s.phase, runv1.PhaseOutcomeSkipped, elapsed, reason)
 
 		default:
 			f := classify(err, s.defaultCode)
 			if f.Phase == "" {
 				f.Phase = s.phase
 			}
-			r.record(s.phase, runv1.PhaseOutcomeFailed, elapsed, f.Reason)
+			r.record(ctx, s.phase, runv1.PhaseOutcomeFailed, elapsed, f.Reason)
 			r.logf("phase %s failed: %s (%s, exit %d)", s.phase, f.Message(), f.Reason, f.Code)
 
 			// The first failure is the one that gets reported. A later phase
@@ -140,20 +140,25 @@ func (r *Run) Execute(ctx context.Context) int32 {
 	return r.exitCode()
 }
 
-// record notes a phase's outcome in both places that need it: the checkpoint,
-// which the next attempt reads, and the timings, which the report carries.
+// record notes a phase's outcome in the three places that need it: this
+// attempt's own map, which two later phases consult; the checkpoint, which
+// reports an ok outcome onward to the controller and so to the next attempt;
+// and the timings, which the report carries.
+//
+// The report to the controller happens here rather than at the end, and that is
+// the whole improvement over the object this replaced. A checkpoint saved at
+// two points in the pipeline records nothing about a pod killed between them; a
+// report at the moment a phase completes is held by something that outlives the
+// pod.
 //
 // phaseTimings is a cheap substitute for tracing when OTLP is not configured,
 // and the only way to see that forty of the run's forty-five minutes went into
 // cloning a monorepo rather than into the model.
-func (r *Run) record(phase runv1.RuntimePhase, outcome runv1.PhaseOutcome, elapsed time.Duration, reason string) {
-	started := r.clock().Add(-elapsed)
-	r.checkpoint.Record(phase, PhaseRecord{
-		Outcome:    outcome,
-		StartedAt:  started.UTC().Format(time.RFC3339Nano),
-		DurationMs: elapsed.Milliseconds(),
-		Reason:     truncate(reason, 128),
-	})
+func (r *Run) record(ctx context.Context, phase runv1.RuntimePhase,
+	outcome runv1.PhaseOutcome, elapsed time.Duration, reason string) {
+
+	r.outcomes[phase] = outcome
+	r.checkpoint.Record(ctx, phase, outcome, elapsed, reason)
 	r.timings = append(r.timings, runv1.PhaseTiming{
 		Phase:      phase,
 		DurationMs: elapsed.Milliseconds(),

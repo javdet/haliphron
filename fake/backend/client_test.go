@@ -3,11 +3,14 @@ package backend_test
 import (
 	"bytes"
 	"crypto/ed25519"
+	"crypto/sha256"
 	"encoding/base64"
+	"encoding/hex"
 	"encoding/json"
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"strconv"
 	"sync/atomic"
 	"testing"
@@ -220,6 +223,54 @@ func (c *client) rejectAck(runID runv1.ULID, epoch int64, code clusterv1.Rejecti
 func (c *client) artifacts(runID runv1.ULID, epoch int64, attempt int32) response {
 	return c.post("/leases/"+string(runID)+"/artifacts", c.token(),
 		clusterv1.ArtifactBundleRequest{Epoch: epoch, Attempt: attempt})
+}
+
+// relayArtifact posts one object the way a controller does: metadata in the
+// query, the bytes as the body, and the digest in a header.
+func (c *client) relayArtifact(runID runv1.ULID, epoch int64, attempt int32, key string, body []byte) response {
+	sum := sha256.Sum256(body)
+	return c.relayArtifactWithDigest(runID, epoch, attempt, key, body, hex.EncodeToString(sum[:]))
+}
+
+// relayArtifactWithDigest lets a test claim a digest the body does not have,
+// which is how a truncated transfer is arranged.
+func (c *client) relayArtifactWithDigest(runID runv1.ULID, epoch int64, attempt int32,
+	key string, body []byte, digest string) response {
+
+	c.t.Helper()
+	q := url.Values{
+		clusterv1.QueryRunID:   {string(runID)},
+		clusterv1.QueryEpoch:   {strconv.FormatInt(epoch, 10)},
+		clusterv1.QueryAttempt: {strconv.Itoa(int(attempt))},
+		clusterv1.QueryKey:     {key},
+	}
+	req, err := http.NewRequest(http.MethodPost,
+		c.baseURL+clusterv1.BasePath+"/ingest/artifacts?"+q.Encode(), bytes.NewReader(body))
+	if err != nil {
+		c.t.Fatalf("request: %v", err)
+	}
+	req.Header.Set("Content-Type", "application/octet-stream")
+	req.Header.Set(clusterv1.HeaderControllerVersion, c.version)
+	req.Header.Set(clusterv1.HeaderArtifactSHA256, digest)
+	req.Header.Set("Authorization", "Bearer "+c.token())
+
+	resp, err := c.http.Do(req)
+	if err != nil {
+		c.t.Fatalf("POST /ingest/artifacts: %v", err)
+	}
+	defer resp.Body.Close()
+	out, _ := io.ReadAll(resp.Body)
+	return response{status: resp.StatusCode, body: out, headers: resp.Header}
+}
+
+// mustJSON renders a value so a test can assert on what is and is not in it.
+func mustJSON(t *testing.T, v any) []byte {
+	t.Helper()
+	raw, err := json.Marshal(v)
+	if err != nil {
+		t.Fatalf("encode: %v", err)
+	}
+	return raw
 }
 
 func (c *client) heartbeat(req clusterv1.HeartbeatRequest) clusterv1.HeartbeatResponse {

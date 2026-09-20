@@ -81,6 +81,17 @@ CREATE DOMAIN run_phase AS text
 CREATE DOMAIN failure_class AS text
   CHECK (VALUE IN ('none', 'infra', 'agent', 'git', 'config', 'budget'));
 
+-- One step of the agent image's entrypoint. The set and its order are the
+-- runtime contract's (api/run/v1.RuntimePhases), and the store carries a copy
+-- because run_attempts.completed_phases is the checkpoint an idempotent retry
+-- reads: a phase name this schema accepts and the image does not is a retry
+-- that skips a step nothing ever did.
+CREATE DOMAIN runtime_phase AS text
+  CHECK (VALUE IN ('init', 'validate', 'fetch', 'checkpoint', 'auth', 'clone',
+                   'role', 'mcp-prepare', 'mcp-verify', 'run', 'parse',
+                   'output', 'persist', 'commit', 'push', 'pr',
+                   'finalize', 'notify'));
+
 CREATE DOMAIN completion_status AS text
   CHECK (VALUE IN ('success', 'failure', 'timeout', 'cancelled'));
 
@@ -145,5 +156,5 @@ $$;
 DROP FUNCTION touch_updated_at();
 DROP DOMAIN secret_kind, token_kind, actor_kind, created_via, cluster_status, run_status;
 DROP DOMAIN rejection_code, pr_action, completion_status, failure_class, run_phase,
-            git_provider, agent_type;
+            runtime_phase, git_provider, agent_type;
 DROP DOMAIN sha256, token_count, money_usd, attempt_no, epoch_no, ulid;

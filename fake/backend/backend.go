@@ -35,6 +35,17 @@ type Backend struct {
 	versions clusterv1.VersionRange
 	storage  storageConfig
 
+	// artifactMode is which half of the ArtifactStore port this fake hands out
+	// in its leases. Relay by default, because that is the default an
+	// installation gets and the one a controller must work against without any
+	// configuration at all.
+	artifactMode     runv1.ArtifactMode
+	maxArtifactBytes int64
+	// artifacts is what controllers have relayed, keyed by the full key. It
+	// stands in for the backend's volume: the property a controller track needs
+	// to assert is that the bytes arrived, and arrived once.
+	artifacts map[string][]byte
+
 	clusters map[runv1.ULID]*cluster
 	byKID    map[string]runv1.ULID
 	// tokens maps an unspent bootstrap token to nothing, and a spent one to the
@@ -102,8 +113,13 @@ type cluster struct {
 
 // run is one unit of work, as the control plane sees it.
 type run struct {
-	id       runv1.ULID
-	spec     runv1.RenderedRunSpec
+	id   runv1.ULID
+	spec runv1.RenderedRunSpec
+	// prompt is the task. It is a field here for the reason it is a column in
+	// the real backend: it travels in the lease and it is bounded, and putting
+	// it in an object store would make an object store a prerequisite for
+	// starting a run rather than for finishing one.
+	prompt   string
 	secrets  map[string]string
 	role     map[string]string
 	priority int32
@@ -126,6 +142,14 @@ type run struct {
 	// negative ack that did not exclude would re-offer the same lease to the
 	// same cluster forever.
 	excluded map[runv1.ULID]bool
+
+	// artifactsFirst records that at least one artifact arrived before the
+	// completion did. The controller's flush order guarantees it, and the
+	// reason it is worth a field: a report that reaches the control plane ahead
+	// of the objects it names leaves a window in which the recovery path reads
+	// a result pointing at nothing and calls the run CompletedWithoutResult.
+	sawArtifact    bool
+	artifactsFirst bool
 
 	// terminalPhase is the first terminal phase accepted. The first one wins:
 	// a run that ended twice with different outcomes is a defect to audit, not
@@ -201,17 +225,39 @@ func WithStorage(bucket, endpoint string) Option {
 
 // New builds a fake with the contract's defaults and one unspent bootstrap
 // token, which BootstrapToken returns.
+// WithArtifactMode selects which half of the port the leases advertise.
+//
+// Relay is the default and is what an installation gets without configuration,
+// so it is what a controller is exercised against unless a test says otherwise.
+// A test that sets object-store is testing the optimisation rather than the
+// path every installation takes.
+func WithArtifactMode(mode runv1.ArtifactMode) Option {
+	return func(b *Backend) { b.artifactMode = mode }
+}
+
+// WithArtifactBudget sets the per-run byte cap the leases state. Small values
+// are the point: a controller's enforcement of the cap is otherwise only
+// testable by relaying a gigabyte.
+func WithArtifactBudget(bytes int64) Option {
+	return func(b *Backend) { b.maxArtifactBytes = bytes }
+}
+
 func New(opts ...Option) *Backend {
 	b := &Backend{
-		timings:  clusterv1.DefaultTimings(),
-		versions: clusterv1.VersionRange{Min: "0.1.0", Max: "99.0.0"},
-		storage:  storageConfig{bucket: "haliphron", endpoint: "http://fake-storage.invalid"},
-		clusters: map[runv1.ULID]*cluster{},
-		byKID:    map[string]runv1.ULID{},
-		tokens:   map[string]*spentToken{defaultBootstrapToken: nil},
-		runs:     map[runv1.ULID]*run{},
-		stored:   map[runv1.ULID]*runv1.CompletionReport{},
-		wake:     make(chan struct{}),
+		timings:   clusterv1.DefaultTimings(),
+		versions:  clusterv1.VersionRange{Min: "0.1.0", Max: "99.0.0"},
+		storage:   storageConfig{bucket: "haliphron", endpoint: "http://fake-storage.invalid"},
+		clusters:  map[runv1.ULID]*cluster{},
+		byKID:     map[string]runv1.ULID{},
+		tokens:    map[string]*spentToken{defaultBootstrapToken: nil},
+		runs:      map[runv1.ULID]*run{},
+		stored:    map[runv1.ULID]*runv1.CompletionReport{},
+		artifacts: map[string][]byte{},
+		// Relay, matching the real backend's default. A fake whose default
+		// differed would let a controller pass its contract tests and then meet
+		// a mode it had never been run against.
+		artifactMode: runv1.ArtifactModeRelay,
+		wake:         make(chan struct{}),
 	}
 	for _, opt := range opts {
 		opt(b)

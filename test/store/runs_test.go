@@ -242,6 +242,14 @@ func TestRunsGuard(t *testing.T) {
 			write:   `UPDATE runs SET prompt_sha256 = sha256('other'::bytea) WHERE id = $1`,
 			wantErr: "admission fields are immutable",
 		},
+		{
+			// The prompt is frozen with the rest of the admission group. An
+			// edit between attempts would make attempt 2 a different run from
+			// attempt 1 while every identifier said otherwise.
+			name:    "so is the prompt itself",
+			write:   `UPDATE runs SET prompt = 'delete production' WHERE id = $1`,
+			wantErr: "admission fields are immutable",
+		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
@@ -296,6 +304,30 @@ func TestAttemptKeyCarriesTheEpoch(t *testing.T) {
 	           VALUES ($1, $2, 1, $3, 'Running', $4)`
 
 	mustExec(t, conn, insert, fx.runID, 1, fx.clusterID, "0.4231")
+
+	// Raising the epoch is what a reassignment does, and the trigger closes the
+	// outstanding attempt in the same statement. Without that the partial
+	// unique index would refuse the second row below — and the run would be
+	// permanently unrunnable, which is the trap the trigger exists to avoid.
+	mustExec(t, conn, `UPDATE runs SET lease_epoch = 2, attempt = 1 WHERE id = $1`, fx.runID)
+
+	var open int
+	mustQuery(t, conn, `SELECT count(*) FROM run_attempts WHERE run_id = $1 AND finished_at IS NULL`,
+		fx.runID).Scan(&open)
+	if open != 0 {
+		t.Fatalf("%d attempts are still open after the epoch rose; the next owner cannot take the run", open)
+	}
+	var class, reason string
+	mustQuery(t, conn,
+		`SELECT failure_class::text, coalesce(reason, '') FROM run_attempts
+		 WHERE run_id = $1 AND lease_epoch = 1`, fx.runID).Scan(&class, &reason)
+	if class != "infra" {
+		t.Errorf("the fenced attempt is class %q, want infra: it was ended by the platform", class)
+	}
+	if reason == "" {
+		t.Error("the fenced attempt records no reason, so nobody can tell why it says Failed")
+	}
+
 	mustExec(t, conn, insert, fx.runID, 2, fx.clusterID, "0.1000")
 
 	if _, err := conn.Exec(insert, fx.runID, 1, fx.clusterID, "9.9999"); err == nil {
@@ -307,6 +339,92 @@ func TestAttemptKeyCarriesTheEpoch(t *testing.T) {
 		`SELECT sum(cost_usd)::text FROM run_attempts WHERE run_id = $1`, fx.runID).Scan(&total)
 	if total != "0.523100" {
 		t.Errorf("spend across attempts is %s, want 0.523100", total)
+	}
+}
+
+// One live attempt per run, as a constraint rather than a convention.
+//
+// backoffLimit: 0 constrains one Job, not two controllers, and a rule that
+// lives only in a controller's code is a rule the second controller does not
+// know about. This is the place it cannot be forgotten.
+func TestOnlyOneAttemptOfARunMayBeOpenAtATime(t *testing.T) {
+	t.Parallel()
+	conn := newDB(t)
+	fx := seed(t, conn)
+
+	insert := `INSERT INTO run_attempts (run_id, lease_epoch, attempt, cluster_id, phase)
+	           VALUES ($1, 1, $2, $3, 'Running')`
+
+	mustExec(t, conn, insert, fx.runID, 1, fx.clusterID)
+	if _, err := conn.Exec(insert, fx.runID, 2, fx.clusterID); err == nil {
+		t.Fatal("a second attempt was opened while the first was still running")
+	}
+
+	// Once the first has finished, the next may start. The index is about
+	// concurrency, not about how many attempts a run is allowed.
+	mustExec(t, conn,
+		`UPDATE run_attempts SET finished_at = now() WHERE run_id = $1 AND attempt = 1`, fx.runID)
+	mustExec(t, conn, insert, fx.runID, 2, fx.clusterID)
+
+	// And a different run is unaffected: the constraint is per run.
+	other := newQueuedRun(t, conn, fx.clusterID)
+	mustExec(t, conn, insert, other, 1, fx.clusterID)
+}
+
+// The checkpoint is unioned on write, never replaced. Reports arrive reordered,
+// and a heartbeat carrying an earlier snapshot must not shorten a list the
+// low-latency path already grew — which would hand the next attempt a
+// checkpoint saying the model had not run when it had.
+func TestCompletedPhasesAreUnionedRatherThanReplaced(t *testing.T) {
+	t.Parallel()
+	conn := newDB(t)
+	fx := seed(t, conn)
+
+	upsert := `INSERT INTO run_attempts (run_id, lease_epoch, attempt, cluster_id, completed_phases)
+	           VALUES ($1, 1, 1, $2, $3::text[]::runtime_phase[])
+	           ON CONFLICT (run_id, lease_epoch, attempt) DO UPDATE SET
+	             completed_phases = ARRAY(SELECT DISTINCT unnest(
+	               run_attempts.completed_phases || EXCLUDED.completed_phases))`
+
+	mustExec(t, conn, upsert, fx.runID, fx.clusterID, "{init,validate,fetch,run}")
+	// A later report that saw less. It must not shorten what is stored.
+	mustExec(t, conn, upsert, fx.runID, fx.clusterID, "{init,validate}")
+
+	var stored string
+	mustQuery(t, conn,
+		`SELECT array_to_string(ARRAY(SELECT DISTINCT unnest(completed_phases) ORDER BY 1), ',')
+		 FROM run_attempts WHERE run_id = $1`, fx.runID).Scan(&stored)
+	for _, want := range []string{"init", "validate", "fetch", "run"} {
+		if !strings.Contains(stored, want) {
+			t.Errorf("phase %s was lost: stored %q", want, stored)
+		}
+	}
+
+	// A phase name the contract does not know is refused by the domain, which
+	// is what keeps a retry from skipping a step nothing ever did.
+	if _, err := conn.Exec(upsert, fx.runID, fx.clusterID, "{invoke-model}"); err == nil {
+		t.Error("a phase name outside the contract was accepted")
+	}
+}
+
+// A prompt over the ceiling is refused by the check constraint. Admission
+// refuses it first with a 413 naming the limit; this is the backstop, and the
+// reason the limit is 512 KiB rather than a round number is that the value has
+// to fit in a Secret beside three credentials.
+func TestThePromptCeilingIsEnforcedBySchema(t *testing.T) {
+	t.Parallel()
+	conn := newDB(t)
+	cluster := newCluster(t, conn, "east")
+
+	tooLong := strings.Repeat("x", 512*1024+1)
+	_, err := conn.Exec(`
+		INSERT INTO runs (id, created_by, created_via, spec, prompt, prompt_sha256,
+		                  agent, model, timeout_seconds, cluster_id)
+		VALUES ($1, 'test', 'api', '{}'::jsonb, $2::text, sha256($3::bytea),
+		        'claude-code', 'anthropic/claude-opus-5', 3600, $4)`,
+		newULID(t), tooLong, []byte(tooLong), cluster)
+	if err == nil {
+		t.Fatal("a prompt over 512 KiB was stored; the per-run Secret would exceed 1 MiB")
 	}
 }
 

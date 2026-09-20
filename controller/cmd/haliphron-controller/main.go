@@ -39,6 +39,7 @@ import (
 	"github.com/automagicops/haliphron/controller/lease"
 	"github.com/automagicops/haliphron/controller/materialize"
 	"github.com/automagicops/haliphron/controller/report"
+	"github.com/automagicops/haliphron/controller/spool"
 	"github.com/automagicops/haliphron/controller/version"
 )
 
@@ -146,6 +147,22 @@ func run(ctx context.Context) error {
 		ServiceAccountName:   cfg.ServiceAccount,
 	}
 
+	// The spool holds what a pod handed this controller until the backend has
+	// taken it. It is opened whatever the mode: the mode is a per-run fact that
+	// arrives in a lease, so a controller that only opened it on demand would
+	// have to do so in the middle of a pod's upload.
+	//
+	// Opening it also reclaims what a previous process left behind. That is the
+	// whole reason it is a directory and not a map: the acknowledgement this
+	// controller gives a pod is a promise the bytes outlive the pod, and a
+	// restart that cleared the spool would break it for anything not yet
+	// forwarded.
+	artifactSpool, err := spool.Open(spool.Config{Root: cfg.SpoolPath})
+	if err != nil {
+		return err
+	}
+	log.Info("the artifact spool is open", "path", artifactSpool.Root())
+
 	reporter, err := report.New(report.Config{
 		API:       api,
 		K8s:       mgr.GetClient(),
@@ -154,6 +171,7 @@ func run(ctx context.Context) error {
 		ClusterID: id.ClusterID(),
 		Capacity:  cfg.CapacitySlots,
 		Version:   version.Version,
+		Spool:     artifactSpool,
 		Log:       log,
 	})
 	if err != nil {
@@ -205,12 +223,14 @@ func run(ctx context.Context) error {
 	}
 
 	callbackServer, err := callback.New(callback.Config{
-		K8s:         mgr.GetClient(),
-		Namespace:   cfg.AgentNamespace,
-		Sink:        reporter,
-		Addr:        cfg.CallbackAddr,
-		CallbackURL: cfg.CallbackURL,
-		Log:         log,
+		K8s:            mgr.GetClient(),
+		Namespace:      cfg.AgentNamespace,
+		Sink:           reporter,
+		Addr:           cfg.CallbackAddr,
+		CallbackURL:    cfg.CallbackURL,
+		MaxBytesPerRun: cfg.MaxArtifactBytesPerRun,
+		Spent:          reporter.Spent,
+		Log:            log,
 	})
 	if err != nil {
 		return err

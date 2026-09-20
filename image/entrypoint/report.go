@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"io"
 	"net/http"
+	"strings"
 	"time"
 
 	runv1 "github.com/automagicops/haliphron/api/run/v1"
@@ -15,10 +16,15 @@ import (
 //
 // It leaves in two copies: as a webhook to the controller, and as the
 // runs/{runID}/completion.json object. Byte for byte identical — either may
-// turn out to be the one that survived. The copy in storage costs one PUT and
+// turn out to be the one that survived. The durable copy costs one upload and
 // closes the one scenario in which the cost and the pull request link are lost
 // for good: the controller crashed between accepting the webhook and forwarding
 // it, and neither result.md nor output.json carries either field.
+//
+// Both copies go to the controller in relay mode, on different paths and with
+// different meanings. The artifact upload is acknowledged when the bytes are
+// durable, so it is the copy that survives; the webhook is a notification the
+// pod may fail to deliver without failing the run.
 
 // buildReport assembles what this pod says happened.
 //
@@ -43,7 +49,12 @@ func (r *Run) buildReport() *runv1.CompletionReport {
 		ResultRef: r.resultRef,
 		OutputRef: r.outputRef,
 		LogRef:    r.logRef,
-		StateRef:  r.stateRef,
+		// What this attempt and every earlier one got through. The per-phase
+		// reports are the primary channel and this is the copy that survives a
+		// pod whose last few reports did not get through — a summary rather
+		// than the only record, which is why losing one costs a repeated phase
+		// and not a repeated run.
+		CompletedPhases: r.checkpoint.Completed(),
 		// Everything up to but not including finalize, because this runs
 		// inside finalize. A report cannot carry the duration of the phase
 		// that is assembling it, nor of the one that will send it, and the
@@ -199,7 +210,8 @@ func phaseNotify(ctx context.Context, r *Run) error {
 
 // postReport makes one delivery attempt.
 func (r *Run) postReport(ctx context.Context) (int, error) {
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, r.cfg.CallbackURL,
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost,
+		strings.TrimSuffix(r.cfg.CallbackURL, "/")+runv1.CallbackPathCompletion,
 		bytes.NewReader(r.reportBody))
 	if err != nil {
 		return 0, err

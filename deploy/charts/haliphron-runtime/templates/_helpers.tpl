@@ -72,12 +72,36 @@ the controller too.
 Where the pods post their report. Fully qualified, because the pod is in the
 agents' namespace and the Service is not.
 */}}
+{{/*
+The base the pods post to. A base and not one endpoint: there are three paths
+now — the completion, the phase reports and, in relay mode, the artifacts — and
+the pod appends the contract's own constants to this. A CR carrying three URLs
+that differ in their last segment is three chances to disagree.
+
+A value given here that still names /completion is trimmed by the controller, so
+an installation upgrading from the older shape keeps working.
+*/}}
 {{- define "haliphron-runtime.callbackURL" -}}
 {{- if .Values.controller.callbackURL -}}
-{{- .Values.controller.callbackURL -}}
+{{- trimSuffix "/" .Values.controller.callbackURL -}}
 {{- else -}}
-{{- printf "http://%s.%s.svc.cluster.local:%v/completion"
+{{- printf "http://%s.%s.svc.cluster.local:%v"
       (include "haliphron-runtime.callbackServiceName" .) .Release.Namespace .Values.controller.callbackPort -}}
+{{- end -}}
+{{- end -}}
+
+{{/*
+Whether the chart creates a PVC for the artifact spool.
+*/}}
+{{- define "haliphron-runtime.spoolPVC" -}}
+{{- if and .Values.controller.spool.persistence.enabled (not .Values.controller.spool.persistence.existingClaim) -}}true{{- end -}}
+{{- end -}}
+
+{{- define "haliphron-runtime.spoolClaim" -}}
+{{- if .Values.controller.spool.persistence.existingClaim -}}
+{{- .Values.controller.spool.persistence.existingClaim -}}
+{{- else -}}
+{{- printf "%s-spool" (include "haliphron-runtime.fullname" .) -}}
 {{- end -}}
 {{- end -}}
 

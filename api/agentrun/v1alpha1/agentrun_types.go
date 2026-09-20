@@ -43,20 +43,45 @@ type AgentRunSpec struct {
 	// what it is.
 	Materials MaterialsRef `json:"materials"`
 
-	// CallbackURL is where the pod posts its completion report. The value is
-	// cluster-local — a Service in the controller's namespace — so the backend
-	// cannot supply it and the controller fills it in.
+	// CallbackURL is the base the pod posts to: its completion, its phase
+	// transitions, and — in relay mode — its artifacts, each on a path from
+	// runv1.CallbackPath*. A base rather than one endpoint because there are
+	// three of them now and a CR carrying three URLs that differ in their last
+	// segment is three chances to disagree.
+	//
+	// The value is cluster-local — a Service in the controller's namespace — so
+	// the backend cannot supply it and the controller fills it in.
 	// +kubebuilder:validation:MaxLength=512
 	// +kubebuilder:validation:Pattern=`^https?://`
 	CallbackURL string `json:"callbackURL"`
+
+	// ArtifactMode is how this run's results reach durable storage. It is in
+	// the spec rather than in the materials because it is not secret and the
+	// pod is told it outright: an empty value reads as relay.
+	// +optional
+	ArtifactMode runv1.ArtifactMode `json:"artifactMode,omitempty"`
+
+	// MaxArtifactBytes is what this run may store across every object it
+	// produces, as the backend stated it in the lease.
+	//
+	// It is per run and therefore on the run, rather than a setting on the
+	// controller: the cap is the control plane's policy, and a controller that
+	// substituted its own would enforce a limit the backend never agreed to.
+	// The controller is where it is *enforced*, one hop from the pod, so that
+	// an over-large upload is refused before it crosses the network to the
+	// control plane. Zero means the contract's default.
+	// +optional
+	// +kubebuilder:validation:Minimum=0
+	MaxArtifactBytes int64 `json:"maxArtifactBytes,omitempty"`
 }
 
 // MaterialsRef names the per-run objects created from the lease's materials.
 // Both carry an ownerReference to the AgentRun, so deleting the run collects
 // them; no long-lived secret is left in the agents namespace.
 type MaterialsRef struct {
-	// SecretName holds git-token, llm-api-key, mcp.json, presigned.json and the
-	// controller-minted callback-token.
+	// SecretName holds the prompt, git-token, llm-api-key, mcp.json, the
+	// controller-minted callback-token, and — in object-store mode only —
+	// presigned.json.
 	// +kubebuilder:validation:MaxLength=253
 	SecretName string `json:"secretName"`
 
@@ -136,10 +161,34 @@ type AgentRunStatus struct {
 	Retry RetryStatus `json:"retry,omitempty"`
 
 	// Result points at what the pod uploaded. Pointers only — the result text
-	// belongs in object storage, and a 64 KiB summary in etcd would be read on
-	// every reconcile of every run.
+	// belongs in the artifact store, and a 64 KiB summary in etcd would be read
+	// on every reconcile of every run.
 	// +optional
 	Result *ResultRefs `json:"result,omitempty"`
+
+	// CompletedPhases is the one piece of run progress the controller owns
+	// locally: the entrypoint phases any attempt of this run has reported
+	// getting through, in execution order. It is written from the pod's phase
+	// reports and handed to the next attempt's Job as
+	// HALIPHRON_COMPLETED_PHASES, so an infrastructure retry is idempotent
+	// while the backend is unreachable (P4).
+	//
+	// It accumulates across attempts and is never reset, which is the whole
+	// point: attempt 2 skips the model precisely because attempt 1 got through
+	// the run phase. It is scoped to the epoch by the object it lives on — a
+	// new epoch is a new AgentRun, so new ownership starts from nothing.
+	//
+	// Only RuntimePhase.Resumable() phases change what the next attempt does.
+	// The rest are here because the checkpoint is also the answer to "how far
+	// did this get before it died", which previously required fetching an
+	// object out of a bucket.
+	//
+	// It is a cache of what run_attempts.completed_phases stores. PostgreSQL
+	// remains the system of record, and a controller that lost its CRs recovers
+	// the list from the lease rather than from here.
+	// +optional
+	// +kubebuilder:validation:MaxItems=32
+	CompletedPhases []runv1.RuntimePhase `json:"completedPhases,omitempty"`
 
 	// +optional
 	// +kubebuilder:validation:MaxLength=512
@@ -172,9 +221,10 @@ type RetryStatus struct {
 	NextAttemptAt *metav1.Time `json:"nextAttemptAt,omitempty"`
 }
 
-// ResultRefs are the objects the pod uploaded before it reported anything.
-// Storage first, callback second: that ordering is what makes the callback an
-// optimisation rather than a correctness requirement.
+// ResultRefs are the objects the pod handed to something that outlives it,
+// before it reported anything. Durable first, callback second: that ordering is
+// what makes the callback an optimisation rather than a correctness
+// requirement, in either artifact mode.
 type ResultRefs struct {
 	// +optional
 	Result *runv1.ObjectRef `json:"result,omitempty"`
@@ -182,13 +232,18 @@ type ResultRefs struct {
 	Output *runv1.ObjectRef `json:"output,omitempty"`
 	// +optional
 	Log *runv1.ObjectRef `json:"log,omitempty"`
-	// +optional
-	State *runv1.ObjectRef `json:"state,omitempty"`
-	// Completion is the full report, also written to storage by the pod. It is
+	// Completion is the full report, also written to the artifact store. It is
 	// the reason a controller crash between the callback and the ingest costs
-	// nothing: the backend reads the same report from the bucket.
+	// nothing: the backend reads the same report back out.
 	// +optional
 	Completion *runv1.ObjectRef `json:"completion,omitempty"`
+
+	// Relayed means these objects went through this controller's spool rather
+	// than straight from the pod to an object store. It is the difference
+	// between "the backend has them" and "the backend can fetch them", which is
+	// what an operator reading a stuck run needs to know first.
+	// +optional
+	Relayed bool `json:"relayed,omitempty"`
 }
 
 // ReportStatus records what the backend has acknowledged.
@@ -223,8 +278,13 @@ const (
 	ConditionCompleted = "Completed"
 	// ConditionResultReported is True once the pod's completion callback has
 	// been received. Its absence on a completed run is what the backend sees as
-	// CompletedWithoutResult, and its cue to read the bucket itself.
+	// CompletedWithoutResult, and its cue to read the artifact store itself.
 	ConditionResultReported = "ResultReported"
+	// ConditionArtifactsRelayed is True once every artifact this controller
+	// spooled for the current attempt has been accepted by the backend. It is
+	// the relay's own bookkeeping: until it is True the spool directory is not
+	// collected, and the TTL reaper leaves the AgentRun alone.
+	ConditionArtifactsRelayed = "ArtifactsRelayed"
 )
 
 // Condition reasons. Stable strings: they end up in operator runbooks.
@@ -240,6 +300,9 @@ const (
 	ReasonAbandonRequested    = "AbandonRequested"
 	ReasonCallbackReceived    = "CallbackReceived"
 	ReasonCallbackNotReceived = "CallbackNotReceived"
+	ReasonArtifactsSpooled    = "ArtifactsSpooled"
+	ReasonArtifactsForwarded  = "ArtifactsForwarded"
+	ReasonArtifactBudgetSpent = "ArtifactBudgetSpent"
 )
 
 // Labels and annotations. Selectable facts go in labels; everything else in

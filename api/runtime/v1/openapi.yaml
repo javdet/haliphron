@@ -1,9 +1,9 @@
 # Haliphron Runtime API v1
 #
-# The contract between the agent pod and the controller — the only network
-# interface the pod uses at all, apart from presigned links to storage. The
-# pod needs neither egress to the control plane nor a backend token
-# (ADR 16).
+# The contract between the agent pod and the controller. In the default relay
+# artifact mode it is the only network interface the pod uses at all; in
+# object-store mode presigned links to a bucket are the other. Either way the
+# pod needs neither egress to the control plane nor a backend token (ADR 16).
 #
 # The controller listens inside the cluster on a separate listener, :8083.
 # The address arrives in the pod as HALIPHRON_CALLBACK_URL and is
@@ -22,14 +22,26 @@ info:
   title: Haliphron Runtime API
   version: 1.0.0
   description: |
-    One endpoint: the pod tells the controller how the run ended.
+    Three endpoints, and they are not equally important.
 
-    The call is an **optimization, not a correctness condition**. By the time
-    it is made, the entire contents of the result already sit in storage,
-    including a copy of the report itself (`completion.json`). An undelivered
-    webhook does not change the pod's exit code: the outcome is visible to the
-    controller through the Job's exit code anyway, and the contents are
-    visible to the backend under the `runs/{runID}/` prefix.
+    `/completion` tells the controller how the run ended. It is an
+    **optimization, not a correctness condition**: by the time it is made the
+    contents of the result are already durable, including a copy of the report
+    itself (`completion.json`). An undelivered webhook does not change the
+    pod's exit code — the outcome is visible to the controller through the
+    Job's, and the contents are readable under the `runs/{runID}/` prefix.
+
+    `/phase` reports one entrypoint phase as it completes, and is what replaced
+    the pod writing a `state.json` checkpoint into a bucket. Losing one costs a
+    later attempt redoing a phase it need not have; for the `run` phase, that is
+    one extra model bill.
+
+    `/artifacts` carries the run's output, in relay mode. It is the one endpoint
+    here that must not answer until its work is durable: the pod treats a 200 as
+    permission to exit, so a 200 means the bytes are on a disk that is not the
+    pod's. That acknowledgement is the whole of principle P5 in relay mode, and
+    it is what makes an object store optional rather than what an object store
+    was for.
 
     `CompletionReport` here is **the same schema** as in the Cluster API: the
     controller forwards the report to `/ingest/completion` unchanged, merely
@@ -50,6 +62,10 @@ servers:
 tags:
   - name: completion
     description: The pod's completion report
+  - name: progress
+    description: Phase transitions, as they happen
+  - name: artifacts
+    description: The run's output, in relay mode
 
 security:
   - callbackToken: []
@@ -66,9 +82,11 @@ paths:
         error — delivery is at-least-once, and the receiver is idempotent on
         the (`runID`, `attempt`) pair.
 
-        The order is mandatory: upload to storage first, then this call (P5).
-        A report announced before it became durable is an outcome the backend
-        will see without the contents.
+        The order is mandatory: make the result durable first, then this call
+        (P5). A report announced before its contents became durable is an
+        outcome the backend will see without them. "Durable" is the controller's
+        acknowledgement in relay mode and the object store's in the other; it is
+        not necessarily a bucket.
 
         Authentication is the `callback-token` from the per-run Secret. The
         token is minted by the **controller**, not the backend: `callbackURL`
@@ -126,6 +144,156 @@ paths:
           description: |
             The controller is restarting. The pod retries with backoff — this is
             the very case the retries here exist for.
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/Error'}
+
+  /phase:
+    post:
+      tags: [progress]
+      operationId: reportPhase
+      summary: Report one entrypoint phase as it completes
+      description: |
+        The attempt checkpoint, reported as it is made rather than saved as an
+        object.
+
+        It replaced `runs/{runID}/state.json`, and the difference is not only
+        where the fact lives. The object was written when the pod chose to save
+        it — at the end of `persist` and again at `finalize` — so a pod killed
+        anywhere between those two points recorded nothing about the phases in
+        between. A report at the moment a phase completes is held by something
+        that outlives the pod, so an OOM between two phases still leaves the one
+        that finished on the record.
+
+        Only an `ok` outcome is recorded by the controller. A failed or skipped
+        phase is not something a later attempt may assume was done, and the one
+        phase whose replay costs money is exactly where getting that wrong would
+        skip a model call that never happened.
+
+        A failure here is logged by the pod and swallowed: losing one report
+        costs a later attempt redoing a phase, and failing the run over it costs
+        the run.
+      parameters:
+        - $ref: '#/components/parameters/RuntimeContract'
+        - $ref: '#/components/parameters/Traceparent'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: {$ref: '#/components/schemas/PhaseReport'}
+      responses:
+        '202':
+          description: Recorded, or already known. The pod does not wait on anything beyond this.
+        '400':
+          description: The body does not pass the schema.
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/Error'}
+        '401':
+          description: The token is missing, does not match, or is bound to a different run.
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/Error'}
+        '409':
+          description: No such run in this cluster.
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/Error'}
+        '503':
+          description: The controller could not record it. The pod retries — this record is what keeps the next attempt from paying for the model again.
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/Error'}
+
+  /artifacts:
+    post:
+      tags: [artifacts]
+      operationId: uploadArtifact
+      summary: Upload one artifact to the controller
+      description: |
+        Relay mode only. In object-store mode the pod PUTs to the store instead
+        and never calls this.
+
+        The body is the object and the metadata is in the query and one header:
+        base64 in a JSON field would cost a third of the bytes on the one path
+        in this system that carries gigabytes.
+
+        **The acknowledgement is the contract.** It does not arrive until the
+        bytes are on the controller's volume, and from that moment the pod may
+        exit: the controller owns delivery onward, and it survives both the
+        pod's deletion and a backend outage. That is principle P5 without a
+        bucket.
+
+        `key` is relative to the run — `result.md`, `logs/chunks/000007.log`.
+        The controller stamps `runs/{runID}/` onto it from the CR it
+        authenticated against; a pod that could name an absolute key could name
+        another run's.
+      parameters:
+        - $ref: '#/components/parameters/RuntimeContract'
+        - $ref: '#/components/parameters/Traceparent'
+        - name: key
+          in: query
+          required: true
+          description: The object's key, relative to this run's prefix.
+          schema: {type: string, minLength: 1, maxLength: 1024, example: 'result.md'}
+        - name: attempt
+          in: query
+          required: false
+          description: Which attempt produced it. The controller falls back to the CR's current attempt.
+          schema: {type: integer, format: int32, minimum: 1}
+        - name: X-Haliphron-SHA256
+          in: header
+          required: false
+          description: |
+            The digest of the body, verified before anything is spooled. A
+            transfer that was cut is refused rather than stored: a half-written
+            `result.md` under the right key is worse than none, because the
+            recovery path would read it and believe it.
+          schema: {type: string, maxLength: 64, pattern: '^[a-f0-9]{64}$'}
+      requestBody:
+        required: true
+        description: The object itself. At most 256 MiB.
+        content:
+          application/octet-stream:
+            schema: {type: string, format: binary}
+      responses:
+        '200':
+          description: |
+            On the controller's volume. The pod may now exit as far as this
+            object is concerned.
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/ArtifactAck'}
+        '400':
+          description: |
+            The body does not match its digest. The pod retries once — the
+            likely cause is a connection cut mid-transfer.
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/Error'}
+        '401':
+          description: The token is missing, does not match, or is bound to a different run.
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/Error'}
+        '409':
+          description: |
+            This run uploads to object storage, not to the controller. A defect
+            rather than a condition; a retry repeats it.
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/Error'}
+        '413':
+          description: |
+            The run has spent its artifact budget, or this object alone exceeds
+            256 MiB. The one refusal the pod can act on: it drops the object,
+            notes it in the log and carries on rather than failing a run over an
+            attachment.
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/Error'}
+        '503':
+          description: The controller is restarting. The pod retries with backoff.
           content:
             application/json:
               schema: {$ref: '#/components/schemas/Error'}
@@ -206,21 +374,64 @@ components:
 
     ObjectRef:
       type: object
-      required: [bucket, key]
+      description: |
+        A reference to a stored object. There is deliberately no bucket: which
+        store holds it is the installation's business, and a pod that never
+        learns a bucket name cannot leak one.
+      required: [key]
       properties:
-        bucket: {type: string, minLength: 1, maxLength: 63}
         key: {type: string, minLength: 1, maxLength: 1024}
         sizeBytes: {type: integer, format: int64, minimum: 0}
         sha256: {type: string, pattern: '^[a-f0-9]{64}$', maxLength: 64}
         contentType: {type: string, maxLength: 128}
+        uploaded:
+          type: boolean
+          description: |
+            Whether the bytes are durable. In relay mode it is the controller's
+            acknowledgement; in object-store mode it is this pod's own PUT.
+
+    PhaseReport:
+      type: object
+      description: One entrypoint phase, reported as it completes.
+      required: [runID, attempt, phase, outcome]
+      properties:
+        runID: {$ref: '#/components/schemas/ULID'}
+        attempt: {type: integer, format: int32, minimum: 1}
+        phase: {$ref: '#/components/schemas/RuntimePhase'}
+        outcome: {$ref: '#/components/schemas/PhaseOutcome'}
+        durationMs: {type: integer, format: int64, minimum: 0}
+        reason: {type: string, maxLength: 128}
+
+    ArtifactAck:
+      type: object
+      description: |
+        What the controller answers an upload with. The pod waits for it, and
+        what it means is the whole of principle P5 in relay mode: the bytes are
+        on a disk that is not the pod's.
+      required: [ref]
+      properties:
+        ref:
+          allOf:
+            - $ref: '#/components/schemas/ObjectRef'
+          description: |
+            The object as the controller stored it, with the run prefix the
+            controller stamped and `uploaded` set. The pod puts this in its
+            report verbatim rather than constructing one of its own.
+        bytesRemaining:
+          type: integer
+          format: int64
+          description: |
+            What is left of the run's artifact budget. Reported so that an
+            entrypoint about to upload a two-gigabyte log can drop it and say
+            so, instead of discovering the cap as a refusal after the transfer.
 
     CompletionReport:
       type: object
       description: |
         The report assembled by the pod. It leaves in two copies: as a webhook
-        to the controller, and as the `runs/{runID}/completion.json` object in
-        storage. The copies are byte-for-byte identical — either one may turn
-        out to be the one that survived.
+        to the controller on `/completion`, and as the
+        `runs/{runID}/completion.json` object. The copies are byte-for-byte
+        identical — either one may turn out to be the one that survived.
 
         The data is self-declared by the least trusted component in the system.
         Cost and tokens are taken from the agent CLI's output and are not
@@ -261,7 +472,17 @@ components:
         resultRef: {$ref: '#/components/schemas/ObjectRef'}
         outputRef: {$ref: '#/components/schemas/ObjectRef'}
         logRef: {$ref: '#/components/schemas/ObjectRef'}
-        stateRef: {$ref: '#/components/schemas/ObjectRef'}
+        completedPhases:
+          type: array
+          maxItems: 32
+          items: {$ref: '#/components/schemas/RuntimePhase'}
+          description: |
+            What this attempt and every earlier one got through, in execution
+            order. A summary: `/phase` is the primary channel, and this is the
+            copy that survives a pod whose last few reports did not get through.
+
+            There is no `stateRef` beside it. The checkpoint is a column in the
+            control plane's `run_attempts` now, not an object this pod writes.
         summary:
           type: string
           maxLength: 65536

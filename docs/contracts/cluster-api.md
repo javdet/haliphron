@@ -212,6 +212,7 @@ them.
 | `/heartbeat` | (runID, epoch, attempt, phase) per row | the current leases and commands |
 | `/ingest/status` | the same, per row | per-row results |
 | `/ingest/completion` | (runID, attempt) | 200, `duplicate: true` |
+| `/ingest/artifacts` | (runID, key) | 200, `duplicate: true` — the same bytes under the same key changed nothing |
 
 The idempotency of `/register` keyed on the pair is not decoration. A controller
 that received a 200 and crashed before writing the `clusterID` into its Secret
@@ -243,9 +244,15 @@ Additionally, regardless of `action`:
   backoff. Backoff here would turn a long poll into polling.
 - **A dropped long-poll connection** is expected (proxies, backend restarts).
   Repeat at once, but with storm protection: no more than once per second.
-- **A network error on `/ingest/*`** — an in-memory queue plus duplication into
-  the heartbeat. Losing a report is not critical: the heartbeat will deliver the
-  same state an interval later, and the result is already in S3.
+- **A network error on `/ingest/status` or `/ingest/completion`** — an
+  in-memory queue plus duplication into the heartbeat. Losing a report is not
+  critical: the heartbeat will deliver the same state an interval later, and the
+  result is already durable.
+- **A network error on `/ingest/artifacts`** is the one exception, and it is
+  not queued in memory. The object stays in the controller's spool and is
+  retried until the backend acknowledges it, because there is no second channel
+  that carries it and the controller is holding the only copy. That ordering —
+  acknowledge, then delete — is what makes the relay at-least-once.
 
 ### Double delivery of the result
 
@@ -255,12 +262,21 @@ backend is obliged to work under any combination:
 | What arrived | State |
 |---|---|
 | completion + status | normal |
-| status only | `CompletedWithoutResult`: the backend reads `runs/{runID}/` from S3 itself |
+| status only | `CompletedWithoutResult`: the backend reads `runs/{runID}/` back out of the artifact store itself |
 | completion only | the status is awaited; on lease expiry — `Unknown` with the contents already known |
 | nothing | lease expiry → `Unknown` |
 
-This is a direct consequence of ADR 15: the result is in S3 **before** the
-callback, so the callback is an optimization, not a correctness condition.
+This is a direct consequence of ADR 15: the result is durable in the data plane
+**before** the callback, so the callback is an optimization, not a correctness
+condition. "Durable" is the controller's spool in relay mode and the object store
+in the other; the rule never required a bucket, and reading it as though it did
+is what made one look mandatory.
+
+**Artifacts are forwarded before the completion that names them.** The
+controller's flush order is artifacts, then completions, then observations. A
+report forwarded first would leave a window in which the control plane holds a
+result pointing at objects it does not have, and the `CompletedWithoutResult`
+recovery would read that window as a lost result.
 
 ---
 
@@ -311,7 +327,19 @@ Requirements, mandatory to check in code review on both sides:
    remain in the agent namespace.
 6. Presigned links are secrets too: they are a bearer capability to write into
    somebody's prefix. Their place is in the Secret, not in the CR and not in
-   environment variables that show up in `kubectl describe`.
+   environment variables that show up in `kubectl describe`. They exist only in
+   object-store mode; in relay mode there is no signature in the lease at all.
+7. **The prompt is not a credential and is handled like one anyway**, for points
+   1–3. It is the customer's text: no-store, never logged, never a span
+   attribute. Where it differs from the rest is point 4 — it becomes exactly one
+   environment variable, through `valueFrom.secretKeyRef` on a single named key
+   of the per-run Secret. That is deliberate and is ADR 38: the prompt is the
+   one value the agent is *meant* to read, and nothing is protected by
+   withholding it from the process whose purpose is to act on it. What
+   `secretKeyRef` buys over a literal is that the text stays out of the Job's
+   spec and out of `kubectl describe pod`; what it buys over `envFrom` is that
+   it names one key rather than spraying a Secret whose other keys are
+   credentials.
 
 The git token is hour-long and scoped to one repository (section 14 of the
 architecture). It is the main compensating control in the absence of egress
@@ -336,6 +364,9 @@ outside the bounds of v1.
 | Quantity | Value | Why |
 |---|---|---|
 | request body | 1 MiB | `summary` is up to 64 KiB, the rest are references |
+| `/ingest/artifacts` body | 256 MiB | the one endpoint whose body is an object rather than a message |
+| artifact bytes per run | 1 GiB, configurable | enforced by the controller, so an over-large upload is refused one hop from the pod rather than after crossing the network |
+| `prompt` | 512 KiB | it has to fit in the per-run Secret beside three credentials, and a Secret is capped at 1 MiB across all its keys |
 | `reports[]` | 100 | the ingest batch |
 | `runs[]` in the heartbeat | 500 | the cluster capacity ceiling with room to spare |
 | leases per poll | `min(freeSlots, 10)` | the response size and the volume of secrets in one body |
@@ -384,8 +415,8 @@ it says, and what to look at during review.
 |---|---|---|---|---|
 | D1 | The cluster credential | a long-lived credential from the backend, `clusters.credential_hash` | an Ed25519 pair generated by the controller; the backend stores `public_key`, `key_id` | the backend must not be able to impersonate a cluster — otherwise ADR 1 does not hold |
 | D2 | The lease deadline | a single `lease_deadline` | `ackDeadline` (60 s) + `leaseDeadline` (120 s) | before the ack the work has not started and can be reassigned safely; after it, not |
-| D3 | The prompt | `promptRef` → a key in the Secret (13.4) | `runs/{id}/prompt.txt` in S3 + a presigned GET | a Secret is capped at 1 MiB; a workflow step's prompt has no ceiling |
-| D4 | The presigned bundle | PUT only (9.2) | + GET on `state.json` and `prompt.txt` | without reading the checkpoint, ADR 19 (idempotent retries) cannot be implemented |
+| D3 | The prompt | an object in S3 read by presigned GET | `Lease.prompt` in the clear, into the per-run Secret, out as one env var | it put an object store on the path to *starting* a run. The Secret's 1 MiB cap is real and is answered with a stated 512 KiB ceiling and a 413 at admission, not by moving the value back out |
+| D4 | The presigned bundle | PUT and GET | PUT and POST only, and only in object-store mode | the two objects the pod read — `prompt.txt`, `state.json` — are both gone from the store. That removes exit 21's most common cause and one whole class of "the run failed and the reason was a URL expiry" |
 | D5 | Reissuing presigned links | none | `POST /leases/{runID}/artifacts` | a TTL of timeout × 2 does not survive 3 infra retries; the failure looks like a lost result on successful work |
 | D6 | `/ingest/status` | one record | a batch of up to 100 | a reconcile burst produces dozens of events per second |
 | D7 | State reconciliation | none | `reportComplete` + `unknownRuns` | the loss of a CR is otherwise cured only through `staleAfter` |
@@ -398,7 +429,10 @@ it says, and what to look at during review.
 | D14 | Capacity | `free_slots` | + `quotaExhausted` in the heartbeat | an exhausted ResourceQuota is otherwise visible only as a series of `Failed`s with `exceeded quota` |
 | D15 | `roleConfig` | a `RenderedRunSpec` field | a `Lease` field, next to `secrets` and `artifacts` | it is material: the controller turns it into a ConfigMap and only the name rides in the CR. It has no place in `spec`, by the same rule as secrets |
 | D16 | The ack | positive only | `accepted: false` + `rejection` | otherwise "I cannot materialize this" can only be expressed by a burned run: create the Job, let it fail, report `Failed` |
-| D17 | The PUT bundle's keys | `output.json`, `result.md`, `state.json`, `logs/agent.log` | + `completion.json` | the report lives in the controller's memory between the webhook and ingest; without a copy in storage, losing it takes the cost and the PR link with it, and neither `result.md` nor `output.json` carries them |
+| D17 | The PUT bundle's keys | `output.json`, `result.md`, `state.json`, `logs/agent.log` | `output.json`, `result.md`, `completion.json`, `logs/agent.log` | the report lives in the controller's memory between the webhook and ingest; without a durable copy, losing it takes the cost and the PR link with it, and neither `result.md` nor `output.json` carries them. `state.json` is gone: the checkpoint is a column now |
+| D18 | Artifact storage | one path, through S3 | a port with two modes; `/ingest/artifacts` is the relay's half | requiring MinIO to run one agent is a tax on every evaluation and every on-prem install. The mode rides in `ArtifactBundle.mode`, and an absent value reads as relay so a newer controller defaults to the path that needs no configuration |
+| D19 | The retry checkpoint | `state.json`, read by the pod | `RunObservation.completedPhases` up, `Lease.completedPhases` down | the checkpoint is a fact about the run's progress, and the progress already lives in the control plane. Unioned on write, because reports arrive reordered and a stale heartbeat must not shorten what the fast path grew |
+| D20 | `ObjectRef` | carried a `bucket` | key, digest and `uploaded` | which store holds an object is the installation's business; a pod that never learns a bucket name cannot leak one, and `uploaded` is what the backend checks before believing a ref |
 
 ---
 
@@ -421,7 +455,14 @@ side.
 - [x] two different terminal phases → the first wins, the second goes to the audit log
 - [x] `attempt` +1 resets phaseRank and creates a `run_attempts` row
 - [x] a repeat `/ingest/completion` → `duplicate: true`, the cost is charged once
-- [x] a terminal status without a completion → `CompletedWithoutResult`, the contents lifted from S3
+- [x] a terminal status without a completion → `CompletedWithoutResult`, the contents lifted from the artifact store
+- [x] a lease carries the prompt and a digest that matches it, and the digest in `spec` agrees with both
+- [x] a prompt over 512 KiB is refused at admission with a 413 naming the limit
+- [x] `/ingest/artifacts` stamps the run prefix from the authenticated envelope and refuses a key that tries to escape it
+- [x] `/ingest/artifacts` under a stale epoch is refused with `abandon`, so a cluster that lost a run cannot overwrite the result of the one that holds it
+- [x] a relayed body that does not match its `X-Haliphron-SHA256` is refused with `retry` and nothing is stored
+- [x] `completedPhases` is unioned across observations rather than replaced, and a shorter later report does not shorten it
+- [x] a lease in relay mode carries no bucket, no endpoint and no signature
 - [x] `reportComplete: true` without a known run → it appears in `unknownRuns`
 - [x] `reportComplete: false` without a known run → `unknownRuns` is empty
 - [x] `cancel` is redelivered until the phase is terminal

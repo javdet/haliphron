@@ -44,12 +44,18 @@ type RunRequest struct {
 	Model string
 	Role  string
 
-	// Prompt is uploaded to runs/{id}/prompt.txt and its digest is put in
-	// HALIPHRON_PROMPT_SHA256.
+	// Prompt reaches the pod in two places, as it does in a cluster: as the
+	// prompt key of the per-run Secret, and as HALIPHRON_PROMPT. Its digest
+	// goes into HALIPHRON_PROMPT_SHA256.
+	//
+	// A cluster sets the variable through valueFrom.secretKeyRef and this fake
+	// sets it literally. That is the one difference it cannot reproduce without
+	// a kubelet; the variable inside the container is identical, and what
+	// differs is only what `kubectl describe pod` would show.
 	Prompt string
-	// PromptSHA256 overrides that digest without touching what was uploaded.
-	// It exists for one row of the checklist — the prompt did not match, the
-	// model was never called — and there is no other way to reach that row.
+	// PromptSHA256 overrides that digest without touching the prompt. It exists
+	// for one row of the checklist — the prompt did not match, the model was
+	// never called — and there is no other way to reach that row.
 	PromptSHA256 string
 
 	RepoURL      string
@@ -76,6 +82,12 @@ type RunRequest struct {
 	// output.schema.json key is how a node declares a schema for the structured
 	// output, which is what makes output.json mandatory.
 	RoleConfig map[string]string
+
+	// CompletedPhases is the attempt checkpoint the controller would have
+	// handed a retry. Setting it with RuntimePhaseRun and RuntimePhasePersist
+	// in the list, and Attempt above 1, is how a resumed attempt is arranged —
+	// which used to require writing a state.json object into the bucket first.
+	CompletedPhases []runv1.RuntimePhase
 
 	// ContractMajor overrides HALIPHRON_CONTRACT. Set it to one above the
 	// image's own to check that the image refuses to start.
@@ -119,9 +131,10 @@ func (c *ControlPlane) Prepare(req RunRequest) *Prepared {
 	}
 	prefix := fmt.Sprintf(runv1.StoragePrefixRun, id)
 
-	// The prompt is in storage before the pod exists, exactly as it is in the
-	// real system: the backend writes it at admission.
-	c.store(prefix+runv1.StorageKeyPrompt, []byte(req.Prompt), "text/plain")
+	// The prompt is not in storage. It reaches the pod as an environment
+	// variable sourced from the per-run Secret, exactly as it does in the real
+	// system — which is what removed this store from the path to *starting* a
+	// run rather than to finishing one.
 	digest := req.PromptSHA256
 	if digest == "" {
 		sum := sha256.Sum256([]byte(req.Prompt))
@@ -142,18 +155,26 @@ func (c *ControlPlane) Prepare(req RunRequest) *Prepared {
 		runv1.SecretKeyLLMAPIKey:     "sk-fake-key-for-" + string(id),
 		runv1.SecretKeyMCPConfig:     `{"mcpServers":{}}`,
 		runv1.SecretKeyCallbackToken: state.callbackToken,
+		// The task, as a Secret key. Not a credential, and here for the reason
+		// the real controller puts it here: a secretKeyRef keeps customer text
+		// out of the CR, out of the Job's spec and out of `kubectl describe`.
+		runv1.SecretKeyPrompt: req.Prompt,
 	}
 	for k, v := range req.Secrets {
 		secrets[k] = v
 	}
 	// presigned.json is assembled last and is not overridable: it is the fake's
 	// own capability document, and a test that replaced it would be testing a
-	// bundle this control plane will not honour.
-	bundleJSON, err := json.Marshal(state.bundle)
-	if err != nil {
-		panic("controlplane: bundle does not marshal: " + err.Error())
+	// bundle this control plane will not honour. It exists only in object-store
+	// mode; in relay mode the pod addresses no store and the key is absent,
+	// which is a state the image has to handle rather than infer a mode from.
+	if state.bundle.Mode == runv1.ArtifactModeObjectStore {
+		bundleJSON, err := json.Marshal(state.bundle)
+		if err != nil {
+			panic("controlplane: bundle does not marshal: " + err.Error())
+		}
+		secrets[runv1.SecretKeyPresigned] = string(bundleJSON)
 	}
-	secrets[runv1.SecretKeyPresigned] = string(bundleJSON)
 	state.secrets = secrets
 
 	p := &Prepared{
@@ -165,7 +186,10 @@ func (c *ControlPlane) Prepare(req RunRequest) *Prepared {
 		RoleConfig:    copyMap(req.RoleConfig),
 		Bundle:        state.bundle,
 		CallbackToken: state.callbackToken,
-		CallbackURL:   c.baseURL + "/runtime/v1/completion",
+		// A base rather than one endpoint: the pod appends the contract's own
+		// paths to it, and a CR carrying three URLs that differ in their last
+		// segment is three chances to disagree.
+		CallbackURL: c.baseURL + "/runtime/v1",
 	}
 	p.Env = c.renderEnv(req, p, digest)
 	c.logf("prepared run %s attempt %d (%d secret keys, %d role files)",
@@ -178,6 +202,18 @@ func (c *ControlPlane) Prepare(req RunRequest) *Prepared {
 // whose first one took most of the TTL inherits links that expire mid-flight —
 // which is the failure the contract classifies as 21 rather than 30 precisely
 // because the cluster knows how to repair it.
+// Reissue prepares the next attempt of a run, as the controller does.
+//
+// Two things change. In object-store mode the bundle is minted afresh, which is
+// the failure the contract classifies as 21 rather than 30 precisely because
+// the cluster knows how to repair it. And in both modes the checkpoint the
+// earlier attempts reported is handed forward, which is what stops the model
+// being paid for twice.
+//
+// The checkpoint comes from what the pod actually reported rather than from an
+// argument, because that is where a controller gets it: it accumulates phase
+// reports on the CR's status. A test that wants a different one uses
+// ReissueWithPhases.
 func (c *ControlPlane) Reissue(p *Prepared, attempt int32) *Prepared {
 	c.mu.Lock()
 	state, ok := c.runs[p.RunID]
@@ -185,13 +221,25 @@ func (c *ControlPlane) Reissue(p *Prepared, attempt int32) *Prepared {
 		c.mu.Unlock()
 		panic("controlplane: Reissue for a run that was never prepared: " + string(p.RunID))
 	}
+	phases := append([]runv1.RuntimePhase(nil), state.phases...)
+	c.mu.Unlock()
+	return c.ReissueWithPhases(p, attempt, phases)
+}
+
+// ReissueWithPhases is Reissue with the checkpoint stated rather than taken
+// from what was reported. It exists for the rows of the checklist about a
+// checkpoint the pod has no business trusting.
+func (c *ControlPlane) ReissueWithPhases(p *Prepared, attempt int32, phases []runv1.RuntimePhase) *Prepared {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	state, ok := c.runs[p.RunID]
+	if !ok {
+		panic("controlplane: Reissue for a run that was never prepared: " + string(p.RunID))
+	}
 	state.attempt = attempt
 	state.bundle = c.mintBundle(p.Prefix, c.now())
-	bundleJSON, err := json.Marshal(state.bundle)
-	if err != nil {
-		c.mu.Unlock()
-		panic("controlplane: bundle does not marshal: " + err.Error())
-	}
+
 	next := &Prepared{
 		RunID:         p.RunID,
 		Attempt:       attempt,
@@ -203,60 +251,83 @@ func (c *ControlPlane) Reissue(p *Prepared, attempt int32) *Prepared {
 		CallbackToken: p.CallbackToken,
 		CallbackURL:   p.CallbackURL,
 	}
-	next.Secrets[runv1.SecretKeyPresigned] = string(bundleJSON)
+	if state.bundle.Mode == runv1.ArtifactModeObjectStore {
+		bundleJSON, err := json.Marshal(state.bundle)
+		if err != nil {
+			panic("controlplane: bundle does not marshal: " + err.Error())
+		}
+		next.Secrets[runv1.SecretKeyPresigned] = string(bundleJSON)
+	}
+
 	next.Env = copyMap(p.Env)
 	next.Env[runv1.EnvAttempt] = strconv.Itoa(int(attempt))
-	c.logf("reissued bundle for run %s attempt %d", p.RunID, attempt)
-	c.mu.Unlock()
+	// Deduplicated and in the contract's execution order, as a controller hands
+	// it over: reports arrive as they happen, and the resume rule is only
+	// meaningful against a fixed sequence.
+	if names := phaseNames(phases); names != "" {
+		next.Env[runv1.EnvCompletedPhases] = names
+	} else {
+		delete(next.Env, runv1.EnvCompletedPhases)
+	}
+
+	c.logf("prepared run %s attempt %d (checkpoint: %q)", p.RunID, attempt,
+		next.Env[runv1.EnvCompletedPhases])
 	return next
+}
+
+// phaseNames renders a checkpoint for the environment.
+func phaseNames(phases []runv1.RuntimePhase) string {
+	seen := make(map[runv1.RuntimePhase]bool, len(phases))
+	for _, p := range phases {
+		seen[p] = true
+	}
+	out := make([]string, 0, len(seen))
+	for _, p := range runv1.RuntimePhases {
+		if seen[p] {
+			out = append(out, string(p))
+		}
+	}
+	return strings.Join(out, ",")
 }
 
 // mintBundle produces the pod's whole access to storage. The caller holds the
 // lock.
 //
-// The Put keys are the ones known in advance; the Post policy covers the two
-// prefixes whose object names are not — log chunks, numbered as the run goes,
-// and artifacts, named by the agent. The Get keys are prompt.txt, without which
-// there is no task, and state.json, without which an idempotent retry is
-// impossible.
+// In relay mode it is one field: the pod posts to the callback endpoint this
+// fake also serves, and there is no bucket, no signature and no expiry.
+//
+// In object-store mode the Put keys are the ones known in advance and the Post
+// policies cover the two prefixes whose object names are not — log chunks,
+// numbered as the run goes, and artifacts, named by the agent. There are no Get
+// keys at all: the two objects the pod used to read, prompt.txt and state.json,
+// are both gone from this store, and with them the whole class of failure where
+// a run could not start because a signature had expired.
 func (c *ControlPlane) mintBundle(prefix string, now time.Time) clusterv1.ArtifactBundle {
+	if c.artifactMode != runv1.ArtifactModeObjectStore {
+		return clusterv1.ArtifactBundle{
+			Mode:           runv1.ArtifactModeRelay,
+			MaxBytesPerRun: c.maxBytesPerRun,
+		}
+	}
 	expires := now.Add(c.ttl)
 
 	put := map[string]clusterv1.PresignedURL{}
 	for _, key := range []string{
-		runv1.StorageKeyOutput, runv1.StorageKeyResult, runv1.StorageKeyState,
+		runv1.StorageKeyOutput, runv1.StorageKeyResult,
 		runv1.StorageKeyCompletion, runv1.StorageKeyAgentLog,
 	} {
 		put[key] = c.presign("PUT", prefix+key, expires)
 	}
-	// prompt.txt and state.json are the two the contract makes mandatory:
-	// without the first the pod has no task, and without the second an
-	// idempotent retry is impossible.
-	//
-	// result.md and output.json are granted on top of them, and that is a
-	// deliberate choice rather than an accident of implementation. The resume
-	// rule requires the previous attempt's artifacts to be "present and
-	// readable", and with only the two mandatory reads a pod can check presence
-	// and nothing else — so the checklist row about a checkpoint that points at
-	// a result which is no longer there could not be reached at all. A bundle
-	// minted to the bare minimum is still handled: the entrypoint takes the
-	// claim on trust and says so.
-	get := map[string]clusterv1.PresignedURL{}
-	for _, key := range []string{
-		runv1.StorageKeyPrompt, runv1.StorageKeyState,
-		runv1.StorageKeyResult, runv1.StorageKeyOutput,
-	} {
-		get[key] = c.presign("GET", prefix+key, expires)
-	}
 	return clusterv1.ArtifactBundle{
-		Bucket:    c.bucket,
-		Endpoint:  c.baseURL,
-		KeyPrefix: prefix,
-		Put:       put,
-		Get:       get,
+		Mode:           runv1.ArtifactModeObjectStore,
+		MaxBytesPerRun: c.maxBytesPerRun,
+		Bucket:         c.bucket,
+		Endpoint:       c.baseURL,
+		KeyPrefix:      prefix,
+		Put:            put,
 		Post: []clusterv1.PresignedPostPolicy{
 			c.presignPost(prefix+runv1.StoragePrefixChunks, expires, DefaultMaxPostBytes),
-			c.presignPost(prefix+"artifacts/", expires, DefaultMaxPostBytes),
+			c.presignPost(prefix+runv1.StoragePrefixArtifacts, expires, DefaultMaxPostBytes),
 		},
 		ExpiresAt: expires,
 	}
@@ -301,8 +372,21 @@ func (c *ControlPlane) renderEnv(req RunRequest, p *Prepared, promptDigest strin
 		runv1.EnvTimeoutSeconds: strconv.Itoa(int(timeout)),
 
 		runv1.EnvPromptSHA256:  promptDigest,
-		runv1.EnvStorageBucket: c.bucket,
+		runv1.EnvArtifactMode:  string(c.artifactModeOrRelay()),
 		runv1.EnvStoragePrefix: p.Prefix,
+	}
+	// The prompt as a literal. The real controller sources it from a
+	// secretKeyRef, which produces the same variable inside the container and
+	// is a difference this fake cannot reproduce without a kubelet — noted
+	// rather than glossed over, because it is the one place the environment
+	// here is assembled differently from the environment in a cluster.
+	env[runv1.EnvPrompt] = req.Prompt
+	if len(req.CompletedPhases) > 0 {
+		names := make([]string, 0, len(req.CompletedPhases))
+		for _, phase := range req.CompletedPhases {
+			names = append(names, string(phase))
+		}
+		env[runv1.EnvCompletedPhases] = strings.Join(names, ",")
 	}
 	setIf := func(key, value string) {
 		if value != "" {

@@ -32,19 +32,29 @@ decided not to do in phase 1.
 | backend ↔ controller | [Cluster API](cluster-api.md) |
 | controller ↔ kubernetes | [CRD `AgentRun`](agentrun-crd.md) |
 | controller ↔ pod | [the agent image runtime contract](agent-runtime.md) |
-| content (prompts, logs, results, artifacts) | S3, key layout in section 9.2 of the architecture |
+| unbounded content (logs, results, artifacts) | the artifact store, key layout in section 9.2 of the architecture |
 
-There is no content boundary anywhere in the schema except two deliberate cases:
-`runs.result_summary` (64 KiB, a duplicate from S3 so that the run list does not
-hit storage row by row) and `run_attempts.completion` (the pod's report in full,
-see section 8). Everything else is references, and references are derived from
-`runs.id`: the `runs/{id}/` layout is fixed by the contract, so there are no
-columns for keys.
+There is no *unbounded* content anywhere in the schema. There are three
+deliberate bounded cases:
 
-The schema is the **system of record**. The CR is ephemeral and goes away by TTL,
-the pod's report lives in the controller's memory between the webhook and the
-forwarding, and S3 stores content without relationships. The only place where
-"what is actually going on" exists in full is here.
+- `runs.prompt` (512 KiB), which is here because the alternative — an object in
+  a bucket — made an object store a prerequisite for *starting* a run rather
+  than for finishing one;
+- `runs.result_summary` (64 KiB), a duplicate so that the run list does not hit
+  storage row by row;
+- `run_attempts.completion` (the pod's report in full, see section 8).
+
+Everything else is references, and references are derived from `runs.id`: the
+`runs/{id}/` layout is fixed by the contract, so there are no columns for keys.
+`runs.result_ref` is the one exception, and it holds a URI with its scheme —
+`file://…` or `s3://…` — so a row says which store wrote it.
+
+The schema is the **system of record**, and it became more so. The CR is
+ephemeral and goes away by TTL, the pod's report lives in the controller's
+memory between the webhook and the forwarding, and the artifact store holds
+content without relationships. Two facts that used to live in that store are now
+columns here — the prompt and the retry checkpoint — because both are facts
+about a run, and a run's facts belong where the rest of them are.
 
 ---
 
@@ -110,7 +120,7 @@ takes it into its head to order by it would look wrong.
 
 | Group | Columns | Written by | When |
 |---|---|---|---|
-| admission | `spec`, `prompt_sha256`, `agent`, `model`, `timeout_seconds`, `repo_*` | backend | once, at `INSERT` |
+| admission | `spec`, `prompt`, `prompt_sha256`, `agent`, `model`, `timeout_seconds`, `repo_*` | backend | once, at `INSERT` |
 | ownership | `cluster_id`, `lease_epoch`, `attempt`, `ack_deadline`, `lease_deadline` | backend | lease, ack, heartbeat, expiry |
 | observation | `status`, `observed_phase`, the result, the cost | backend, from the controller's reports | ingest |
 
@@ -208,6 +218,75 @@ obliged to carry all three.
 right. The unit of accounting is the attempt; "charged once" holds because the
 row exists at most once per `(run, epoch, attempt)`.
 
+### One live attempt per run, as a constraint
+
+```sql
+CREATE UNIQUE INDEX run_attempts_one_live ON run_attempts (run_id)
+  WHERE finished_at IS NULL;
+```
+
+Preventing two live attempts is a constraint, not a convention. Kubernetes
+already contributes `restartPolicy: Never` and `backoffLimit: 0`, so every
+attempt is a Job some controller created deliberately — but `backoffLimit`
+constrains one Job, not two controllers, and a rule that lives only in a
+controller's code is a rule the *second* controller does not know about. A
+constraint in the system of record is the only place it cannot be forgotten.
+
+The controller is the monitor in the sense that it is the side that finds out.
+The row is opened by the lease and by the first observation of a new attempt, so
+a conflict comes back as a refusal it can act on. A conflict means somebody
+else's attempt is still open, which is either a zombie controller — answered by
+the epoch — or its own duplicate reconcile, which is answered by doing nothing.
+
+This bounds duplicate *attempts*. It does not and cannot bound duplicate
+*execution* across a fencing boundary; that is what the epoch is for, and the
+honest formulation of section 7 of the architecture still stands: at-least-once
+execution with converging side effects.
+
+### Raising the epoch closes the open attempt
+
+Without this the index above is a trap. A controller that vanished mid-run
+leaves `finished_at IS NULL` behind, and the cluster the work is reassigned to
+can never open its own row — the run becomes permanently unrunnable by the very
+mechanism meant to keep it from running twice.
+
+So every event that raises `lease_epoch` — ack expiry, negative ack,
+reassignment, operator retry — finishes the outstanding attempt. It is a
+trigger, `runs_close_attempt`, rather than a line in each of those statements,
+for the same reason the rule above is a constraint: there are four call sites
+today and the fifth is the one that forgets.
+
+The accounting record survives, which is the point of keeping the epoch in the
+attempt key: what is released is the claim, not the history of what was spent.
+`failure_class` becomes `infra` because the attempt was ended by the platform's
+fence rather than by anything the agent or the user did, and the reason names
+the fence so that "why does this attempt say Failed when the run succeeded on
+the next cluster" has an answer in the row itself.
+
+### `completed_phases`: the checkpoint, as a column
+
+`run_attempts.completed_phases` is `runtime_phase[]` and holds the entrypoint
+phases an attempt got through. It is what used to be `runs/{id}/state.json`.
+
+It moved here because it is a fact about the run's progress, and the run's
+progress already lives in this schema — `observed_phase`, `observed_rank`, the
+`phase` column beside it. Keeping a second copy in an object store meant two
+writers for one piece of state, the thing D2 rejects for workflows, and it put
+that store on the critical path of *starting* an attempt rather than finishing
+one.
+
+Two properties fall out that the object never had. The checkpoint survives the
+pod's prefix being unreadable, because it never lived there. And it is visible:
+`SELECT completed_phases FROM run_attempts` answers "how far did this get before
+it died", which previously required fetching an object out of a bucket.
+
+It is **unioned on write, never replaced**. Reports arrive reordered, and a
+heartbeat carrying an earlier snapshot must not shorten a list the ingest path
+already grew — which would hand the next attempt a checkpoint saying the model
+had not run when it had. The read that assembles a lease's `completedPhases`
+unions across every attempt of the current epoch, because that is what makes a
+retry cheap: attempt 2 skips the model precisely because attempt 1 ran it.
+
 ---
 
 ## 8. What the schema guarantees structurally, and what stays in Go
@@ -218,7 +297,7 @@ produces:
 
 | Rule | Line of the contract |
 |---|---|
-| `spec` and the admission fields are immutable | CRD, section 4 |
+| `spec`, the prompt and the admission fields are immutable | CRD, section 4 |
 | `lease_epoch` does not decrease | Cluster API, section 3 |
 | `attempt` does not decrease within an epoch | Cluster API, section 3 |
 | a terminal status changes only when the epoch or the attempt grows | Cluster API, section 5 |
@@ -394,6 +473,10 @@ architecture document says what it says, and what to look at during review.
 | D11 | Idempotency | `Idempotency-Key` with no storage | `idempotency_keys` with a digest of the body | the same key with a different body must be a 422, not somebody else's `run_id` |
 | D12 | Artifacts | `artifacts(id, run_id, kind, s3_key, …)` | no table in phase 1 | the keys are derived from `runs.id`; a table that must be kept in agreement with the bucket is a source of divergence, not an index |
 | D13 | Invariants | entirely in code | four of them, through the `runs_guard` trigger | the decision table stays in Go, but its conclusions are checked on write (section 8) |
+| D14 | The prompt | an object in S3, referenced by `prompt_sha256` | `runs.prompt`, 512 KiB, frozen with the admission group | an object store was a prerequisite for *starting* a run rather than for finishing one. The ceiling is real and is paid deliberately: the value has to fit in the per-run Secret beside three credentials, and a Secret is capped at 1 MiB |
+| D15 | The retry checkpoint | `runs/{id}/state.json`, written and read by the pod | `run_attempts.completed_phases`, unioned on write | progress is already this schema's to hold; a second copy meant two writers for one fact. It is also queryable now — "how far did this get" is a `SELECT` |
+| D16 | Duplicate attempts | a convention plus `backoffLimit: 0` | `run_attempts_one_live`, a partial unique index, plus `runs_close_attempt` | `backoffLimit` constrains one Job, not two controllers. The trigger is what keeps the index from becoming a trap that makes a run permanently unrunnable |
+| D17 | Where the result is | implied to be S3 | `runs.result_ref`, a URI carrying its scheme | an installation that switches artifact modes keeps its old runs readable instead of orphaning them |
 
 ---
 
@@ -412,7 +495,13 @@ real PostgreSQL — generated columns, domains, partial indexes,
 - [x] the first lease issues epoch 1
 - [x] `ackDeadline` expiry → `Queued`, the epoch raised **in the same statement**, the deadlines cleared, the assignment preserved
 - [x] `leaseDeadline` expiry → `Unknown`, the epoch untouched, the rank still 30
-- [x] `runs_guard`: an epoch regression, an attempt regression, a second terminal phase, an edit to `spec`, an edit to the prompt digest — all rejected; an attempt reset under a new epoch, an attempt increase out of a terminal state, an operator retry — all accepted
+- [x] `runs_guard`: an epoch regression, an attempt regression, a second terminal phase, an edit to `spec`, an edit to the prompt or its digest — all rejected; an attempt reset under a new epoch, an attempt increase out of a terminal state, an operator retry — all accepted
+- [x] `run_attempts_one_live` refuses a second open attempt for one run, and permits one after the first has finished
+- [x] raising `lease_epoch` by any path — ack expiry, negative ack, reassignment, operator retry — closes the outstanding attempt with `failure_class = 'infra'`, keeps its accounting, and lets the next owner open a row
+- [x] `completed_phases` is unioned rather than replaced: an observation carrying a shorter list does not shorten what is stored
+- [x] the checkpoint a lease carries unions across every attempt of the current epoch, and is empty for a new epoch
+- [x] `prompt` over 512 KiB is refused by the check constraint, and admission refuses it first with a 413 naming the limit
+- [x] `result_ref` round-trips both schemes
 - [x] `(run_id, lease_epoch, attempt)` separates the attempts of two owners, and the total cost adds up
 - [x] `audit_log` cannot be edited but can be deleted by retention
 - [x] `idempotency_keys` is separated by scope, and a different body gives a different digest

@@ -98,13 +98,31 @@ type Config struct {
 	LFS          bool
 	CreatePR     bool
 
+	// Prompt is the task, from HALIPHRON_PROMPT, which the controller sourced
+	// from one key of the per-run Secret. It is the one value in this struct
+	// that is not safe in `kubectl describe pod` — and it is not there, because
+	// a secretKeyRef puts nothing in the pod's spec.
+	//
+	// It is in the environment at all because it is the one value the agent is
+	// meant to read. ADR 33 keeps credentials out of the environment because
+	// the agent inherits it; nothing is protected by withholding from that
+	// process the text describing what it is for.
+	Prompt       string
 	PromptSHA256 string
+
+	// CompletedPhases is what an earlier attempt of this run got through, from
+	// HALIPHRON_COMPLETED_PHASES. Absent on a first attempt, which is a normal
+	// answer and not a failure.
+	CompletedPhases []runv1.RuntimePhase
 
 	LogChunkInterval time.Duration
 	OTLPEndpoint     string
 	Traceparent      string
 
-	StorageBucket string
+	// ArtifactMode is where results go: through the controller, or straight to
+	// an object store. Told rather than inferred, so that a phase which fails
+	// can say which path it was taking.
+	ArtifactMode  runv1.ArtifactMode
 	StoragePrefix string
 	ImageVersion  string
 }
@@ -160,6 +178,12 @@ func LoadConfig(env func(string) string) (*Config, error) {
 	c.CallbackURL = required(runv1.EnvCallbackURL)
 	c.Model = required(runv1.EnvModel)
 	c.PromptSHA256 = required(runv1.EnvPromptSHA256)
+	// Required, and its absence is the clearest possible message. A Secret
+	// without the prompt key, or a controller that built the container without
+	// the reference, produces an agent with no task; saying so at validate
+	// costs nothing, and discovering it at the run phase costs a model call
+	// against an empty string.
+	c.Prompt = required(runv1.EnvPrompt)
 	agent := required(runv1.EnvAgent)
 	attempt := required(runv1.EnvAttempt)
 	timeout := required(runv1.EnvTimeoutSeconds)
@@ -208,8 +232,22 @@ func LoadConfig(env func(string) string) (*Config, error) {
 	c.CreatePR = truthy(env(runv1.EnvCreatePR))
 	c.OTLPEndpoint = env(runv1.EnvOTLPEndpoint)
 	c.Traceparent = env(runv1.EnvTraceparent)
-	c.StorageBucket = env(runv1.EnvStorageBucket)
 	c.StoragePrefix = env(runv1.EnvStoragePrefix)
+	c.CompletedPhases = parseCompletedPhases(env(runv1.EnvCompletedPhases))
+
+	switch mode := runv1.ArtifactMode(env(runv1.EnvArtifactMode)); mode {
+	case "", runv1.ArtifactModeRelay:
+		// An unset mode is relay. A controller older than this image belongs to
+		// an installation that had no other mode, and defaulting to the one
+		// that needs no configuration is the only safe direction.
+		c.ArtifactMode = runv1.ArtifactModeRelay
+	case runv1.ArtifactModeObjectStore:
+		c.ArtifactMode = runv1.ArtifactModeObjectStore
+	default:
+		return nil, fail(runv1.ExitConfig, "UnknownArtifactMode",
+			"%s=%q: this image implements %s and %s",
+			runv1.EnvArtifactMode, mode, runv1.ArtifactModeRelay, runv1.ArtifactModeObjectStore)
+	}
 	c.ImageVersion = env(runv1.EnvImageVersion)
 	c.MaxTurns = atoiOr(env(runv1.EnvMaxTurns), 0)
 	c.CloneDepth = atoiOr(env(runv1.EnvCloneDepth), 0)
@@ -305,10 +343,14 @@ func splitList(raw string) []string {
 // every child process, and the agent is the one process here explicitly assumed
 // capable of exfiltrating whatever it can read.
 type Secrets struct {
-	GitToken      string
-	LLMAPIKey     string
-	MCPConfig     []byte
-	Bundle        clusterv1.ArtifactBundle
+	GitToken  string
+	LLMAPIKey string
+	MCPConfig []byte
+	// Bundle is object-store mode only, and nil in relay mode. A pointer rather
+	// than a zero value so that "there is no bundle" and "there is an empty
+	// bundle" are different states: the second is a defect and would otherwise
+	// be indistinguishable from the default mode.
+	Bundle        *clusterv1.ArtifactBundle
 	CallbackToken string
 }
 
@@ -335,17 +377,21 @@ func LoadSecrets(dir string, c *Config) (*Secrets, error) {
 		return body, nil
 	}
 
-	bundle, err := read(runv1.SecretKeyPresigned, true)
+	// The presigned bundle exists only in object-store mode. Required exactly
+	// there, and refused nowhere: in relay mode the pod addresses no object
+	// store, and demanding a bundle would make the default mode impossible.
+	objectStore := c.ArtifactMode == runv1.ArtifactModeObjectStore
+	bundle, err := read(runv1.SecretKeyPresigned, objectStore)
 	if err != nil {
 		return nil, err
 	}
-	if err := json.Unmarshal(bundle, &s.Bundle); err != nil {
-		return nil, failWrap(runv1.ExitConfig, "MalformedSecret", err,
-			"%s does not parse as an artifact bundle", runv1.SecretKeyPresigned)
-	}
-	if s.Bundle.Get[runv1.StorageKeyPrompt].URL == "" {
-		return nil, fail(runv1.ExitConfig, "MalformedSecret",
-			"the bundle has no presigned GET for %s: this pod has no task to run", runv1.StorageKeyPrompt)
+	if len(bundle) > 0 {
+		var parsed clusterv1.ArtifactBundle
+		if err := json.Unmarshal(bundle, &parsed); err != nil {
+			return nil, failWrap(runv1.ExitConfig, "MalformedSecret", err,
+				"%s does not parse as an artifact bundle", runv1.SecretKeyPresigned)
+		}
+		s.Bundle = &parsed
 	}
 
 	token, err := read(runv1.SecretKeyCallbackToken, true)
@@ -379,12 +425,16 @@ func LoadSecrets(dir string, c *Config) (*Secrets, error) {
 
 // Values returns every secret string worth redacting. Short values are dropped
 // by the redactor itself; this is only the inventory.
+//
+// The prompt is deliberately not in it. It is the customer's text and not a
+// credential, redacting it would empty the log of the one thing that explains
+// what the agent was asked to do, and it is going into result.md anyway.
 func (s *Secrets) Values() []string {
 	values := []string{s.GitToken, s.LLMAPIKey, s.CallbackToken}
-	for _, link := range s.Bundle.Put {
-		values = append(values, signatureOf(link.URL))
+	if s.Bundle == nil {
+		return values
 	}
-	for _, link := range s.Bundle.Get {
+	for _, link := range s.Bundle.Put {
 		values = append(values, signatureOf(link.URL))
 	}
 	for _, policy := range s.Bundle.Post {

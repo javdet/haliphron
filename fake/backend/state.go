@@ -119,6 +119,8 @@ func (b *Backend) issue(c *cluster, limit int, runtimes []runv1.AgentType) []clu
 			LeaseDeadline: r.leaseDeadline,
 			Priority:      r.priority,
 			Spec:          r.spec,
+			Prompt:        r.prompt,
+			PromptSHA256:  r.spec.PromptSHA256,
 			Secrets:       copyMap(r.secrets),
 			RoleConfig:    copyMap(r.role),
 			Artifacts:     b.mintBundle(r),
@@ -148,11 +150,28 @@ func containsOrEmpty(list []runv1.AgentType, want runv1.AgentType) bool {
 	return false
 }
 
-// mintBundle produces presigned capabilities. The URLs are not signed and lead
-// nowhere: what the controller must get right is the expiry arithmetic and
-// keeping the bundle out of the CR, and neither needs a real signature. The
-// image track gets real storage from FakeControlPlane instead.
+// mintBundle says how this run's artifacts reach durable storage.
+//
+// In the default relay mode that is one field: the pod posts to its controller,
+// and there is no bucket, no signature and no expiry anywhere in the lease. A
+// test that wants the other half sets ArtifactMode on the Backend.
+//
+// In object-store mode the URLs are not signed and lead nowhere. What the
+// controller must get right is the expiry arithmetic and keeping the bundle out
+// of the CR, and neither needs a real signature; the image track gets real
+// storage from FakeControlPlane instead.
 func (b *Backend) mintBundle(r *run) clusterv1.ArtifactBundle {
+	maxBytes := b.maxArtifactBytes
+	if maxBytes <= 0 {
+		maxBytes = clusterv1.DefaultMaxBytesPerRun
+	}
+	if b.artifactMode != runv1.ArtifactModeObjectStore {
+		return clusterv1.ArtifactBundle{
+			Mode:           runv1.ArtifactModeRelay,
+			MaxBytesPerRun: maxBytes,
+		}
+	}
+
 	multiplier := b.timings.ArtifactTTLMultiplier
 	if multiplier <= 0 {
 		multiplier = 2
@@ -163,7 +182,7 @@ func (b *Backend) mintBundle(r *run) clusterv1.ArtifactBundle {
 
 	put := map[string]clusterv1.PresignedURL{}
 	for _, key := range []string{
-		runv1.StorageKeyOutput, runv1.StorageKeyResult, runv1.StorageKeyState,
+		runv1.StorageKeyOutput, runv1.StorageKeyResult,
 		runv1.StorageKeyCompletion, runv1.StorageKeyAgentLog,
 	} {
 		put[key] = clusterv1.PresignedURL{
@@ -172,24 +191,25 @@ func (b *Backend) mintBundle(r *run) clusterv1.ArtifactBundle {
 			ExpiresAt: expires,
 		}
 	}
-	get := map[string]clusterv1.PresignedURL{}
-	for _, key := range []string{runv1.StorageKeyPrompt, runv1.StorageKeyState} {
-		get[key] = clusterv1.PresignedURL{
-			URL:       b.storage.endpoint + "/" + b.storage.bucket + "/" + prefix + key + "?sig=fake",
-			Method:    methodGET,
-			ExpiresAt: expires,
-		}
-	}
+	// No GETs. The two objects the pod used to read — prompt.txt and state.json
+	// — are both gone from this store: the prompt travels in the lease and the
+	// checkpoint is a column in the control plane.
 	return clusterv1.ArtifactBundle{
-		Bucket:    b.storage.bucket,
-		Endpoint:  b.storage.endpoint,
-		KeyPrefix: prefix,
-		Put:       put,
-		Get:       get,
+		Mode:           runv1.ArtifactModeObjectStore,
+		MaxBytesPerRun: maxBytes,
+		Bucket:         b.storage.bucket,
+		Endpoint:       b.storage.endpoint,
+		KeyPrefix:      prefix,
+		Put:            put,
 		Post: []clusterv1.PresignedPostPolicy{{
 			Prefix:    prefix + runv1.StoragePrefixChunks,
 			URL:       b.storage.endpoint + "/" + b.storage.bucket,
 			Fields:    map[string]string{"key": prefix + runv1.StoragePrefixChunks + "${filename}"},
+			ExpiresAt: expires,
+		}, {
+			Prefix:    prefix + runv1.StoragePrefixArtifacts,
+			URL:       b.storage.endpoint + "/" + b.storage.bucket,
+			Fields:    map[string]string{"key": prefix + runv1.StoragePrefixArtifacts + "${filename}"},
 			ExpiresAt: expires,
 		}},
 		ExpiresAt: expires,

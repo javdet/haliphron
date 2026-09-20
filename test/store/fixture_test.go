@@ -76,12 +76,16 @@ func randomKey(t *testing.T) []byte {
 func newQueuedRun(t *testing.T, conn *sql.DB, clusterID string) string {
 	t.Helper()
 	runID := newULID(t)
+	// The prompt is a column and is NOT NULL, because a run without a task is
+	// not a run. The digest is taken over the same bytes, as admission does, so
+	// a fixture cannot produce a row whose two halves disagree.
+	prompt := "do the thing for " + runID
 	_, err := conn.Exec(`
-		INSERT INTO runs (id, created_by, created_via, spec, prompt_sha256,
+		INSERT INTO runs (id, created_by, created_via, spec, prompt, prompt_sha256,
 		                  agent, model, timeout_seconds, cluster_id)
-		VALUES ($1, 'test', 'api', $2::jsonb, sha256($3::bytea),
-		        'claude-code', 'anthropic/claude-opus-5', 3600, $4)`,
-		runID, minimalSpec, []byte(runID), clusterID)
+		VALUES ($1, 'test', 'api', $2::jsonb, $3::text, sha256($4::bytea),
+		        'claude-code', 'anthropic/claude-opus-5', 3600, $5)`,
+		runID, minimalSpec, prompt, []byte(prompt), clusterID)
 	if err != nil {
 		t.Fatalf("insert run: %v", err)
 	}
@@ -96,7 +100,7 @@ const minimalSpec = `{
   "agent": "claude-code",
   "model": "anthropic/claude-opus-5",
   "image": "ghcr.io/automagicops/agent-runtime@sha256:0000",
-  "prompt": {"bucket": "haliphron", "key": "runs/x/prompt.txt"},
+  "promptSHA256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
   "repo": {"url": "https://github.com/example/repo", "provider": "github"},
   "runtime": {"timeoutSeconds": 3600}
 }`
@@ -115,11 +119,19 @@ func leaseOne(t *testing.T, conn *sql.DB, clusterID string, ackSecs, ttlSecs int
 		var (
 			attempt, priority, timeout int
 			spec                       []byte
+			prompt                     string
+			promptSHA256               []byte
 			ackDeadline, leaseDeadline time.Time
 		)
+		// The prompt travels in the lease now, which is what took the artifact
+		// store off the path to starting a run.
 		if err := rows.Scan(&runID, &epoch, &attempt, &priority, &spec,
+			&prompt, &promptSHA256,
 			&ackDeadline, &leaseDeadline, &timeout); err != nil {
 			t.Fatalf("scan lease: %v", err)
+		}
+		if prompt == "" {
+			t.Fatalf("the lease of %s carries no prompt", runID)
 		}
 		ok = true
 	}
