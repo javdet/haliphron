@@ -34,9 +34,9 @@ maintainers:
 dependencies:
   - name: postgresql
     version: "18.11.5"
-    repository: https://charts.bitnami.com/bitnami
+    repository: oci://registry-1.docker.io/bitnamicharts
     condition: postgresql.enabled
   - name: minio
     version: "17.0.21"
-    repository: https://charts.bitnami.com/bitnami
+    repository: oci://registry-1.docker.io/bitnamicharts
     condition: minio.enabled

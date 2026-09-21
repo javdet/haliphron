@@ -8,7 +8,10 @@
 #
 #   docker build -f controller/Dockerfile -t haliphron/controller:dev .
 
-FROM golang:1.26-bookworm AS build
+# --platform=$BUILDPLATFORM: the binary is cross-compiled below through
+# GOOS/GOARCH with CGO off, so building a linux/arm64 image on an amd64
+# machine costs one more `go build` rather than a Go toolchain under QEMU.
+FROM --platform=$BUILDPLATFORM golang:1.26-bookworm AS build
 
 WORKDIR /src
 
@@ -31,7 +34,9 @@ COPY controller/ ./controller/
 
 ARG VERSION=dev
 # TARGETOS/TARGETARCH are set by buildx and left empty by a plain `docker
-# build`, where the host's values are the right ones anyway.
+# build`, where the host's values are the right ones anyway. They are what
+# makes the cross-compile above real: without them the build stage, pinned
+# to the build platform, would emit the builder's own architecture.
 ARG TARGETOS
 ARG TARGETARCH
 # The version is not decoration: the control plane refuses to register a
