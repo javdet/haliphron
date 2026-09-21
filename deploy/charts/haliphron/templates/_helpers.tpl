@@ -179,6 +179,62 @@ failure rather than a guess, since guessing low silently truncates every log.
 {{- end -}}
 
 {{/*
+The first admin token.
+
+The chart generates it because nothing else can: the API refuses every request
+without a bearer token, and the endpoint that issues one is admin-scoped. This
+is the Grafana-shaped answer — a credential in a Secret that an operator reads
+once and replaces.
+*/}}
+{{- define "haliphron.bootstrapEnabled" -}}
+{{- if .Values.bootstrapToken.enabled -}}true{{- end -}}
+{{- end -}}
+
+{{/*
+Whether this release writes the Secret. It does not when the token was
+supplied through one that already exists: copying a credential into a second
+Secret makes `helm get values` and this release's own storage two more places
+it can be read from.
+*/}}
+{{- define "haliphron.bootstrapOwned" -}}
+{{- if and (include "haliphron.bootstrapEnabled" .) (not .Values.bootstrapToken.existingSecret) -}}true{{- end -}}
+{{- end -}}
+
+{{- define "haliphron.bootstrapSecretName" -}}
+{{- default (printf "%s-bootstrap" (include "haliphron.fullname" .)) .Values.bootstrapToken.existingSecret -}}
+{{- end -}}
+{{- define "haliphron.bootstrapSecretKey" -}}
+{{- if .Values.bootstrapToken.existingSecret -}}{{ .Values.bootstrapToken.existingSecretKey }}{{- else -}}token{{- end -}}
+{{- end -}}
+
+{{/*
+The generated value, in order: what values state, what this release wrote last
+time, and only then a new random one.
+
+The middle case is what keeps `helm upgrade` from rotating the credential on
+every run — and, worse, from leaving the previous row alive in the database
+while the pods move on to a token nobody read. `lookup` returns nothing during
+`helm template` and `--dry-run`, so those render a value that is never
+installed; that is a property of dry runs and not of the install.
+
+`hlt_` because every other platform token carries it, and a credential that
+does not look like one is a credential somebody pastes into the wrong field.
+*/}}
+{{- define "haliphron.bootstrapToken" -}}
+{{- if .Values.bootstrapToken.value -}}
+{{- .Values.bootstrapToken.value -}}
+{{- else -}}
+{{- $key := include "haliphron.bootstrapSecretKey" . -}}
+{{- $existing := lookup "v1" "Secret" .Release.Namespace (include "haliphron.bootstrapSecretName" .) -}}
+{{- if and $existing $existing.data (index $existing.data $key) -}}
+{{- index $existing.data $key | b64dec -}}
+{{- else -}}
+{{- printf "hlt_%s" (randAlphaNum 32) -}}
+{{- end -}}
+{{- end -}}
+{{- end -}}
+
+{{/*
 The S3 endpoint, derived from the bundled MinIO when one is installed and no
 endpoint was given. Without this, enabling the subchart would leave the backend
 talking to AWS.
@@ -259,6 +315,22 @@ and refused for anything with persistence turned off by accident.
 
 {{- if not .Values.agent.image -}}
 {{- fail "agent.image is required: it decides what every run executes, so the chart will not choose it for you. Pin it by digest." -}}
+{{- end -}}
+
+{{/*
+Two ways of supplying the first admin token is one too many: the chart would
+write `value` into a Secret that the pods then do not read, and the credential
+an operator copied out is not the one that works.
+*/}}
+{{- if and .Values.bootstrapToken.value .Values.bootstrapToken.existingSecret -}}
+{{- fail "bootstrapToken.value and bootstrapToken.existingSecret are both set; the pods read the existing Secret, so the value would be written and never used. Keep one." -}}
+{{- end -}}
+{{/*
+A token shorter than the backend's floor is refused at startup, which is a
+CrashLoopBackOff whose reason is one line in a log nobody is watching yet.
+*/}}
+{{- if and .Values.bootstrapToken.value (lt (len .Values.bootstrapToken.value) 16) -}}
+{{- fail (printf "bootstrapToken.value is %d characters; the backend refuses anything under 16, because this is an admin credential reachable over the network. Leave it empty to have one generated." (len .Values.bootstrapToken.value)) -}}
 {{- end -}}
 
 {{- if and (not .Values.database.dsn) (not .Values.database.existingSecret) (not .Values.postgresql.enabled) -}}

@@ -26,6 +26,17 @@ spec:
         # A changed credential is a changed pod. Without this the Secret is
         # updated and every replica keeps using what it read at startup.
         checksum/credentials: {{ include (print $.Template.BasePath "/secret.yaml") . | sha256sum }}
+        {{- if (include "haliphron.bootstrapEnabled" .) }}
+        # The bootstrap Secret is hashed from values rather than from its
+        # rendered template, because rendering it a second time would call
+        # randAlphaNum a second time and produce a pod annotation that
+        # disagrees with the Secret and changes on every run. What this covers
+        # is a bootstrap token an operator changed by hand in values — which is
+        # the case that has to restart the pods, since the token is read once
+        # at startup. A generated one does not change, and one in an existing
+        # Secret is no more visible here than the DSN is.
+        checksum/bootstrap: {{ printf "%s/%s/%v" (.Values.bootstrapToken.value | toString) (.Values.bootstrapToken.existingSecret | toString) .Values.bootstrapToken.ttl | sha256sum }}
+        {{- end }}
         {{- with .Values.podAnnotations }}{{- toYaml . | nindent 8 }}{{- end }}
     spec:
       serviceAccountName: {{ include "haliphron.serviceAccountName" . }}
@@ -106,6 +117,11 @@ spec:
               mountPath: /haliphron/kek
               readOnly: true
             {{- end }}
+            {{- if (include "haliphron.bootstrapEnabled" .) }}
+            - name: bootstrap
+              mountPath: /haliphron/bootstrap
+              readOnly: true
+            {{- end }}
             {{- if not (include "haliphron.objectStore" .) }}
             # The artifact volume. readOnlyRootFilesystem is on, so this is one
             # of exactly two writable paths the process has — and the one that
@@ -141,6 +157,15 @@ spec:
             items:
               - key: {{ include "haliphron.kekSecretKey" . }}
                 path: {{ include "haliphron.kekSecretKey" . }}
+        {{- end }}
+        {{- if (include "haliphron.bootstrapEnabled" .) }}
+        - name: bootstrap
+          secret:
+            secretName: {{ include "haliphron.bootstrapSecretName" . }}
+            defaultMode: 0400
+            items:
+              - key: {{ include "haliphron.bootstrapSecretKey" . }}
+                path: {{ include "haliphron.bootstrapSecretKey" . }}
         {{- end }}
         {{- with .Values.backend.extraVolumes }}
         {{- toYaml . | nindent 8 }}

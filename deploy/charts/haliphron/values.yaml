@@ -194,6 +194,53 @@ encryption:
   existingSecretKey: kek
 
 # -----------------------------------------------------------------------------
+# The first admin token
+# -----------------------------------------------------------------------------
+#
+# A chicken-and-egg the API cannot solve on its own: every endpoint needs a
+# bearer token, and the endpoint that issues tokens is itself admin-scoped. So
+# the first credential is generated here and written to a Secret in this
+# namespace, the same way Grafana hands over its first admin password. Read it
+# once, sign in, mint a token of your own, revoke this one:
+#
+#   kubectl -n NAMESPACE get secret RELEASE-haliphron-bootstrap \
+#     -o jsonpath='{.data.token}' | base64 -d
+#
+# It is mounted as a file rather than passed as a variable, for the same reason
+# the key encryption key is: a variable is visible in `kubectl describe pod`
+# and in every crash dump.
+bootstrapToken:
+  # Off means the installation already has a token and this chart must not
+  # install another. A fresh install with this off has no way in.
+  enabled: true
+
+  # Empty generates one, and keeps it: the template reads back the Secret it
+  # wrote last time rather than rendering a fresh random value, which would
+  # otherwise rotate the credential on every `helm upgrade` and leave the
+  # previous row in the database behind it.
+  #
+  # The read-back is a cluster lookup, so `helm template` and `--dry-run`
+  # cannot do it and render a different token each time. That is a property of
+  # dry runs, not of the install.
+  value: ""
+
+  # Supply your own instead. The chart then writes no Secret and generates
+  # nothing, which is the right answer wherever Secrets are managed outside
+  # Helm.
+  existingSecret: ""
+  existingSecretKey: token
+
+  # How long it lasts. Empty means it does not expire.
+  #
+  # Not a default oversight: an expiry nobody noticed is a control plane nobody
+  # can log into, and the honest way to end this credential is to revoke it
+  # once a real one exists — which the UI does, and which the backend will not
+  # undo on the next restart. Set a duration ("72h") to put a clock on it as
+  # well. When one lapses, change `value` here and roll the Deployment: a
+  # different token is a new row, and the lapsed one stays lapsed.
+  ttl: ""
+
+# -----------------------------------------------------------------------------
 # What the runs default to
 # -----------------------------------------------------------------------------
 agent:

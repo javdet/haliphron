@@ -301,6 +301,16 @@ pre.pane {
 .gate { min-height: 100vh; display: grid; place-items: center; padding: var(--gutter); }
 .gate .card { width: min(440px, 100%); }
 
+/* A command to copy, not a pane to scroll: it wraps rather than scrolling
+   sideways, because a half-visible kubectl line is one that gets mistyped. */
+pre.snippet {
+  margin: 0; padding: 9px 11px; border-radius: 6px;
+  background: var(--bg-sunken); border: 1px solid var(--border);
+  color: var(--text-dim); font-family: var(--mono); font-size: 12px;
+  line-height: 1.5; white-space: pre-wrap; overflow-wrap: anywhere;
+  user-select: all;
+}
+
 .spinner {
   width: 14px; height: 14px; border-radius: 50%;
   border: 2px solid var(--border-strong); border-top-color: var(--accent);

@@ -409,6 +409,22 @@ column exists so an operator can spot an unused token, and minute resolution
 answers that question exactly as well as microsecond resolution. Nothing indexed
 changes in the process, so the update stays HOT.
 
+**The first row in `api_tokens` cannot come from the API.** Every endpoint needs
+a bearer token and `POST /tokens` is admin-scoped, so a fresh installation has
+no way in. The control-plane chart generates a token into a Secret and the
+backend writes it at startup: `kind = 'user'`, `name = 'bootstrap'`,
+`scopes = {admin}`, `created_by = 'bootstrap'`.
+
+The write is keyed on `token_sha256`, never on the name, and that is the whole
+of its semantics. A row that already exists is left exactly as it is — including
+when it is revoked or expired, which is the case worth stating: an operator who
+revoked the bootstrap credential did so because a real one now exists, and a
+startup path that reinstated it would be a back door that reopens on every node
+drain. Installing a replacement is therefore a *different token*, which is a
+different digest and a new row, and the spent one stays spent. Nothing in this
+schema makes `name = 'bootstrap'` unique, and nothing should: the spent rows are
+the record of which credentials an installation has been through.
+
 **`idempotency_keys` carries a digest of the body.** The same key with a
 different body is a client defect, and answering with the first `run_id` would
 return the result of work nobody ordered. That is a 422, and it is told apart by

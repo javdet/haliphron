@@ -201,3 +201,108 @@ func (s *Store) RevokeRunTokens(ctx context.Context, runID runv1.ULID) error {
 	}
 	return nil
 }
+
+// ---------------------------------------------------------------------------
+// the first one
+// ---------------------------------------------------------------------------
+
+// The bootstrap credential.
+//
+// Every endpoint of the public API needs a bearer token, and the endpoint that
+// issues tokens is itself admin-scoped. A fresh installation therefore has no
+// way in: the first credential cannot come from the API that the first
+// credential is needed to call. It has to be installed from outside, and the
+// chart is what installs it — a random token generated into a Secret, mounted
+// as a file, and written here at startup.
+
+// BootstrapTokenName is what the row is called, so that the credential an
+// installation started with is obvious in the tokens list rather than being
+// one more entry nobody can account for.
+const BootstrapTokenName = "bootstrap"
+
+// MinBootstrapTokenLength is the floor. This is an admin credential reachable
+// over the network, and one supplied by hand is the case worth checking: the
+// chart's own is 32 random characters.
+const MinBootstrapTokenLength = 16
+
+// ErrBootstrapTokenWeak is a bootstrap credential too short to be one.
+var ErrBootstrapTokenWeak = errors.New("store: the bootstrap token is too short")
+
+// BootstrapOutcome is what EnsureBootstrapToken found. It is returned rather
+// than logged here, because what an operator needs to be told differs by case
+// and the store is not where that is decided.
+type BootstrapOutcome string
+
+const (
+	// BootstrapCreated: there was no row for this credential, and one was
+	// written. A first install says this once.
+	BootstrapCreated BootstrapOutcome = "created"
+
+	// BootstrapPresent: the row is already there and usable. Every restart
+	// after the first says this.
+	BootstrapPresent BootstrapOutcome = "present"
+
+	// BootstrapSpent: the row is there and revoked or expired, and is left
+	// exactly as it is. An operator who revoked the bootstrap credential did
+	// so on purpose — normally because a token of their own now exists — and
+	// a restart that quietly reinstated it would be a back door that reopens
+	// on every node drain.
+	BootstrapSpent BootstrapOutcome = "spent"
+)
+
+// EnsureBootstrapToken installs the admin credential an installation starts
+// with, once.
+//
+// It is keyed on the digest and not on the name, which is what makes the
+// recovery path work: a bootstrap token that was revoked or allowed to expire
+// is never resurrected, and changing the value in the Secret is a different
+// digest and therefore a new row. That is the documented way back into an
+// installation whose first credential has lapsed, and it leaves the lapsed one
+// lapsed.
+func (s *Store) EnsureBootstrapToken(ctx context.Context, secret string, ttl time.Duration) (BootstrapOutcome, error) {
+	if len(secret) < MinBootstrapTokenLength {
+		return "", fmt.Errorf("%w: %d characters, and %d is the floor",
+			ErrBootstrapTokenWeak, len(secret), MinBootstrapTokenLength)
+	}
+	digest := sha256.Sum256([]byte(secret))
+
+	var expires, revoked sql.NullTime
+	err := s.db.QueryRowContext(ctx,
+		`SELECT expires_at, revoked_at FROM api_tokens WHERE token_sha256 = $1`,
+		digest[:]).Scan(&expires, &revoked)
+	switch {
+	case err == nil:
+		if revoked.Valid || (expires.Valid && !expires.Time.After(time.Now())) {
+			return BootstrapSpent, nil
+		}
+		return BootstrapPresent, nil
+	case !errors.Is(err, sql.ErrNoRows):
+		return "", fmt.Errorf("store: look up the bootstrap token: %w", err)
+	}
+
+	var expiresAt *time.Time
+	if ttl > 0 {
+		at := time.Now().Add(ttl)
+		expiresAt = &at
+	}
+
+	// admin and nothing else. The scope exists so that the first thing this
+	// credential can do is mint a narrower one.
+	res, err := s.db.ExecContext(ctx, `
+		INSERT INTO api_tokens (id, name, kind, token_sha256, scopes, subject,
+		                        expires_at, created_by)
+		VALUES ($1, $2, $3, $4, $5::text[], $2, $6, $2)
+		ON CONFLICT (token_sha256) DO NOTHING`,
+		newID(), BootstrapTokenName, TokenKindUser, digest[:],
+		textArray([]string{ScopeAdmin}), nullTime(expiresAt))
+	if err != nil {
+		return "", fmt.Errorf("store: create the bootstrap token: %w", err)
+	}
+	// DO NOTHING rather than a unique-violation: every replica runs this at
+	// startup, and the one that loses the race wanted the row that is now
+	// there.
+	if n, _ := res.RowsAffected(); n == 0 {
+		return BootstrapPresent, nil
+	}
+	return BootstrapCreated, nil
+}

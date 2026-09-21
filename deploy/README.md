@@ -129,6 +129,53 @@ Enabling both for one entrypoint is allowed — it is the normal state
 mid-migration — and the install notes say so, because otherwise it is a service
 reachable two ways with two sets of timeouts and two TLS configurations.
 
+### The first admin token
+
+The API accepts nothing but a bearer token, and the endpoint that issues tokens
+is itself admin-scoped, so a fresh installation has no way in. The chart breaks
+that circle the way Grafana does with its first admin password: it generates a
+token into a Secret in the release's namespace, and the backend writes it to
+its token store at startup with the `admin` scope and the name `bootstrap`.
+
+```sh
+kubectl -n haliphron get secret haliphron-bootstrap \
+  -o jsonpath='{.data.token}' | base64 -d; echo
+```
+
+Paste it into the UI — or use it once from `curl` — mint a token of your own,
+and revoke this one. It is mounted into the pod as a file rather than passed as
+a variable, for the same reason the KEK is, but it is still readable by anyone
+who can read Secrets in that namespace.
+
+A few properties worth knowing before you rely on them:
+
+- **It is installed once, by digest.** Restarts and rollouts find the row and
+  leave it alone. `helm upgrade` does not rotate it: the template reads back the
+  Secret it wrote last time rather than generating a new value.
+- **Revoking it is final.** The backend will not reinstate a revoked or expired
+  bootstrap row on the next start — a credential that comes back on every node
+  drain is a back door, not a bootstrap. To install a fresh one, change
+  `bootstrapToken.value` and roll the Deployment; a different token is a new
+  row, and the spent one stays spent.
+- **It does not expire by default.** `bootstrapToken.ttl` puts a clock on it,
+  and the reason that is not the default is that an expiry nobody noticed is a
+  control plane nobody can log into. Ending this credential is meant to be an
+  act, not a date.
+- **`helm template` and `--dry-run` render a token that is never installed.**
+  The read-back is a cluster lookup, which a dry run cannot do.
+
+To supply your own instead, and have the chart write no Secret at all:
+
+```sh
+kubectl -n haliphron create secret generic haliphron-admin \
+  --from-literal=token="hlt_$(openssl rand -hex 16)"
+
+helm upgrade haliphron ... --set bootstrapToken.existingSecret=haliphron-admin
+```
+
+`--set bootstrapToken.enabled=false` installs none, which is right for an
+installation whose tokens already exist and wrong for a first install.
+
 `httpRoute.apiVersion` defaults to `gateway.networking.k8s.io/v1`; set
 `v1beta1` for a cluster still on Gateway API 0.x.
 

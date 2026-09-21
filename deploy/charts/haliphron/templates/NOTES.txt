@@ -17,8 +17,40 @@ Listeners in this mode:
 
    kubectl -n {{ .Release.Namespace }} rollout status deploy/{{ include "haliphron.fullname" . }}
 
-2. Connect a cluster. Every target cluster needs a bootstrap token, issued by
-   the admin API and used exactly once:
+{{- if (include "haliphron.bootstrapEnabled" .) }}
+
+2. Sign in. The API accepts nothing but a bearer token and the endpoint that
+   issues tokens is itself admin-scoped, so this installation was given one:
+
+   kubectl -n {{ .Release.Namespace }} get secret {{ include "haliphron.bootstrapSecretName" . }} \
+     -o jsonpath='{.data.{{ include "haliphron.bootstrapSecretKey" . }}}' | base64 -d; echo
+
+   It carries the admin scope{{ if .Values.bootstrapToken.ttl }} and expires in {{ .Values.bootstrapToken.ttl }}{{ else }} and does not expire{{ end }}, and it is readable by
+   anyone who can read Secrets in this namespace. Treat it as what it is.
+{{- if (include "haliphron.frontend.enabled" .) }}
+   Paste it into the UI, mint a token of your own under Tokens, and revoke
+   this one.
+{{- else }}
+   Use it once to mint a token of your own, then revoke it:
+
+   curl -sX POST .../api/v1/tokens -H "Authorization: Bearer $BOOTSTRAP" \
+     -H 'Content-Type: application/json' \
+     -d '{"name":"ops","scopes":["admin"]}'
+   {{- end }}
+
+   Revoking it is final: the backend will not reinstate a revoked bootstrap
+   token on the next restart. To install a fresh one, set bootstrapToken.value
+   and upgrade.
+{{- else }}
+
+2. This release installs no bootstrap token (bootstrapToken.enabled is false),
+   so the API is reachable only with a token that already exists in the
+   database. If there is none, nothing can call the endpoint that issues one.
+{{- end }}
+
+3. Connect a cluster. Every target cluster needs a bootstrap token of its own
+   — a different thing from the admin token above — issued by the admin API
+   and used exactly once:
 
    kubectl -n {{ .Release.Namespace }} port-forward svc/{{ include "haliphron.fullname" . }} {{ .Values.service.ports.api }}:{{ .Values.service.ports.api }}
    curl -sX POST localhost:{{ .Values.service.ports.api }}/v1/clusters/bootstrap-tokens \
@@ -29,7 +61,7 @@ Listeners in this mode:
 
 {{- if not (include "haliphron.kekEnabled" .) }}
 
-3. No key encryption key is configured, so managed secrets are unavailable and
+4. No key encryption key is configured, so managed secrets are unavailable and
    the backend says so at startup. Secrets referenced from an external manager
    keep working. To enable them:
 

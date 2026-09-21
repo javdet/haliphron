@@ -46,6 +46,22 @@ type Config struct {
 	KEKID string
 	KEK   []byte
 
+	// BootstrapToken is the admin credential an installation starts with, and
+	// the answer to a chicken-and-egg the API cannot solve on its own: every
+	// endpoint needs a bearer token, and the endpoint that issues one is
+	// itself admin-scoped. The chart generates it into a Secret and mounts it,
+	// the process writes it to the token store at startup, and an operator
+	// pastes it into the UI once and then mints a token of their own.
+	//
+	// Empty means the installation already has a token. Nothing is written and
+	// nothing is said.
+	BootstrapToken string
+	// BootstrapTokenTTL puts a clock on it. Zero means it does not expire,
+	// because an expiry nobody noticed is an installation nobody can log into;
+	// ending the credential is a revocation, which is an act rather than a
+	// date.
+	BootstrapTokenTTL time.Duration
+
 	Timings  clusterv1.Timings
 	Versions clusterv1.VersionRange
 	Defaults run.Defaults
@@ -150,6 +166,8 @@ func Load() (Config, error) {
 
 		KEKID: env("HALIPHRON_KEK_ID", "default"),
 
+		BootstrapTokenTTL: durationEnv("HALIPHRON_BOOTSTRAP_TOKEN_TTL", 0),
+
 		Timings: clusterv1.Timings{
 			HeartbeatIntervalSeconds: int32Env("HALIPHRON_HEARTBEAT_INTERVAL_SECONDS",
 				clusterv1.DefaultTimings().HeartbeatIntervalSeconds),
@@ -221,7 +239,32 @@ func Load() (Config, error) {
 	}
 	cfg.KEK = kek
 
+	bootstrap, err := loadBootstrapToken()
+	if err != nil {
+		return Config{}, err
+	}
+	cfg.BootstrapToken = bootstrap
+
 	return cfg, cfg.validate()
+}
+
+// loadBootstrapToken reads the first admin credential, from a file or a
+// variable, for the same reason and in the same order as the key encryption
+// key: a variable is visible in `kubectl describe pod` and in every crash
+// dump, and this one is an admin credential reachable over the network.
+func loadBootstrapToken() (string, error) {
+	if path := os.Getenv("HALIPHRON_BOOTSTRAP_TOKEN_FILE"); path != "" {
+		raw, err := os.ReadFile(path)
+		if err != nil {
+			return "", fmt.Errorf("config: read %s: %w", path, err)
+		}
+		// Trimmed, because a token typed into a Secret with `kubectl create
+		// secret --from-file` carries the newline the editor added, and a
+		// credential that fails only when it was created that way is a bad
+		// afternoon.
+		return strings.TrimSpace(string(raw)), nil
+	}
+	return strings.TrimSpace(os.Getenv("HALIPHRON_BOOTSTRAP_TOKEN")), nil
 }
 
 // loadKEK reads the key encryption key from a variable or a file.

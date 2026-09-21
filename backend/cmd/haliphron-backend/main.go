@@ -105,6 +105,38 @@ func run() error {
 		log.Info("schema applied", "took", time.Since(start))
 	}
 
+	// The first admin credential, if a chart handed one over.
+	//
+	// It has to be installed from outside the API, because every endpoint of
+	// the API needs a bearer token and the endpoint that issues tokens is
+	// itself admin-scoped. This runs after the migration for the obvious
+	// reason and on every replica for the same reason the migration does: it
+	// is idempotent, and the alternative is a rollout whose outcome depends on
+	// which pod came up first.
+	if cfg.BootstrapToken != "" {
+		outcome, err := db.EnsureBootstrapToken(ctx, cfg.BootstrapToken, cfg.BootstrapTokenTTL)
+		if err != nil {
+			return err
+		}
+		switch outcome {
+		case store.BootstrapCreated:
+			// Warn rather than Info: this is an admin credential that anyone
+			// who can read Secrets in the namespace can read, and the line
+			// that says so is the one that gets it replaced.
+			log.Warn("a bootstrap admin token was installed; it grants admin over this control plane — "+
+				"sign in with it, mint a token of your own, and revoke it",
+				"name", store.BootstrapTokenName, "expires_in", cfg.BootstrapTokenTTL)
+		case store.BootstrapPresent:
+			log.Info("the bootstrap admin token is in place", "name", store.BootstrapTokenName)
+		case store.BootstrapSpent:
+			// Said, and not undone. Reinstating a revoked credential on every
+			// restart would be a back door that reopens on a node drain.
+			log.Info("the bootstrap admin token has been revoked or has expired and was left alone; "+
+				"change it in the Secret to install a new one",
+				"name", store.BootstrapTokenName)
+		}
+	}
+
 	objects, err := openArtifacts(cfg, log)
 	if err != nil {
 		return err

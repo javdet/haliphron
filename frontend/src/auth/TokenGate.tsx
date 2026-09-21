@@ -105,9 +105,13 @@ export function TokenGate({ children }: { children: ReactNode }) {
         </header>
         <div className="card-body stack">
           <p className="small muted" style={{ margin: 0 }}>
-            The control plane authenticates with an API token. Create one with{' '}
-            <code>POST /api/v1/tokens</code> or the MCP tools, then paste it here. It is kept in
-            this browser only.
+            The control plane authenticates with an API token, kept in this browser only. A fresh
+            installation was given one by its chart:
+          </p>
+          <pre className="snippet">{`kubectl -n NAMESPACE get secret RELEASE-bootstrap \\
+  -o jsonpath='{.data.token}' | base64 -d`}</pre>
+          <p className="small muted" style={{ margin: 0 }}>
+            Sign in with it, mint a token of your own under Tokens, and revoke it.
           </p>
           <Field label="API token" error={error} hint="Scopes: runs:read, runs:write, admin.">
             <input

@@ -92,6 +92,21 @@ encryption key is not even that: it is a file, because a variable is visible in
   value: /haliphron/kek/{{ include "haliphron.kekSecretKey" . }}
 {{- end }}
 
+{{- if (include "haliphron.bootstrapEnabled" .) }}
+{{- /*
+  A file, like the KEK and for the same reason: this is admin over the control
+  plane, and a variable is visible in `kubectl describe pod`. The backend
+  writes it to the token store once and never again — a revoked bootstrap row
+  stays revoked across restarts.
+*/}}
+- name: HALIPHRON_BOOTSTRAP_TOKEN_FILE
+  value: /haliphron/bootstrap/{{ include "haliphron.bootstrapSecretKey" . }}
+{{- with .Values.bootstrapToken.ttl }}
+- name: HALIPHRON_BOOTSTRAP_TOKEN_TTL
+  value: {{ . | quote }}
+{{- end }}
+{{- end }}
+
 - name: HALIPHRON_AGENT_IMAGE
   value: {{ .Values.agent.image | quote }}
 - name: HALIPHRON_AGENT_IMAGE_PULL_POLICY
