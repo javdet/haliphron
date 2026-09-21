@@ -31,6 +31,10 @@ metrics:
     # Rendered in lint so the template is exercised. See values.yaml: the
     # backend has no /metrics endpoint yet, so this stays off in real values.
     enabled: true
+frontend:
+  # Rendered in lint so the UI templates, and the API entrypoint's switch to
+  # routing through them, are both exercised.
+  enabled: true
 networkPolicy:
   enabled: true
 autoscaling:

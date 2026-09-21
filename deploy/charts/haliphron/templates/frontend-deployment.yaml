@@ -1,0 +1,81 @@
+{{- if include "haliphron.frontend.enabled" . }}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "haliphron.frontend.fullname" . }}
+  labels: {{- include "haliphron.frontend.labels" . | nindent 4 }}
+spec:
+  replicas: {{ .Values.frontend.replicaCount }}
+  selector:
+    matchLabels: {{- include "haliphron.frontend.selectorLabels" . | nindent 6 }}
+  template:
+    metadata:
+      labels: {{- include "haliphron.frontend.selectorLabels" . | nindent 8 }}
+      annotations:
+        # The bundle is baked into the image, but the server block is not: a
+        # change to either value below has to restart the pod to take effect.
+        checksum/config: {{ printf "%s|%s"
+          (include "haliphron.frontend.backendOrigin" .)
+          .Values.frontend.cspConnectSrc | sha256sum }}
+        {{- with .Values.frontend.podAnnotations }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
+    spec:
+      {{- with .Values.imagePullSecrets }}
+      imagePullSecrets: {{- toYaml . | nindent 8 }}
+      {{- end }}
+      automountServiceAccountToken: false
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 101
+        runAsGroup: 101
+        fsGroup: 101
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: frontend
+          image: {{ include "haliphron.frontend.image" . }}
+          imagePullPolicy: {{ .Values.frontend.image.pullPolicy }}
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]
+          env:
+            - name: BACKEND_ORIGIN
+              value: {{ include "haliphron.frontend.backendOrigin" . | quote }}
+            - name: CSP_CONNECT_SRC
+              value: {{ .Values.frontend.cspConnectSrc | quote }}
+          ports:
+            - name: http
+              containerPort: 8080
+              protocol: TCP
+          livenessProbe:
+            httpGet: {path: /healthz, port: http}
+            initialDelaySeconds: 3
+            periodSeconds: 20
+          readinessProbe:
+            httpGet: {path: /healthz, port: http}
+            initialDelaySeconds: 2
+            periodSeconds: 10
+          resources: {{- toYaml .Values.frontend.resources | nindent 12 }}
+          # nginx writes its configuration, its pid and its proxy buffers to
+          # disk at start, and the root filesystem is read-only.
+          volumeMounts:
+            - {name: cache, mountPath: /var/cache/nginx}
+            - {name: run, mountPath: /tmp}
+            - {name: conf, mountPath: /etc/nginx/conf.d}
+      volumes:
+        - {name: cache, emptyDir: {}}
+        - {name: run, emptyDir: {}}
+        - {name: conf, emptyDir: {}}
+      {{- with .Values.frontend.nodeSelector }}
+      nodeSelector: {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.frontend.tolerations }}
+      tolerations: {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.frontend.affinity }}
+      affinity: {{- toYaml . | nindent 8 }}
+      {{- end }}
+{{- end }}

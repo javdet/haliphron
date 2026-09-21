@@ -264,6 +264,58 @@ limits:
   idempotencyTTL: 24h
 
 # -----------------------------------------------------------------------------
+# The UI
+# -----------------------------------------------------------------------------
+#
+# A static React bundle behind an nginx that also proxies /api to the backend
+# Service of this release. The proxy is the point: the backend sends no CORS
+# headers, so the UI has to be on the API's own origin, and this is how it gets
+# there without the backend having to grow a browser-shaped authentication
+# model it does not otherwise need.
+#
+# Off by default. The API is complete without it, and an installation that
+# drives Haliphron from MCP or CI has no use for a web page.
+frontend:
+  enabled: false
+
+  image:
+    registry: ghcr.io
+    repository: automagicops/haliphron-frontend
+    # Empty means .Chart.AppVersion, so the UI and the backend move together.
+    tag: ""
+    digest: ""
+    pullPolicy: IfNotPresent
+
+  # Stateless and tiny; two is for availability during a node drain, not load.
+  replicaCount: 1
+
+  service:
+    type: ClusterIP
+    port: 80
+    annotations: {}
+
+  # What the page is allowed to open connections to, as a CSP connect-src.
+  #
+  # 'self' is right for relay mode, where every byte the UI reads comes back
+  # through this nginx. In object-store mode the backend answers a result with
+  # a redirect to a presigned link and the browser fetches the bucket
+  # directly — add that origin here, or the browser blocks the fetch:
+  #   cspConnectSrc: "'self' https://s3.eu-west-1.amazonaws.com"
+  cspConnectSrc: "'self'"
+
+  podAnnotations: {}
+  nodeSelector: {}
+  tolerations: []
+  affinity: {}
+
+  resources:
+    requests:
+      cpu: 10m
+      memory: 32Mi
+    limits:
+      memory: 64Mi
+
+# -----------------------------------------------------------------------------
 # Service and ingress
 # -----------------------------------------------------------------------------
 service:

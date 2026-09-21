@@ -19,6 +19,17 @@ spec:
           protocol: TCP
         - port: {{ .Values.service.ports.health }}
           protocol: TCP
+    {{- if include "haliphron.frontend.enabled" . }}
+    # The UI proxies /api from its own pod. Without this it is refused by a
+    # policy whose ingressFrom names only the ingress controller — and the
+    # symptom is a UI that loads and then 502s on every request.
+    - from:
+        - podSelector:
+            matchLabels: {{- include "haliphron.frontend.selectorLabels" . | nindent 14 }}
+      ports:
+        - port: {{ .Values.service.ports.api }}
+          protocol: TCP
+    {{- end }}
   egress:
     # DNS first and unconditionally. A policy that forgets it fails in a way
     # that looks like every dependency being down at once.

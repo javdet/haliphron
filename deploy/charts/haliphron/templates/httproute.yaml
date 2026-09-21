@@ -62,7 +62,12 @@ spec:
       timeouts: {{- toYaml . | nindent 8 }}
       {{- end }}
       backendRefs:
+        {{- if eq $entry.name "api" }}
+        - name: {{ include "haliphron.apiRouteService" $root }}
+          port: {{ include "haliphron.apiRoutePort" $root }}
+        {{- else }}
         - name: {{ $full }}
           port: {{ index $root.Values.service.ports $entry.name }}
+        {{- end }}
 {{- end }}
 {{- end }}

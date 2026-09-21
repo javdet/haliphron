@@ -10,6 +10,12 @@ CONTROLLER_VERSION ?= 0.1.0
 BACKEND_VERSION    ?= 0.1.0
 BACKEND_IMAGE      ?= haliphron/backend:dev
 CONTROLLER_IMAGE   ?= haliphron/controller:dev
+FRONTEND_IMAGE     ?= haliphron/frontend:dev
+NODE_IMAGE         ?= node:22-alpine
+# The UI's toolchain runs in a container too, for the same reason the Go one
+# does: a laptop without Node still has to be able to build and check it.
+NPM_RUN         = docker run --rm -v haliphron-npm:/root/.npm \
+                  -v $(PWD)/frontend:/w -w /w $(NODE_IMAGE)
 HELM               ?= helm
 CHART_CP           = deploy/charts/haliphron
 CHART_RT           = deploy/charts/haliphron-runtime
@@ -23,7 +29,8 @@ DOCKER_RUN     = docker run --rm -e GOMAXPROCS=2 \
                  -v $(PWD):/w -w /w $(GO_IMAGE)
 
 .PHONY: generate test db-test fake-test image-test image-build controller-test controller-build backend-test backend-build verify
-.PHONY: backend-image controller-image images chart-gen chart-deps chart-lint chart-template chart-package chart-verify
+.PHONY: backend-image controller-image frontend-image images chart-gen chart-deps chart-lint chart-template chart-package chart-verify
+.PHONY: frontend-deps frontend-check frontend-build frontend-dev
 
 ## generate: deepcopy functions and the AgentRun CRD, from the Go types
 generate:
@@ -84,6 +91,25 @@ db-test:
 	  -v haliphron-gocache:/root/.cache/go-build \
 	  -v $(PWD):/w -w /w $(GO_IMAGE) sh /w/hack/dbtest.sh
 
+## frontend-deps: install the UI's dependencies from the lockfile
+frontend-deps:
+	$(NPM_RUN) npm ci
+
+## frontend-check: typecheck the UI. There is no separate lint step: the
+##                 compiler with noUnused* on is the lint.
+frontend-check: frontend-deps
+	$(NPM_RUN) npm run typecheck
+
+## frontend-build: the production bundle, into frontend/dist
+frontend-build: frontend-deps
+	$(NPM_RUN) npm run build
+
+## frontend-dev: the Vite dev server against a backend on the host. It proxies
+##               /api there, so the browser sees one origin exactly as it does
+##               behind the packaged nginx.
+frontend-dev:
+	cd frontend && HALIPHRON_API=$${HALIPHRON_API:-http://127.0.0.1:8080} npm run dev
+
 ## backend-image: the control plane image
 backend-image:
 	docker build -f backend/Dockerfile -t $(BACKEND_IMAGE) --build-arg VERSION=$(BACKEND_VERSION) .
@@ -92,8 +118,12 @@ backend-image:
 controller-image:
 	docker build -f controller/Dockerfile -t $(CONTROLLER_IMAGE) --build-arg VERSION=$(CONTROLLER_VERSION) .
 
+## frontend-image: the UI image — the bundle plus the nginx that proxies /api
+frontend-image:
+	docker build -f frontend/Dockerfile -t $(FRONTEND_IMAGE) frontend
+
 ## images: every image
-images: backend-image controller-image image-build
+images: backend-image controller-image frontend-image image-build
 
 ## chart-gen: copy the generated CRD and RBAC into the runtime chart
 chart-gen:

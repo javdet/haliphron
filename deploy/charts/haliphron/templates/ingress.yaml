@@ -39,8 +39,17 @@ spec:
             pathType: {{ $cfg.pathType }}
             backend:
               service:
+                {{- if eq $entry.name "api" }}
+                {{- /* With the UI installed this entrypoint is the UI, which
+                       serves the page and proxies /api to the backend behind
+                       it. One host, one origin, no CORS. */}}
+                name: {{ include "haliphron.apiRouteService" $root }}
+                port:
+                  number: {{ include "haliphron.apiRoutePort" $root }}
+                {{- else }}
                 name: {{ $full }}
                 port:
                   name: {{ $entry.name }}
+                {{- end }}
 {{- end }}
 {{- end }}
