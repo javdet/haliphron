@@ -61,16 +61,29 @@ Listeners in this mode:
 
 {{- if not (include "haliphron.kekEnabled" .) }}
 
-4. No key encryption key is configured, so managed secrets are unavailable and
-   the backend says so at startup. Secrets referenced from an external manager
-   keep working. To enable them:
+4. No key encryption key is configured (encryption.autoGenerate is false and
+   neither encryption.key nor encryption.existingSecret is set), so managed
+   secrets are unavailable and the backend says so at startup. Secrets
+   referenced from an external manager keep working. To enable them, upgrade
+   with encryption.autoGenerate=true and the chart generates one.
+{{- else if (include "haliphron.kekOwned" .) }}
 
-   kubectl -n {{ .Release.Namespace }} create secret generic haliphron-kek \
-     --from-literal=kek="$(openssl rand -base64 32)"
-   helm upgrade ... --set encryption.existingSecret=haliphron-kek
+4. Back up the key encryption key. It wraps every managed secret, it is
+   deliberately not in the database, and nothing can recover it:
 
-   Back the key up before you store anything under it. Losing it loses every
-   managed secret, because the key is deliberately not in the database.
+   kubectl -n {{ .Release.Namespace }} get secret {{ include "haliphron.kekSecretName" . }} \
+     -o jsonpath='{.data.kek}' | base64 -d; echo
+{{- if (include "haliphron.kekFresh" .) }}
+
+   This release generated it{{ if .Release.IsUpgrade }} — which on an upgrade means the previous key was not
+   found. If this installation already held managed secrets, they were wrapped
+   under a key that is now gone and they will fail to decrypt. Stop and check
+   before storing anything new{{ end }}.
+{{- end }}
+
+   `helm uninstall` leaves this Secret behind on purpose (resource-policy:
+   keep), so a reinstall under the same release name can still read the data.
+   Delete it by hand once the data under it is gone.
 {{- end }}
 
 {{- if .Values.ingress.cluster.enabled }}

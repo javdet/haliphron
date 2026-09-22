@@ -179,17 +179,45 @@ objectStorage:
 # -----------------------------------------------------------------------------
 #
 # It wraps the per-secret data keys and never enters the database: that is the
-# whole property, and it is why a database dump is not a credential leak. With
-# no key the backend starts and says so, referenced secrets keep working, and
-# managed secrets are unavailable.
+# whole property, and it is why a database dump is not a credential leak — and
+# why losing the key is unrecoverable rather than inconvenient. Back it up
+# before you store anything under it.
+#
+# The chart provides one by default. With all three settings below empty the
+# backend starts and says so, referenced secrets keep working, and managed
+# secrets are unavailable.
 #
 # The key is mounted as a file rather than passed as a variable, because a
 # variable is visible in `kubectl describe pod` and in every crash dump.
 encryption:
   keyId: default
-  # 32 bytes, base64 or hex. Anything else of 16 characters or more is treated
-  # as a passphrase and hashed into a key.
+
+  # Empty generates 32 random bytes on the first install, writes them to
+  # RELEASE-haliphron-kek, and keeps them: every later render reads that Secret
+  # back rather than inventing a second key. An installation therefore has
+  # managed secrets without anyone having run `openssl rand -base64 32` by
+  # hand — which is all that ceremony produced anyway.
+  #
+  # The read-back is a cluster lookup, so `helm template` and `--dry-run`
+  # cannot do it and render a key that is never installed. Harmless for a dry
+  # run, and fatal for an installation driven by rendered manifests: under
+  # Argo CD, Flux or `helm template | kubectl apply`, set `key` or
+  # `existingSecret` below and leave this off.
+  #
+  # The Secret is annotated helm.sh/resource-policy: keep, so `helm uninstall`
+  # does not take the only copy of the key with it. Delete it deliberately,
+  # once the data under it is gone or backed up.
+  autoGenerate: true
+
+  # Or state it. 32 bytes, base64 or hex; anything else of 16 characters or
+  # more is treated as a passphrase and hashed into a key. It ends up in the
+  # Secret above and in the release's own storage, which `helm get values` can
+  # read — existingSecret is the better answer wherever Secrets are managed
+  # outside Helm.
   key: ""
+
+  # Or point at one that already exists. The chart then writes no Secret and
+  # generates nothing, and this wins over both of the above.
   existingSecret: ""
   existingSecretKey: kek
 

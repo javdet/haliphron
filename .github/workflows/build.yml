@@ -26,7 +26,7 @@ permissions:
 jobs:
   verify:
     name: Verify generated artifacts
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     steps:
       - name: Checkout
         uses: actions/checkout@v5
@@ -36,7 +36,7 @@ jobs:
 
   fake-test:
     name: Test fakes
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     steps:
       - name: Checkout
         uses: actions/checkout@v5
@@ -48,7 +48,7 @@ jobs:
   # against fake/controlplane in process. No cluster, no database.
   image-test:
     name: Test agent entrypoint
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     steps:
       - name: Checkout
         uses: actions/checkout@v5
@@ -59,7 +59,7 @@ jobs:
   # There is no separate lint for the UI: tsc with noUnused* on is the lint.
   frontend-check:
     name: Check frontend
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     steps:
       - name: Checkout
         uses: actions/checkout@v5
@@ -72,7 +72,7 @@ jobs:
   # charts, which catches what lint does not.
   chart-lint:
     name: Lint charts
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     steps:
       - name: Checkout
         uses: actions/checkout@v5
@@ -93,7 +93,7 @@ jobs:
 
   push-images:
     name: Push ${{ matrix.name }}
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     needs: [verify, fake-test, image-test, frontend-check, chart-lint]
     if: github.event_name != 'pull_request'
     strategy:

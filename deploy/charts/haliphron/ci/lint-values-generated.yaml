@@ -1,0 +1,13 @@
+# The other half of the credential story: nothing handed to the chart as an
+# existing Secret, so the templates that write the DSN, generate the key
+# encryption key and generate the first admin token are all rendered. The file
+# above covers the existingSecret path; between them every branch of
+# secret.yaml, secret-kek.yaml and secret-bootstrap.yaml is exercised.
+#
+# `helm template` cannot do a cluster lookup, so the key rendered here is a
+# fresh random one. That is the point of the file — it is the first-install
+# path.
+agent:
+  image: ghcr.io/automagicops/haliphron-agent@sha256:0000000000000000000000000000000000000000000000000000000000000000
+database:
+  dsn: postgres://haliphron:lint@postgres:5432/haliphron?sslmode=disable

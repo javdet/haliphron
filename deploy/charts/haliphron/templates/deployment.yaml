@@ -26,6 +26,14 @@ spec:
         # A changed credential is a changed pod. Without this the Secret is
         # updated and every replica keeps using what it read at startup.
         checksum/credentials: {{ include (print $.Template.BasePath "/secret.yaml") . | sha256sum }}
+        {{- if (include "haliphron.kekOwned" .) }}
+        # Hashed from values rather than from the rendered template, for the
+        # reason the bootstrap token below is: re-rendering would call
+        # randBytes a second time. A generated key does not change, so what
+        # this covers is one an operator replaced by hand — and that one has
+        # to restart the pods, since the key is read once at startup.
+        checksum/kek: {{ printf "%s/%s" (.Values.encryption.key | toString) (.Values.encryption.existingSecret | toString) | sha256sum }}
+        {{- end }}
         {{- if (include "haliphron.bootstrapEnabled" .) }}
         # The bootstrap Secret is hashed from values rather than from its
         # rendered template, because rendering it a second time would call

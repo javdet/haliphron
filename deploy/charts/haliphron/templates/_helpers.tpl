@@ -168,14 +168,92 @@ failure rather than a guess, since guessing low silently truncates every log.
 {{- end -}}
 {{- end -}}
 
+{{/*
+The key encryption key.
+
+Three ways in, in this order: a Secret that already exists, a literal in
+values, and — failing both — one the chart generates on the first install and
+then leaves alone. The third is the default, because the alternative was an
+installation that could not use managed secrets until an operator had run
+`openssl` and a `kubectl create secret` by hand, and the value that ceremony
+produces is the same 32 random bytes `randBytes` produces here.
+
+Generated or literal, it lives in a Secret of its own rather than beside the
+DSN, for the reason the bootstrap token does: the lifetimes differ. A DSN can
+be rotated on a Tuesday; this key can never be rotated by being replaced,
+because every managed secret in the database is wrapped under it and the
+database does not hold a copy. That is also why the Secret carries
+resource-policy: keep — `helm uninstall` is not a reason to destroy the only
+copy of the key that makes the data readable.
+*/}}
 {{- define "haliphron.kekEnabled" -}}
-{{- if or .Values.encryption.key .Values.encryption.existingSecret -}}true{{- end -}}
+{{- if or .Values.encryption.existingSecret .Values.encryption.key .Values.encryption.autoGenerate -}}true{{- end -}}
 {{- end -}}
+
+{{/*
+Whether this release writes the Secret. It does not when the key was supplied
+through one that already exists: copying a credential into a second Secret
+makes this release's own storage one more place it can be read from.
+*/}}
+{{- define "haliphron.kekOwned" -}}
+{{- if and (include "haliphron.kekEnabled" .) (not .Values.encryption.existingSecret) -}}true{{- end -}}
+{{- end -}}
+
 {{- define "haliphron.kekSecretName" -}}
-{{- default (include "haliphron.secretName" .) .Values.encryption.existingSecret -}}
+{{- default (printf "%s-kek" (include "haliphron.fullname" .)) .Values.encryption.existingSecret -}}
 {{- end -}}
 {{- define "haliphron.kekSecretKey" -}}
 {{- if .Values.encryption.existingSecret -}}{{ .Values.encryption.existingSecretKey }}{{- else -}}kek{{- end -}}
+{{- end -}}
+
+{{/*
+The key itself: what values state, what this release wrote last time, what an
+older release of this chart wrote into the credentials Secret — and only then
+32 new random bytes.
+
+The middle two are the whole point. A key that changed on `helm upgrade` would
+not rotate anything; it would leave every managed secret in the database
+wrapped under bytes nobody has any more. `randBytes 32` is base64 of 32 bytes,
+which is what `openssl rand -base64 32` prints and what the backend's decoder
+takes as a key rather than as a passphrase.
+
+The read-back is a cluster lookup, and `helm template` and `--dry-run` do not
+do those. They render a key that is never installed, which is harmless — and
+it is why an installation driven by rendered manifests (Argo CD, Flux,
+`helm template | kubectl apply`) must set encryption.key or
+encryption.existingSecret instead of leaving this to autoGenerate: every
+render would otherwise produce a different key and the last one would win.
+*/}}
+{{- define "haliphron.kekValue" -}}
+{{- if .Values.encryption.key -}}
+{{- .Values.encryption.key -}}
+{{- else -}}
+{{- $mine := lookup "v1" "Secret" .Release.Namespace (include "haliphron.kekSecretName" .) -}}
+{{- $legacy := lookup "v1" "Secret" .Release.Namespace (include "haliphron.secretName" .) -}}
+{{- if and $mine $mine.data (index $mine.data "kek") -}}
+{{- index $mine.data "kek" | b64dec -}}
+{{- else if and $legacy $legacy.data (index $legacy.data "kek") -}}
+{{/* Charts before the split wrote the key into the credentials Secret. */}}
+{{- index $legacy.data "kek" | b64dec -}}
+{{- else -}}
+{{- randBytes 32 -}}
+{{- end -}}
+{{- end -}}
+{{- end -}}
+
+{{/*
+Whether this render invented the key rather than finding one. NOTES says so,
+because an upgrade that reaches this state has just replaced a key that data
+may be wrapped under.
+*/}}
+{{- define "haliphron.kekFresh" -}}
+{{- if (include "haliphron.kekOwned" .) -}}
+{{- if not .Values.encryption.key -}}
+{{- $mine := lookup "v1" "Secret" .Release.Namespace (include "haliphron.kekSecretName" .) -}}
+{{- $legacy := lookup "v1" "Secret" .Release.Namespace (include "haliphron.secretName" .) -}}
+{{- if not (or (and $mine $mine.data (index $mine.data "kek")) (and $legacy $legacy.data (index $legacy.data "kek"))) -}}true{{- end -}}
+{{- end -}}
+{{- end -}}
 {{- end -}}
 
 {{/*
@@ -331,6 +409,24 @@ CrashLoopBackOff whose reason is one line in a log nobody is watching yet.
 */}}
 {{- if and .Values.bootstrapToken.value (lt (len .Values.bootstrapToken.value) 16) -}}
 {{- fail (printf "bootstrapToken.value is %d characters; the backend refuses anything under 16, because this is an admin credential reachable over the network. Leave it empty to have one generated." (len .Values.bootstrapToken.value)) -}}
+{{- end -}}
+
+{{/*
+Same contradiction, on the key encryption key: the pods read the existing
+Secret, so the literal would be written into a Secret nothing mounts. Worse
+than wasted — an operator who believes the key is the one they typed backs up
+the wrong value.
+*/}}
+{{- if and .Values.encryption.key .Values.encryption.existingSecret -}}
+{{- fail "encryption.key and encryption.existingSecret are both set; the pods read the existing Secret, so the key would be written and never used. Keep one." -}}
+{{- end -}}
+{{/*
+The backend derives a key from anything of 16 characters or more that is not
+32 bytes of base64 or hex, and refuses what is shorter. Refused here instead,
+where the message names the value.
+*/}}
+{{- if and .Values.encryption.key (lt (len .Values.encryption.key) 16) -}}
+{{- fail (printf "encryption.key is %d characters; the backend refuses anything under 16. Leave it empty to have 32 random bytes generated, or supply `openssl rand -base64 32`." (len .Values.encryption.key)) -}}
 {{- end -}}
 
 {{- if and (not .Values.database.dsn) (not .Values.database.existingSecret) (not .Values.postgresql.enabled) -}}

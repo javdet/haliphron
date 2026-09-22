@@ -44,8 +44,27 @@ is Debian slim, because the agent CLIs need Node and a real userland.
 
 ## 1. The control plane
 
-Credentials go in first, as Secrets the chart references rather than as values
-it copies:
+One command, and the only credential you have to produce is the one only you
+know — the DSN of your database:
+
+```sh
+helm install haliphron deploy/charts/haliphron \
+  --namespace haliphron --create-namespace \
+  --set database.dsn='postgres://haliphron:...@postgres:5432/haliphron?sslmode=require' \
+  --set agent.image=ghcr.io/automagicops/haliphron-agent@sha256:... \
+  --set ingress.api.enabled=true --set ingress.api.host=haliphron.example.com \
+  --set ingress.cluster.enabled=true --set ingress.cluster.host=clusters.haliphron.example.com
+```
+
+The defaults carry the rest: relay artifact mode on a 50 Gi PVC, no object
+storage, no MinIO, the frontend off. The two credentials the installation needs
+and nobody has to invent — the first admin token and the key encryption key —
+are generated into Secrets of their own on this install and left alone by every
+later `helm upgrade`. See below for both.
+
+Everything given as a value ends up in a Secret the chart writes *and* in the
+release's own storage, which `helm get values` reads. Where that is not
+acceptable, hand the chart Secrets instead and it copies nothing:
 
 ```sh
 kubectl create namespace haliphron
@@ -56,16 +75,9 @@ kubectl -n haliphron create secret generic haliphron-database \
 kubectl -n haliphron create secret generic haliphron-object-storage \
   --from-literal=accessKey=... --from-literal=secretKey=...
 
-# The key that wraps every managed secret. It never enters the database, which
-# is what makes a database dump not a credential leak — and what makes losing
-# this key unrecoverable. Back it up before you store anything under it.
 kubectl -n haliphron create secret generic haliphron-kek \
   --from-literal=kek="$(openssl rand -base64 32)"
-```
 
-Then:
-
-```sh
 helm install haliphron deploy/charts/haliphron \
   --namespace haliphron \
   --set database.existingSecret=haliphron-database \
@@ -75,6 +87,13 @@ helm install haliphron deploy/charts/haliphron \
   --set ingress.api.enabled=true --set ingress.api.host=haliphron.example.com \
   --set ingress.cluster.enabled=true --set ingress.cluster.host=clusters.haliphron.example.com
 ```
+
+An `existingSecret` wins over the corresponding value wherever both are set,
+except for the two contradictions the chart refuses outright rather than
+resolve: `encryption.key` with `encryption.existingSecret`, and
+`bootstrapToken.value` with `bootstrapToken.existingSecret`. Both would write a
+credential that nothing then reads, which is worse than wasted — it is the
+wrong value in your password manager.
 
 The first start applies the schema before it binds a port — every replica calls
 the migration, and an advisory lock makes a rollout wait for its schema instead
@@ -128,6 +147,39 @@ Two things this costs you that an Ingress did not:
 Enabling both for one entrypoint is allowed — it is the normal state
 mid-migration — and the install notes say so, because otherwise it is a service
 reachable two ways with two sets of timeouts and two TLS configurations.
+
+### The key encryption key
+
+It wraps the data key of every managed secret, and it is deliberately not in
+the database: that is what makes a database dump not a credential leak, and it
+is what makes losing this key unrecoverable rather than inconvenient.
+
+The chart generates one on the first install — 32 random bytes into
+`RELEASE-haliphron-kek` — because the alternative was an installation that
+could not store a model key until an operator had run `openssl rand -base64 32`
+by hand, and those are the same 32 bytes. Read it out and put it somewhere that
+is not this cluster:
+
+```sh
+kubectl -n haliphron get secret haliphron-kek -o jsonpath='{.data.kek}' | base64 -d; echo
+```
+
+- **It is generated once.** Every later render reads the Secret back rather
+  than inventing a second key, so `helm upgrade` does not rotate it. A rotation
+  here would not re-wrap anything; it would leave every managed secret in the
+  database wrapped under bytes nobody has.
+- **`helm uninstall` leaves it behind**, by `helm.sh/resource-policy: keep`. A
+  reinstall under the same release name adopts it and the data is readable
+  again. Deleting it is a `kubectl delete secret` typed on purpose.
+- **GitOps needs it stated.** The read-back is a cluster lookup, and
+  `helm template` cannot do one. Under Argo CD, Flux or
+  `helm template | kubectl apply`, every render would produce a different key
+  and the last one would win — so set `encryption.existingSecret` (or
+  `encryption.key`) there and leave `encryption.autoGenerate` off.
+
+`--set encryption.autoGenerate=false` with neither of the other two installs no
+key at all. The backend then starts, says so, and serves secrets referenced
+from an external manager; managed secrets are unavailable until a key exists.
 
 ### The first admin token
 

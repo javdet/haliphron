@@ -21,6 +21,10 @@ CHART_CP           = deploy/charts/haliphron
 CHART_RT           = deploy/charts/haliphron-runtime
 PG_CONTAINER   = haliphron-contract-pg
 PG_NETWORK     = haliphron-contract-net
+# Every target below starts by reaching a registry, and a registry that is
+# briefly unreachable is not a broken build. hack/pull.sh is a no-op once the
+# image is local; see its header for what it does when it is not.
+PULL           = sh hack/pull.sh
 DOCKER_RUN     = docker run --rm -e GOMAXPROCS=2 \
                  -v haliphron-gomod:/go/pkg/mod \
                  -v haliphron-gocache:/root/.cache/go-build \
@@ -31,21 +35,35 @@ DOCKER_RUN     = docker run --rm -e GOMAXPROCS=2 \
 .PHONY: generate test db-test fake-test image-test image-build controller-test controller-build backend-test backend-build verify
 .PHONY: backend-image controller-image frontend-image images chart-gen chart-deps chart-lint chart-template chart-package chart-verify
 .PHONY: frontend-deps frontend-check frontend-build frontend-dev
+.PHONY: pull-go pull-node pull-pg
+
+## pull-go: the Go toolchain image, retrying a registry that is only
+##          intermittently reachable
+pull-go:
+	@$(PULL) $(GO_IMAGE)
+
+## pull-node: the UI toolchain image
+pull-node:
+	@$(PULL) $(NODE_IMAGE)
+
+## pull-pg: the PostgreSQL image the store suites run against
+pull-pg:
+	@$(PULL) $(PG_IMAGE)
 
 ## generate: deepcopy functions and the AgentRun CRD, from the Go types
-generate:
+generate: pull-go
 	$(DOCKER_RUN) sh /w/hack/gen.sh
 
 ## test: contract tests, including the CRD against a real API server
-test:
+test: pull-go
 	$(DOCKER_RUN) sh /w/hack/test.sh
 
 ## fake-test: the fakes' own contract tests, under the race detector
-fake-test:
+fake-test: pull-go
 	$(DOCKER_RUN) sh -c 'cd /w/fake && go test -count=1 -race ./...'
 
 ## image-test: the agent image entrypoint, against FakeControlPlane
-image-test:
+image-test: pull-go
 	$(DOCKER_RUN) sh -c 'cd /w/image && go test -count=1 -race ./... && cd /w/test/image && go test -count=1 -race ./...'
 
 ## image-build: the agent image itself
@@ -53,16 +71,16 @@ image-build:
 	docker build -f image/Dockerfile -t $(AGENT_IMAGE) --build-arg VERSION=$(AGENT_VERSION) .
 
 ## controller-test: the controller's own tests, and the contract tests against FakeBackend
-controller-test:
+controller-test: pull-go
 	$(DOCKER_RUN) sh /w/hack/controllertest.sh
 
 ## controller-build: the controller binary
-controller-build:
+controller-build: pull-go
 	$(DOCKER_RUN) sh -c 'cd /w/controller && CGO_ENABLED=0 go build -ldflags "-X github.com/automagicops/haliphron/controller/version.Version=$(CONTROLLER_VERSION)" -o /w/bin/haliphron-controller ./cmd/haliphron-controller'
 
 ## backend-test: the backend's tests, and the contract tests against FakeController
 ##               and a real PostgreSQL
-backend-test:
+backend-test: pull-go pull-pg
 	@docker network create $(PG_NETWORK) 2>/dev/null || true
 	@docker rm -f $(PG_CONTAINER) >/dev/null 2>&1 || true
 	docker run -d --name $(PG_CONTAINER) --network $(PG_NETWORK) \
@@ -75,11 +93,11 @@ backend-test:
 	  -v $(PWD):/w -w /w $(GO_IMAGE) sh /w/hack/backendtest.sh
 
 ## backend-build: the control plane binary
-backend-build:
+backend-build: pull-go
 	$(DOCKER_RUN) sh -c 'cd /w/backend && CGO_ENABLED=0 go build -ldflags "-X github.com/automagicops/haliphron/backend/version.Version=$(BACKEND_VERSION)" -o /w/bin/haliphron-backend ./cmd/haliphron-backend'
 
 ## db-test: store contract tests against a real PostgreSQL
-db-test:
+db-test: pull-go pull-pg
 	@docker network create $(PG_NETWORK) 2>/dev/null || true
 	@docker rm -f $(PG_CONTAINER) >/dev/null 2>&1 || true
 	docker run -d --name $(PG_CONTAINER) --network $(PG_NETWORK) \
@@ -92,7 +110,7 @@ db-test:
 	  -v $(PWD):/w -w /w $(GO_IMAGE) sh /w/hack/dbtest.sh
 
 ## frontend-deps: install the UI's dependencies from the lockfile
-frontend-deps:
+frontend-deps: pull-node
 	$(NPM_RUN) npm ci
 
 ## frontend-check: typecheck the UI. There is no separate lint step: the
@@ -138,11 +156,13 @@ chart-deps:
 ## chart-lint: both charts, against the values in each chart's ci/
 chart-lint: chart-gen chart-deps
 	$(HELM) lint $(CHART_CP) -f $(CHART_CP)/ci/lint-values.yaml
+	$(HELM) lint $(CHART_CP) -f $(CHART_CP)/ci/lint-values-generated.yaml
 	$(HELM) lint $(CHART_RT) -f $(CHART_RT)/ci/lint-values.yaml
 
 ## chart-template: render both charts, which catches what lint does not
 chart-template: chart-gen chart-deps
 	$(HELM) template ci $(CHART_CP) -f $(CHART_CP)/ci/lint-values.yaml >/dev/null
+	$(HELM) template ci $(CHART_CP) -f $(CHART_CP)/ci/lint-values-generated.yaml >/dev/null
 	$(HELM) template ci $(CHART_RT) -f $(CHART_RT)/ci/lint-values.yaml >/dev/null
 
 ## chart-package: the two .tgz, into dist/
