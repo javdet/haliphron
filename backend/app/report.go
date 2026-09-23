@@ -37,6 +37,10 @@ func (s *Service) Heartbeat(ctx context.Context, cluster store.Cluster,
 		}
 	}
 
+	if err := checkCapacity(req.CapacitySlots); err != nil {
+		return clusterv1.HeartbeatResponse{}, err
+	}
+
 	facts := store.ClusterFacts{
 		FreeSlots:         req.FreeSlots,
 		CapacitySlots:     req.CapacitySlots,

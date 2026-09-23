@@ -14,6 +14,13 @@ const (
 	MaxHeartbeatRuns = 500     // the cluster capacity ceiling, with room
 	MaxSummaryBytes  = 64 << 10
 
+	// MaxCapacitySlots bounds what a cluster may declare. capacitySlots is
+	// the backend's only ceiling on how much of the queue one cluster holds —
+	// freeSlots is the controller's word and is re-sent on every poll — so an
+	// unbounded declaration is an unbounded drain. Below MaxHeartbeatRuns, so
+	// a full cluster still fits in one heartbeat.
+	MaxCapacitySlots = 256
+
 	// MaxArtifactBytes bounds one relayed object, and is the one limit here
 	// that is not about a JSON body: an artifact is the body. Generous against
 	// any single log or result, and finite, because relay mode puts the

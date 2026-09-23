@@ -43,7 +43,8 @@ cluster:
 
   # How many runs may be in flight here at once. It is a promise to the
   # control plane, not a limit the cluster enforces — that is what the agents'
-  # ResourceQuota is for.
+  # ResourceQuota is for. At most 256: the control plane refuses a larger
+  # declaration, and the controller refuses to start with one.
   capacitySlots: 8
 
   # The runtimes this cluster will accept work for.

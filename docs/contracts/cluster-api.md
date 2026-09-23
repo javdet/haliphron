@@ -389,7 +389,8 @@ outside the bounds of v1.
 | `prompt` | 512 KiB | it has to fit in the per-run Secret beside three credentials, and a Secret is capped at 1 MiB across all its keys |
 | `reports[]` | 100 | the ingest batch |
 | `runs[]` in the heartbeat | 500 | the cluster capacity ceiling with room to spare |
-| leases per poll | `min(freeSlots, 10)` | the response size and the volume of secrets in one body |
+| `capacitySlots` | 256 | declared at registration and in the heartbeat; a larger value is a 400 `fatal`. Below the heartbeat's `runs[]` limit, so a full cluster fits in one heartbeat |
+| leases per poll | `min(freeSlots, 10, capacitySlots − held)` | the response size and the volume of secrets in one body; `held` is the backend's own count of the cluster's `Leased`, `Dispatched`, `Starting` and `Running` runs. `freeSlots` is the controller's word and the controller re-polls at once after any poll that returned work, so without the third term the cap bounds one answer and not how much of the queue one cluster takes. An undeclared `capacitySlots` (0) counts as 256 |
 | `waitSeconds` | ≤ 30 | the ingress `proxy_read_timeout` must be **greater** |
 | JWT TTL | ≤ 300 s | |
 | `summary` | 64 KiB | duplicated in `runs.result_summary` |

@@ -108,6 +108,67 @@ func TestConcurrentPollsNeverHandOutTheSameRunTwice(t *testing.T) {
 	}
 }
 
+// freeSlots is the controller's word and the controller re-polls at once after
+// any poll that returned work, so the per-poll cap alone bounds one answer and
+// not the total. The declared capacity, less what the backend already counts
+// as held there, is the ceiling the backend applies on its own.
+func TestAClusterIsNeverHandedMoreThanItsDeclaredCapacity(t *testing.T) {
+	h := newHarness(t)
+	p := newProbe(t, h, "east", func(r *clusterv1.RegisterRequest) { r.CapacitySlots = 3 })
+	for i := 0; i < 6; i++ {
+		h.Submit()
+	}
+
+	first, _ := p.Lease(10, 1)
+	if len(first) != 3 {
+		t.Fatalf("the first poll handed out %d runs to a cluster declaring 3", len(first))
+	}
+	again, status := p.Lease(10, 1)
+	if status != http.StatusNoContent || len(again) != 0 {
+		t.Errorf("a full cluster was handed %d more runs (status %d)", len(again), status)
+	}
+
+	// An acknowledged run still occupies its slot: the ceiling counts what
+	// the cluster holds, not only what it has yet to confirm.
+	if _, problem := p.Ack(first[0].RunID, first[0].Epoch); problem != nil {
+		t.Fatalf("ack: %+v", problem)
+	}
+	if again, _ := p.Lease(10, 1); len(again) != 0 {
+		t.Errorf("an acknowledged run freed its slot: %d more runs handed out", len(again))
+	}
+}
+
+// The ceiling holds across overlapping polls. Two headroom checks that both
+// read before either leased would each hand out the full headroom.
+func TestConcurrentPollsTogetherStayWithinTheDeclaredCapacity(t *testing.T) {
+	h := newHarness(t)
+	p := newProbe(t, h, "east", func(r *clusterv1.RegisterRequest) { r.CapacitySlots = 3 })
+	for i := 0; i < 8; i++ {
+		h.Submit()
+	}
+
+	var (
+		mu    sync.Mutex
+		total int
+		wg    sync.WaitGroup
+	)
+	for i := 0; i < 4; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			leases, _ := p.Lease(10, 1)
+			mu.Lock()
+			total += len(leases)
+			mu.Unlock()
+		}()
+	}
+	wg.Wait()
+
+	if total != 3 {
+		t.Errorf("four overlapping polls handed out %d runs in total to a cluster declaring 3", total)
+	}
+}
+
 // The first lease hands out epoch 1. It follows from the epoch rising on the
 // revocation of ownership rather than on issuance: a run that was never
 // offered to anyone has no ownership to fence.

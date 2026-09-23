@@ -221,3 +221,32 @@ func TestTheControllerVersionHeaderIsMandatory(t *testing.T) {
 		t.Errorf("code = %s, want %s", problem.Code, clusterv1.CodeInvalidRequest)
 	}
 }
+
+// capacitySlots is the backend's ceiling on how much of the queue one cluster
+// takes, so an unbounded declaration is an unbounded drain. It is refused, not
+// clamped: a controller configured past the limit would otherwise run
+// believing it holds more than it is ever given.
+func TestACapacityAboveTheMaximumIsRefusedAtRegistration(t *testing.T) {
+	h := newHarness(t)
+
+	pub, _, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatalf("generate key: %v", err)
+	}
+	_, err = h.App.Register(context.Background(), h.BootstrapToken(), clusterv1.RegisterRequest{
+		Name: "east",
+		PublicKey: clusterv1.PublicKey{
+			KID: "kid-east", Alg: clusterv1.KeyAlgorithm,
+			Key: base64.RawURLEncoding.EncodeToString(pub),
+		},
+		ControllerVersion: "1.0.0", AgentNamespace: "haliphron-agents",
+		CapacitySlots: clusterv1.MaxCapacitySlots + 1,
+	})
+	problem, ok := err.(*clusterv1.Problem)
+	if !ok {
+		t.Fatalf("expected a Problem, got %v", err)
+	}
+	if problem.Code != clusterv1.CodeInvalidRequest || problem.Action != clusterv1.ActionFatal {
+		t.Errorf("problem = %s/%s, want %s/fatal", problem.Code, problem.Action, clusterv1.CodeInvalidRequest)
+	}
+}

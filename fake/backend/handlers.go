@@ -44,6 +44,10 @@ func (b *Backend) handleRegister(w http.ResponseWriter, r *http.Request) {
 		b.badRequest(w, "name and agentNamespace are required")
 		return
 	}
+	if req.CapacitySlots > clusterv1.MaxCapacitySlots {
+		b.badRequest(w, fmt.Sprintf("capacitySlots exceeds the maximum of %d", clusterv1.MaxCapacitySlots))
+		return
+	}
 
 	b.mu.Lock()
 	defer b.mu.Unlock()
@@ -143,7 +147,7 @@ func (b *Backend) handleLeases(w http.ResponseWriter, r *http.Request) {
 		wait = b.timings.MaxWaitSeconds
 	}
 	c.freeSlots = req.FreeSlots
-	if req.CapacitySlots > 0 {
+	if req.CapacitySlots > 0 && req.CapacitySlots <= clusterv1.MaxCapacitySlots {
 		c.capacitySlots = req.CapacitySlots
 	}
 	b.mu.Unlock()
@@ -160,6 +164,9 @@ func (b *Backend) handleLeases(w http.ResponseWriter, r *http.Request) {
 		limit := int(req.FreeSlots)
 		if max := int(b.timings.MaxLeasesPerPoll); limit > max {
 			limit = max
+		}
+		if headroom := b.headroom(c); limit > headroom {
+			limit = headroom
 		}
 		leases := b.issue(c, limit, req.Runtimes)
 		b.mu.Unlock()
@@ -348,6 +355,10 @@ func (b *Backend) handleHeartbeat(w http.ResponseWriter, r *http.Request) {
 	}
 	if len(req.Runs) > clusterv1.MaxHeartbeatRuns {
 		b.badRequest(w, "runs exceeds the maximum of 500")
+		return
+	}
+	if req.CapacitySlots > clusterv1.MaxCapacitySlots {
+		b.badRequest(w, fmt.Sprintf("capacitySlots exceeds the maximum of %d", clusterv1.MaxCapacitySlots))
 		return
 	}
 

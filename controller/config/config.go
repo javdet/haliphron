@@ -125,12 +125,19 @@ func Load(getenv func(string) string) (Config, error) {
 		MetricsAddr:     orDefault(getenv(EnvMetricsAddr), ":9090"),
 		HealthAddr:      orDefault(getenv(EnvHealthAddr), ":8081"),
 		LogLevel:        orDefault(getenv(EnvLogLevel), "info"),
-		CapacitySlots:   int32(intOr(getenv(EnvCapacitySlots), 8)),
 		GraceSeconds:    int64(intOr(getenv(EnvGraceSeconds), 60)),
 		DeadlineSlack:   int64(intOr(getenv(EnvDeadlineSlack), 600)),
 		StartupDeadline: time.Duration(intOr(getenv(EnvStartupDeadline), 600)) * time.Second,
 		PreflightJob:    boolOr(getenv(EnvPreflightJob), true),
 	}
+	// Range-checked before the conversion: int32 of an oversized value wraps,
+	// and a wrapped capacity is a plausible-looking number nobody set.
+	capacity := intOr(getenv(EnvCapacitySlots), 8)
+	if capacity > clusterv1.MaxCapacitySlots {
+		return Config{}, fmt.Errorf("config: %s is %d, the maximum is %d",
+			EnvCapacitySlots, capacity, clusterv1.MaxCapacitySlots)
+	}
+	c.CapacitySlots = int32(capacity)
 	c.BootstrapToken = strings.TrimSpace(getenv(EnvBootstrapToken))
 	if path := getenv(EnvBootstrapTokenFile); path != "" {
 		raw, err := os.ReadFile(path)

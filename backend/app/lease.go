@@ -41,6 +41,9 @@ func (s *Service) Register(ctx context.Context, token string, req clusterv1.Regi
 			Code:   clusterv1.CodeInvalidRequest, Action: clusterv1.ActionFatal,
 		}
 	}
+	if err := checkCapacity(req.CapacitySlots); err != nil {
+		return clusterv1.RegisterResponse{}, err
+	}
 	if req.Name == "" || req.AgentNamespace == "" || req.PublicKey.KID == "" {
 		return clusterv1.RegisterResponse{}, &clusterv1.Problem{
 			Title: "invalid registration", Status: 400,
@@ -212,6 +215,21 @@ func (s *Service) issue(ctx context.Context, cluster store.Cluster, runtimes []r
 	// is the line where a control plane usually leaks them.
 	s.log.Info("leases issued", "cluster", cluster.ID, "count", len(out))
 	return out, nil
+}
+
+// checkCapacity refuses a declared capacity above the contract ceiling. It is
+// refused rather than clamped for the same reason an oversized heartbeat is: a
+// controller configured past the limit is misconfigured, and a clamp would let
+// it run believing it holds more than it is ever given.
+func checkCapacity(slots int32) error {
+	if slots > clusterv1.MaxCapacitySlots {
+		return &clusterv1.Problem{
+			Title: "capacity above the maximum", Status: 400,
+			Detail: fmt.Sprintf("capacitySlots is %d, the maximum is %d", slots, clusterv1.MaxCapacitySlots),
+			Code:   clusterv1.CodeInvalidRequest, Action: clusterv1.ActionFatal,
+		}
+	}
+	return nil
 }
 
 // effectiveRuntimes intersects what the poll asked for with what the cluster

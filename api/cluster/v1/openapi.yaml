@@ -766,6 +766,7 @@ components:
           type: integer
           format: int32
           minimum: 0
+          maximum: 256
           description: |
             How many concurrent runs the cluster agrees to hold. The upper bound
             is set by the agent namespace's ResourceQuota; this is a value
@@ -872,7 +873,7 @@ components:
           minimum: 0
           default: 30
           description: How long to hold the connection when there is no work. Clamped to `maxWaitSeconds`.
-        capacitySlots: {type: integer, format: int32, minimum: 0, description: An update to the declared capacity}
+        capacitySlots: {type: integer, format: int32, minimum: 0, maximum: 256, description: An update to the declared capacity}
 
     LeaseResponse:
       type: object
@@ -1425,7 +1426,7 @@ components:
       required: [freeSlots, reportComplete, runs]
       properties:
         freeSlots: {type: integer, format: int32, minimum: 0}
-        capacitySlots: {type: integer, format: int32, minimum: 0}
+        capacitySlots: {type: integer, format: int32, minimum: 0, maximum: 256}
         reportComplete:
           type: boolean
           description: |

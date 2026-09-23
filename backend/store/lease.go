@@ -106,6 +106,17 @@ func (s *Store) Lease(ctx context.Context, clusterID runv1.ULID, runtimes []runv
 
 	var out []Leased
 	err := s.inTx(ctx, func(tx *sql.Tx) error {
+		headroom, err := leaseHeadroom(ctx, tx, clusterID)
+		if err != nil {
+			return err
+		}
+		if limit > headroom {
+			limit = headroom
+		}
+		if limit <= 0 {
+			return nil
+		}
+
 		rows, err := tx.QueryContext(ctx, db.Query("lease"),
 			clusterID, agentTypeArray(runtimes), limit,
 			ackTimeout.Seconds(), leaseTTL.Seconds())
@@ -164,6 +175,57 @@ func (s *Store) Lease(ctx context.Context, clusterID runv1.ULID, runtimes []runv
 		return nil
 	})
 	return out, err
+}
+
+// leaseLockClass namespaces the per-cluster advisory lock taken by Lease. The
+// two-key form is used so it cannot collide with the migration lock, which
+// takes the single-bigint form: PostgreSQL keeps the two key spaces apart.
+const leaseLockClass = 0x4c45 // "LE"
+
+// leaseHeadroom is how many more runs the cluster may hold: its declared
+// capacity less what it already holds. freeSlots is the controller's word and
+// arrives fresh on every poll, and a controller re-polls at once whenever a
+// poll returned work, so without this the per-poll cap bounds a single answer
+// and not the total — one cluster could take the queue ten at a time.
+//
+// Two polls from one cluster do overlap (a controller reconnects before its
+// previous long poll has unwound), and two headroom checks that both read
+// before either leased would each hand out the full headroom. The advisory
+// lock serialises issuance per cluster for the length of this transaction,
+// and the count is a separate statement after it, so under READ COMMITTED it
+// sees what the other poll committed. A row lock on clusters would do the same
+// and also stall every heartbeat behind a lease.
+//
+// Unknown is not counted: it is work nobody can vouch for, and counting it
+// would let a handful of lost runs starve a cluster until a human resolved
+// them. The controller's freeSlots still accounts for anything that is in fact
+// running. An undeclared capacity (0, from a controller that sent none) is
+// read as the contract ceiling rather than as no room at all.
+func leaseHeadroom(ctx context.Context, tx *sql.Tx, clusterID runv1.ULID) (int, error) {
+	if _, err := tx.ExecContext(ctx,
+		`SELECT pg_advisory_xact_lock($1::integer, hashtext($2::text))`,
+		leaseLockClass, clusterID); err != nil {
+		return 0, fmt.Errorf("store: lock issuance for %s: %w", clusterID, err)
+	}
+
+	var capacity, active int
+	err := tx.QueryRowContext(ctx, `
+		SELECT c.capacity_slots,
+		       (SELECT count(*) FROM runs r
+		         WHERE r.cluster_id = c.id
+		           AND r.status IN ('Leased', 'Dispatched', 'Starting', 'Running'))
+		FROM clusters c
+		WHERE c.id = $1`, clusterID).Scan(&capacity, &active)
+	if errors.Is(err, sql.ErrNoRows) {
+		return 0, nil
+	}
+	if err != nil {
+		return 0, fmt.Errorf("store: lease headroom for %s: %w", clusterID, err)
+	}
+	if capacity <= 0 || capacity > clusterv1.MaxCapacitySlots {
+		capacity = clusterv1.MaxCapacitySlots
+	}
+	return capacity - active, nil
 }
 
 // AckOutcome is the state after an acknowledgement.

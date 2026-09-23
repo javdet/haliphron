@@ -273,6 +273,9 @@ func TestLeaseWakesTheWaitingPoll(t *testing.T) {
 func TestConcurrentPollsNeverHandOutTheSameRunTwice(t *testing.T) {
 	t.Parallel()
 	b, c := start(t)
+	// Room for all twenty: this is about disjointness, not the capacity
+	// ceiling, which would otherwise stop issuance at the registered ten.
+	c.heartbeat(clusterv1.HeartbeatRequest{FreeSlots: 20, CapacitySlots: 20, Runs: []clusterv1.RunObservation{}})
 	for i := 0; i < 20; i++ {
 		b.Enqueue(sampleSpec())
 	}
@@ -321,6 +324,40 @@ func TestLeaseIsCappedByFreeSlotsAndByThePollCeiling(t *testing.T) {
 	}
 	if leases, _ = c.poll(1); len(leases) != 1 {
 		t.Fatalf("want 1 lease (free slots), got %d", len(leases))
+	}
+}
+
+// The controller re-polls at once after any poll that returned work, so
+// freeSlots and the per-poll ceiling bound one answer and not the total. The
+// declared capacity less what the cluster already holds bounds the total.
+func TestLeaseIsCappedByTheDeclaredCapacityAcrossPolls(t *testing.T) {
+	t.Parallel()
+	b, c := start(t) // registers with capacitySlots 10
+	for i := 0; i < 15; i++ {
+		b.Enqueue(sampleSpec())
+	}
+
+	total := 0
+	for i := 0; i < 3; i++ {
+		leases, _ := c.poll(10)
+		total += len(leases)
+	}
+	if total != 10 {
+		t.Fatalf("a cluster declaring 10 slots was handed %d runs over three polls", total)
+	}
+}
+
+func TestACapacityAboveTheMaximumIsRefused(t *testing.T) {
+	t.Parallel()
+	_, c := start(t)
+	resp := c.post("/clusters/"+string(c.cluster)+"/heartbeat", c.token(), clusterv1.HeartbeatRequest{
+		CapacitySlots: clusterv1.MaxCapacitySlots + 1, Runs: []clusterv1.RunObservation{},
+	})
+	if resp.status != http.StatusBadRequest {
+		t.Fatalf("status %d, want 400: an unbounded declaration is an unbounded drain", resp.status)
+	}
+	if p := resp.problem(t); p.Action != clusterv1.ActionFatal {
+		t.Fatalf("action = %s, want fatal", p.Action)
 	}
 }
 

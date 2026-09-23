@@ -107,6 +107,29 @@ func (b *Backend) queued(id runv1.ULID) bool {
 // issue hands work to a cluster. Called under the lock from the lease handler,
 // which is what makes "two pollers never receive the same run" true here for
 // the same reason FOR UPDATE SKIP LOCKED makes it true in the real backend.
+// headroom is the declared capacity less what the cluster already holds. The
+// per-poll cap bounds one answer; this bounds the total, because a controller
+// re-polls at once after any poll that returned work. Unknown is not counted,
+// and an undeclared capacity reads as the contract ceiling — as in the real
+// backend.
+func (b *Backend) headroom(c *cluster) int {
+	capacity := int(c.capacitySlots)
+	if capacity <= 0 || capacity > clusterv1.MaxCapacitySlots {
+		capacity = clusterv1.MaxCapacitySlots
+	}
+	for _, r := range b.runs {
+		if r.holder != c.id {
+			continue
+		}
+		switch r.status {
+		case clusterv1.StatusLeased, clusterv1.StatusDispatched,
+			clusterv1.StatusStarting, clusterv1.StatusRunning:
+			capacity--
+		}
+	}
+	return capacity
+}
+
 func (b *Backend) issue(c *cluster, limit int, runtimes []runv1.AgentType) []clusterv1.Lease {
 	if limit <= 0 || c.quotaExhausted {
 		return nil
