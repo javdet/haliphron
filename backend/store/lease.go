@@ -340,13 +340,25 @@ type ExpiredAck struct {
 	RunID     runv1.ULID
 	ClusterID runv1.ULID
 	Epoch     int64
+	// Status is Queued, or Failed when this expiry reached the ceiling.
+	Status string
+	// Expiries is how many leases of this run have now expired unacknowledged.
+	Expiries int
 }
+
+// Exhausted reports that this expiry ended the run rather than requeueing it.
+func (e ExpiredAck) Exhausted() bool { return e.Status == clusterv1.StatusFailed }
 
 // ExpireAcks returns work to the queue. Before the ack the work is guaranteed
 // not to have started — that is the whole reason this deadline is separate and
 // short — so it can be reassigned immediately and safely.
-func (s *Store) ExpireAcks(ctx context.Context) ([]ExpiredAck, error) {
-	rows, err := s.db.QueryContext(ctx, db.Query("expire_ack"))
+//
+// Up to maxExpiries times. The expiry that reaches it fails the run with
+// AckTimeoutExhausted: an ack timeout keeps the assignment and excludes
+// nothing, so without a ceiling a controller that cannot deliver its ack is
+// handed the same run forever.
+func (s *Store) ExpireAcks(ctx context.Context, maxExpiries int) ([]ExpiredAck, error) {
+	rows, err := s.db.QueryContext(ctx, db.Query("expire_ack"), maxExpiries)
 	if err != nil {
 		return nil, fmt.Errorf("store: expire acks: %w", err)
 	}
@@ -358,7 +370,7 @@ func (s *Store) ExpireAcks(ctx context.Context) ([]ExpiredAck, error) {
 			e       ExpiredAck
 			cluster sql.NullString
 		)
-		if err := rows.Scan(&e.RunID, &cluster, &e.Epoch); err != nil {
+		if err := rows.Scan(&e.RunID, &cluster, &e.Epoch, &e.Status, &e.Expiries); err != nil {
 			return nil, fmt.Errorf("store: scan expired ack: %w", err)
 		}
 		e.ClusterID = runv1.ULID(cluster.String)

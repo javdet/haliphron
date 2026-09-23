@@ -121,7 +121,7 @@ takes it into its head to order by it would look wrong.
 | Group | Columns | Written by | When |
 |---|---|---|---|
 | admission | `spec`, `prompt`, `prompt_sha256`, `agent`, `model`, `timeout_seconds`, `repo_*` | backend | once, at `INSERT` |
-| ownership | `cluster_id`, `lease_epoch`, `attempt`, `ack_deadline`, `lease_deadline` | backend | lease, ack, heartbeat, expiry |
+| ownership | `cluster_id`, `lease_epoch`, `attempt`, `ack_deadline`, `lease_deadline`, `ack_expiries` | backend | lease, ack, heartbeat, expiry; `ack_expiries` is reset only by an operator's retry |
 | observation | `status`, `observed_phase`, the result, the cost | backend, from the controller's reports | ingest |
 
 **Admission is immutable, and a trigger checks it.** `spec` is rendered once and
@@ -333,7 +333,7 @@ same text**: a test that retypes the lease query is checking its own copy.
 | Query | What in it is contract |
 |---|---|
 | `lease.sql` | `FOR UPDATE SKIP LOCKED`; the ordering matches the index; the epoch is read, not raised; cancelled runs are not handed out |
-| `expire_ack.sql` | `→ Queued`, epoch +1 **in the same statement**, the assignment is preserved |
+| `expire_ack.sql` | `→ Queued`, epoch +1 **in the same statement**, the assignment is preserved; `ack_expiries` +1, and the expiry that reaches the ceiling (`$1`) goes `→ Failed` (`AckTimeoutExhausted`, class `infra`) instead |
 | `expire_lease.sql` | `→ Unknown`, the epoch is untouched, `observed_phase` is untouched |
 | `lock_run.sql` | the single entry point of all three report application paths |
 

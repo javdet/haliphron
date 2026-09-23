@@ -120,12 +120,32 @@ the `ack` and after it the risks are directly opposite.
 
 | Deadline | Default | Meaning | Expiry |
 |---|---|---|---|
-| `ackDeadline` | 60 s | the controller did not manage to create the Secret/ConfigMap/CR | **the work is guaranteed not to have started** → epoch +1, `Queued`, safe to reassign immediately |
+| `ackDeadline` | 60 s | the controller did not manage to create the Secret/ConfigMap/CR | **the work is guaranteed not to have started** → epoch +1, `Queued`, safe to reassign immediately; the fifth such expiry of one run → epoch +1, `Failed` (`AckTimeoutExhausted`) |
 | `leaseDeadline` | 120 s, extended by every heartbeat | the controller stopped reporting | the Job may be executing right now → `Unknown`, **do not reassign automatically** |
 
 A single shared deadline would force a choice: either a short one (and then a
 slow `ImagePullBackOff` looks like losing the cluster) or a long one (and then a
 controller that crashed before creating the Job keeps the work idle for minutes).
+
+### Ack timeouts are bounded
+
+A negative ack ends by itself: every refusal excludes the cluster, and once every
+eligible cluster has refused, the run fails with `NoEligibleCluster`. An ack
+timeout has no such brake. It keeps the assignment and excludes nothing, so a
+controller that materialises the lease and whose ack never reaches the backend
+(a proxy dropping the Cluster API, a load balancer cutting the long poll) would
+be handed the same run every `ackDeadline`, indefinitely, with a per-run token
+minted for every lease.
+
+The backend therefore counts unacknowledged expiries per run. The one that
+reaches the ceiling (`HALIPHRON_MAX_ACK_EXPIRIES`, default **5**) fails the run
+instead of requeueing it: `Failed`, class `infra`, reason `AckTimeoutExhausted`.
+The epoch still rises, so the controller holding the last lease gets `abandon`
+on its next message. An operator's retry resets the count. A restart between
+lease and ack costs one expiry, a rolling update two or three; five is beyond
+anything transient, and at the default timings it gives up after about five
+minutes. Every expiry revokes the per-run token its lease carried: nothing
+started before the ack, so no pod ever held it.
 
 ### The expiry of `leaseDeadline` does not oblige the controller to stop
 
@@ -449,6 +469,7 @@ side.
 - [x] `/leases` on an empty queue → 204 after exactly `waitSeconds`
 - [x] two concurrent leases for one cluster never hand out the same `runID` twice
 - [x] `ackDeadline` expiry → epoch +1, `Queued`, the work is offered again **on the same cluster**
+- [x] the fifth `ackDeadline` expiry of one run → epoch +1, `Failed`, class `infra`, reason `AckTimeoutExhausted`, no per-run token left live; an operator's retry resets the count
 - [x] `leaseDeadline` expiry in `Running` → `Unknown`, **not** `Queued`
 - [x] a report with a stale epoch → 409 `abandon`, the run's state unchanged
 - [x] `Running` after `Succeeded` → `PhaseRegression`, the run stays terminal

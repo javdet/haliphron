@@ -104,10 +104,16 @@ func TestAckExpiryFencesTheOldOwnerImmediately(t *testing.T) {
 		requeued string
 		epoch    int64
 		cluster  sql.NullString
+		after    string
+		expiries int
 	)
-	err := conn.QueryRowContext(ctx, db.Query("expire_ack")).Scan(&requeued, &cluster, &epoch)
+	err := conn.QueryRowContext(ctx, db.Query("expire_ack"), 5).
+		Scan(&requeued, &cluster, &epoch, &after, &expiries)
 	if err != nil {
 		t.Fatalf("expire ack: %v", err)
+	}
+	if after != "Queued" || expiries != 1 {
+		t.Errorf("first expiry under a ceiling of 5 gave %s after %d, want Queued after 1", after, expiries)
 	}
 	if requeued != fx.runID {
 		t.Fatalf("expired %s, leased %s", requeued, fx.runID)
@@ -134,6 +140,64 @@ func TestAckExpiryFencesTheOldOwnerImmediately(t *testing.T) {
 	// against the exclusion table, not a side effect of a controller restart.
 	if !cluster.Valid {
 		t.Error("ack expiry cleared the assigned cluster")
+	}
+}
+
+// An ack timeout keeps the assignment and writes no exclusion, so unlike a
+// negative ack nothing in it runs out by itself. The expiry that reaches the
+// ceiling fails the run, still raising the epoch so the controller holding the
+// last lease is fenced, and a run that failed that way is not handed out again.
+func TestTheAckExpiryThatReachesTheCeilingFailsTheRun(t *testing.T) {
+	t.Parallel()
+	conn := newDB(t)
+	ctx := context.Background()
+	fx := seed(t, conn)
+
+	const ceiling = 2
+	var (
+		id       string
+		cluster  sql.NullString
+		epoch    int64
+		status   string
+		expiries int
+	)
+	for i := 1; i <= ceiling; i++ {
+		if _, _, ok := leaseOne(t, conn, fx.clusterID, 0, 120); !ok {
+			t.Fatalf("lease %d: nothing leased", i)
+		}
+		err := conn.QueryRowContext(ctx, db.Query("expire_ack"), ceiling).
+			Scan(&id, &cluster, &epoch, &status, &expiries)
+		if err != nil {
+			t.Fatalf("expire ack %d: %v", i, err)
+		}
+		if expiries != i {
+			t.Errorf("expiry %d counted as %d", i, expiries)
+		}
+	}
+	if status != "Failed" {
+		t.Fatalf("the expiry that reached the ceiling left the run %s, want Failed", status)
+	}
+	if epoch != ceiling+1 {
+		t.Errorf("epoch = %d, want %d: the last holder must be fenced", epoch, ceiling+1)
+	}
+
+	var (
+		reason, class string
+		finished      sql.NullTime
+	)
+	if err := conn.QueryRowContext(ctx,
+		`SELECT status_reason, failure_class, finished_at FROM runs WHERE id = $1`, fx.runID).
+		Scan(&reason, &class, &finished); err != nil {
+		t.Fatalf("read run: %v", err)
+	}
+	if reason != "AckTimeoutExhausted" || class != "infra" {
+		t.Errorf("reason/class = %s/%s, want AckTimeoutExhausted/infra", reason, class)
+	}
+	if !finished.Valid {
+		t.Error("a failed run needs a finish time")
+	}
+	if _, _, ok := leaseOne(t, conn, fx.clusterID, 60, 120); ok {
+		t.Error("a run failed for ack exhaustion was handed out again")
 	}
 }
 

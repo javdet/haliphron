@@ -214,6 +214,7 @@ func Load() (Config, error) {
 			IdempotencyTTL:        durationEnv("HALIPHRON_IDEMPOTENCY_TTL", 24*time.Hour),
 			MaxArtifactBytesPerRun: int64(intEnv("HALIPHRON_ARTIFACT_MAX_BYTES_PER_RUN",
 				clusterv1.DefaultMaxBytesPerRun)),
+			MaxAckExpiries: intEnv("HALIPHRON_MAX_ACK_EXPIRIES", clusterv1.DefaultMaxAckExpiries),
 		},
 
 		SweepInterval: durationEnv("HALIPHRON_SWEEP_INTERVAL", 5*time.Second),

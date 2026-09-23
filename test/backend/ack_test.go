@@ -1,10 +1,12 @@
 package backend
 
 import (
+	"context"
 	"testing"
 
 	clusterv1 "github.com/automagicops/haliphron/api/cluster/v1"
 	runv1 "github.com/automagicops/haliphron/api/run/v1"
+	"github.com/automagicops/haliphron/backend/app"
 	"github.com/automagicops/haliphron/backend/store"
 )
 
@@ -184,6 +186,104 @@ func TestAnArtifactBundleCanBeReissuedForAnActiveLease(t *testing.T) {
 	}
 	if problem.Action != clusterv1.ActionAbandon {
 		t.Errorf("action = %s, want abandon", problem.Action)
+	}
+}
+
+// The brake on ack timeouts. A negative ack writes an exclusion and so runs out
+// of clusters to try; an ack timeout keeps the assignment and excludes nothing,
+// and a controller that materialises the lease and cannot deliver its ack
+// would be handed the run every ackTimeout forever, with a per-run token minted
+// for each lease. At the ceiling the run fails, the last holder is fenced, no
+// token those leases carried is left live, and an operator's retry starts the
+// count again.
+func TestAckTimeoutsStopAtTheCeilingAndFailTheRun(t *testing.T) {
+	h := newHarness(t)
+	ctx := context.Background()
+	p := newProbe(t, h, "east")
+	admitted := h.Submit()
+
+	expire := func() app.SweepResult {
+		t.Helper()
+		// Aged rather than waited out: five ack windows is five seconds of a
+		// test doing nothing.
+		if _, err := h.Store.DB().ExecContext(ctx,
+			`UPDATE runs SET ack_deadline = now() - interval '1 second'
+			 WHERE id = $1 AND status = 'Leased'`, admitted.ID); err != nil {
+			t.Fatalf("age the ack deadline: %v", err)
+		}
+		return h.Sweep()
+	}
+
+	ceiling := clusterv1.DefaultMaxAckExpiries
+	var last clusterv1.Lease
+	for i := 1; i <= ceiling; i++ {
+		last = p.LeaseOne()
+		swept := expire()
+		if swept.AckExpired != 1 {
+			t.Fatalf("expiry %d: the scanner expired %d acks, want 1", i, swept.AckExpired)
+		}
+		want := 0
+		if i == ceiling {
+			want = 1
+		}
+		if swept.AckExhausted != want {
+			t.Fatalf("expiry %d of %d: %d runs exhausted, want %d", i, ceiling, swept.AckExhausted, want)
+		}
+	}
+
+	failed := h.Run(admitted.ID)
+	if failed.Status != clusterv1.StatusFailed {
+		t.Fatalf("status = %s, want Failed", failed.Status)
+	}
+	if failed.StatusReason != "AckTimeoutExhausted" {
+		t.Errorf("reason = %q, want AckTimeoutExhausted", failed.StatusReason)
+	}
+	if failed.FailureClass != runv1.FailureInfra {
+		t.Errorf("failure class = %s, want infra", failed.FailureClass)
+	}
+	if failed.Epoch != last.Epoch+1 {
+		t.Errorf("epoch = %d, want %d: the last holder must be fenced", failed.Epoch, last.Epoch+1)
+	}
+	if failed.FinishedAt == nil {
+		t.Error("a failed run needs a finish time for the run list to sort by")
+	}
+	if !h.HasAudit(admitted.ID, store.AuditAckExhausted) {
+		t.Error("the run was failed without a record")
+	}
+	if again, ok := tryLease(p); ok {
+		t.Errorf("a run failed for ack exhaustion was handed out again: %+v", again)
+	}
+	if _, problem := p.Ack(admitted.ID, last.Epoch); problem == nil || problem.Action != clusterv1.ActionAbandon {
+		t.Errorf("the last holder's late ack got %+v, want abandon", problem)
+	}
+
+	tokens, err := h.Store.ListTokens(ctx)
+	if err != nil {
+		t.Fatalf("list tokens: %v", err)
+	}
+	minted := 0
+	for _, token := range tokens {
+		if token.RunID != admitted.ID {
+			continue
+		}
+		minted++
+		if token.RevokedAt == nil {
+			t.Errorf("the per-run token %s outlived the lease that carried it", token.ID)
+		}
+	}
+	if minted != ceiling {
+		t.Errorf("%d per-run tokens minted, want one per lease (%d)", minted, ceiling)
+	}
+
+	if _, err := h.App.Retry(ctx, admitted.ID, "operator"); err != nil {
+		t.Fatalf("retry: %v", err)
+	}
+	p.LeaseOne()
+	if swept := expire(); swept.AckExhausted != 0 {
+		t.Error("the first expiry after a retry failed the run: the count did not start again")
+	}
+	if requeued := h.Run(admitted.ID); requeued.Status != clusterv1.StatusQueued {
+		t.Errorf("status after one expiry following a retry = %s, want Queued", requeued.Status)
 	}
 }
 

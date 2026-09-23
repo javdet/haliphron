@@ -361,6 +361,12 @@ mcpEndpoint: ""
 limits:
   runTokenTTLMultiplier: 2
   idempotencyTTL: 24h
+  # How many leases of one run may expire unacknowledged before the run is
+  # failed with AckTimeoutExhausted instead of being handed out again. A
+  # controller restart costs one; a controller that keeps taking leases and
+  # whose acks never arrive (a proxy cutting the Cluster API) would otherwise
+  # cycle the run every ackTimeout forever. 0 keeps the default of 5.
+  maxAckExpiries: 0
 
 # -----------------------------------------------------------------------------
 # The UI

@@ -1,6 +1,7 @@
 package backend
 
 import (
+	"fmt"
 	"time"
 
 	clusterv1 "github.com/automagicops/haliphron/api/cluster/v1"
@@ -25,10 +26,17 @@ func (b *Backend) sweep() {
 		// Before the ack the work is guaranteed not to have started: the
 		// controller died without creating anything. Safe to hand to someone
 		// else immediately, and the epoch rises so the dead controller's late
-		// ack is fenced rather than accepted.
+		// ack is fenced rather than accepted. Up to a ceiling: the assignment
+		// is kept and nothing is excluded, so a controller whose acks never
+		// arrive would otherwise be handed the same run forever.
 		case r.status == clusterv1.StatusLeased && !r.acked && now.After(r.ackDeadline):
-			b.logf("ack deadline expired run=%s epoch=%d", r.id, r.epoch)
-			b.requeue(r, "ack deadline expired")
+			r.ackExpiries++
+			b.logf("ack deadline expired run=%s epoch=%d expiries=%d", r.id, r.epoch, r.ackExpiries)
+			if r.ackExpiries >= b.maxAckExpiries {
+				b.failAckExhausted(r)
+			} else {
+				b.requeue(r, "ack deadline expired")
+			}
 
 		// After the ack the Job may be running this second. Nobody can say
 		// whether it is, so the run becomes Unknown and waits for a human or a
@@ -67,6 +75,24 @@ func (b *Backend) requeue(r *run, reason string) {
 		b.queue = append(b.queue, r.id)
 	}
 	b.logf("requeued run=%s epoch=%d reason=%q", r.id, r.epoch, reason)
+}
+
+// failAckExhausted ends a run whose leases kept expiring unacknowledged. The
+// epoch still rises, so the controller holding the last lease is told to
+// abandon it rather than acknowledge a run that has ended.
+func (b *Backend) failAckExhausted(r *run) {
+	r.epoch++
+	r.attempt = 1
+	r.status = clusterv1.StatusFailed
+	r.holder = ""
+	r.acked = false
+	r.ackDeadline = time.Time{}
+	r.leaseDeadline = time.Time{}
+	r.failureClass = runv1.FailureInfra
+	r.reason = "AckTimeoutExhausted"
+	r.message = fmt.Sprintf("%d leases expired without an acknowledgement from the cluster", r.ackExpiries)
+	r.terminalPhase = runv1.PhaseFailed
+	b.auditf(r.id, AuditAckTimeoutExhausted, "%s", r.message)
 }
 
 func (b *Backend) queued(id runv1.ULID) bool {

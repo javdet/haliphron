@@ -158,3 +158,22 @@ func DefaultTimings() Timings {
 		ArtifactTTLMultiplier:    2,
 	}
 }
+
+// DefaultMaxAckExpiries is how many leases of one run may expire
+// unacknowledged before the backend stops handing it out and fails it with
+// AckTimeoutExhausted.
+//
+// An ack timeout is the one revocation with no brake of its own: a negative ack
+// excludes the cluster, so refusals run out once every cluster has refused, but
+// a lease that simply is not acknowledged goes back to the same cluster, and a
+// controller that materialises fine and cannot reach the ack endpoint would
+// cycle every ackTimeout forever, minting a per-run token each time. The
+// ordinary cause — a controller restarting between lease and ack — costs one
+// expiry, a rolling update or a short crash loop two or three; five is past
+// anything transient, and at the default 60 s timeout it gives up after about
+// five minutes.
+//
+// Not transmitted: it is the backend's policy, not a timing a controller
+// schedules against. It lives here for the reason DefaultTimings does — the
+// fake and the real backend must give up at the same point.
+const DefaultMaxAckExpiries = 5

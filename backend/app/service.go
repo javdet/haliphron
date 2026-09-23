@@ -71,6 +71,12 @@ type Limits struct {
 	// per-run budget is an agreement with a controller, and a control plane
 	// does not stake its volume on an agreement.
 	MaxArtifactBytesPerRun int64
+
+	// MaxAckExpiries is how many leases of one run may expire unacknowledged
+	// before the run is failed with AckTimeoutExhausted instead of requeued.
+	// See clusterv1.DefaultMaxAckExpiries for why there is a ceiling and why
+	// it is five.
+	MaxAckExpiries int
 }
 
 // Options assembles a Service.
@@ -109,6 +115,9 @@ func New(opts Options) *Service {
 	}
 	if limits.MaxArtifactBytesPerRun <= 0 {
 		limits.MaxArtifactBytesPerRun = clusterv1.DefaultMaxBytesPerRun
+	}
+	if limits.MaxAckExpiries <= 0 {
+		limits.MaxAckExpiries = clusterv1.DefaultMaxAckExpiries
 	}
 	logger := opts.Logger
 	if logger == nil {

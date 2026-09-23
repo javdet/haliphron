@@ -169,6 +169,10 @@ encryption key is not even that: it is a file, because a variable is visible in
   value: {{ .Values.limits.runTokenTTLMultiplier | quote }}
 - name: HALIPHRON_IDEMPOTENCY_TTL
   value: {{ .Values.limits.idempotencyTTL | quote }}
+{{- with .Values.limits.maxAckExpiries }}
+- name: HALIPHRON_MAX_ACK_EXPIRIES
+  value: {{ . | quote }}
+{{- end }}
 
 {{/* A timing left at 0 is not sent: the backend's own default is the contract's. */}}
 {{- $t := .Values.clusterProtocol.timings }}

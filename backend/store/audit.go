@@ -28,6 +28,7 @@ const (
 	AuditTerminalConflict = "run.terminal_conflict"
 	AuditEpochRejected    = "run.epoch_rejected"
 	AuditNoClusterForRun  = "run.no_eligible_cluster"
+	AuditAckExhausted     = "run.ack_timeout_exhausted"
 	AuditUsageDivergence  = "run.usage_divergence"
 
 	AuditRunSubmitted = "run.submitted"

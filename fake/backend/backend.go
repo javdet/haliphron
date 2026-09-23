@@ -41,6 +41,9 @@ type Backend struct {
 	// configuration at all.
 	artifactMode     runv1.ArtifactMode
 	maxArtifactBytes int64
+	// maxAckExpiries is the ceiling on unacknowledged leases of one run; the
+	// expiry that reaches it fails the run with AckTimeoutExhausted.
+	maxAckExpiries int
 	// artifacts is what controllers have relayed, keyed by the full key. It
 	// stands in for the backend's volume: the property a controller track needs
 	// to assert is that the bytes arrived, and arrived once.
@@ -142,6 +145,11 @@ type run struct {
 	// negative ack that did not exclude would re-offer the same lease to the
 	// same cluster forever.
 	excluded map[runv1.ULID]bool
+	// ackExpiries counts the leases of this run that expired unacknowledged.
+	// An ack timeout keeps the assignment and excludes nothing, so without a
+	// count a controller whose acks never arrive would be handed the same run
+	// forever. Reset only by an operator's retry.
+	ackExpiries int
 
 	// artifactsFirst records that at least one artifact arrived before the
 	// completion did. The controller's flush order guarantees it, and the
@@ -202,6 +210,9 @@ const (
 	AuditUsageDivergence = "UsageDivergence"
 	// AuditNoClusterForRun is a run every registered cluster has refused.
 	AuditNoClusterForRun = "NoClusterForRun"
+	// AuditAckTimeoutExhausted is a run failed because its leases kept
+	// expiring without an acknowledgement.
+	AuditAckTimeoutExhausted = "AckTimeoutExhausted"
 )
 
 // Option configures the fake.
@@ -211,6 +222,13 @@ type Option func(*Backend)
 // Tests use it to make a long poll or an ack window short enough to wait on.
 func WithTimings(t clusterv1.Timings) Option {
 	return func(b *Backend) { b.timings = t }
+}
+
+// WithMaxAckExpiries sets how many leases of one run may expire unacknowledged
+// before the run is failed. Tests lower it so the ceiling is reached without
+// waiting out five ack windows.
+func WithMaxAckExpiries(n int) Option {
+	return func(b *Backend) { b.maxAckExpiries = n }
 }
 
 // WithVersionRange sets the supported controller SemVer window.
@@ -256,8 +274,9 @@ func New(opts ...Option) *Backend {
 		// Relay, matching the real backend's default. A fake whose default
 		// differed would let a controller pass its contract tests and then meet
 		// a mode it had never been run against.
-		artifactMode: runv1.ArtifactModeRelay,
-		wake:         make(chan struct{}),
+		artifactMode:   runv1.ArtifactModeRelay,
+		maxAckExpiries: clusterv1.DefaultMaxAckExpiries,
+		wake:           make(chan struct{}),
 	}
 	for _, opt := range opts {
 		opt(b)

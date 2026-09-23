@@ -22,7 +22,10 @@ import (
 // SweepResult is what one pass did. Returned rather than only logged because
 // the tests assert on it and because it is the shape of the metrics.
 type SweepResult struct {
+	// AckExpired counts every expired ack; AckExhausted is the subset that hit
+	// the ceiling and failed the run instead of requeueing it.
 	AckExpired    int
+	AckExhausted  int
 	LeaseExpired  int
 	Placed        int
 	Recovered     int
@@ -33,17 +36,49 @@ type SweepResult struct {
 func (s *Service) Sweep(ctx context.Context) (SweepResult, error) {
 	var out SweepResult
 
-	expired, err := s.store.ExpireAcks(ctx)
+	expired, err := s.store.ExpireAcks(ctx, s.limits.MaxAckExpiries)
 	if err != nil {
 		return out, err
 	}
 	out.AckExpired = len(expired)
 	for _, e := range expired {
-		// The epoch rose inside the statement that requeued it, which is the
-		// fence closing: from here the controller that was holding the run
-		// reports under a strictly smaller epoch and is told to abandon.
-		s.log.Warn("ack deadline expired; work returned to the queue",
-			"run", e.RunID, "cluster", e.ClusterID, "epoch", e.Epoch)
+		// The per-run MCP token went out in the lease that just expired, and
+		// that lease is dead either way: the next one mints its own. Revoking
+		// here is safe because nothing starts before the ack, so no pod ever
+		// held it, and it is what keeps a run cycling through ack timeouts from
+		// leaving a live credential behind for every cycle. A failure is logged
+		// rather than returned: the expiry has already committed, the token
+		// still dies at its TTL, and aborting would skip placement for
+		// everything else in the pass.
+		if err := s.store.RevokeRunTokens(ctx, e.RunID); err != nil {
+			s.log.Error("could not revoke the tokens of an expired lease", "run", e.RunID, "error", err)
+		}
+
+		if !e.Exhausted() {
+			// The epoch rose inside the statement that requeued it, which is
+			// the fence closing: from here the controller that was holding the
+			// run reports under a strictly smaller epoch and is told to
+			// abandon.
+			s.log.Warn("ack deadline expired; work returned to the queue",
+				"run", e.RunID, "cluster", e.ClusterID, "epoch", e.Epoch,
+				"expiries", e.Expiries, "ceiling", s.limits.MaxAckExpiries)
+			continue
+		}
+
+		// Past anything a restart explains. The controller keeps taking the
+		// lease and its ack never arrives, and requeueing again would only
+		// repeat that every ackTimeout for as long as nobody looked.
+		out.AckExhausted++
+		s.log.Error("ack deadline expired too many times; run failed",
+			"run", e.RunID, "cluster", e.ClusterID, "epoch", e.Epoch, "expiries", e.Expiries)
+		if err := s.store.Audit(ctx, store.AuditEntry{
+			Actor: "expiry", ActorKind: "system", Action: store.AuditAckExhausted,
+			SubjectKind: "run", SubjectID: string(e.RunID),
+			RunID: e.RunID, ClusterID: e.ClusterID,
+			Payload: map[string]any{"reason": "AckTimeoutExhausted", "expiries": e.Expiries},
+		}); err != nil {
+			return out, err
+		}
 	}
 
 	lost, err := s.store.ExpireLeases(ctx)
@@ -105,7 +140,7 @@ func (s *Service) Sweep(ctx context.Context) (SweepResult, error) {
 		}
 	}
 
-	if out.AckExpired > 0 || out.Placed > 0 {
+	if out.AckExpired > out.AckExhausted || out.Placed > 0 {
 		// Work became available to somebody. Releasing the long polls now is
 		// the difference between a requeued run starting immediately and one
 		// waiting out a poll interval it has no reason to.

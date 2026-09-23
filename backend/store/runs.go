@@ -388,7 +388,9 @@ var ErrRunTerminal = errors.New("store: run has already ended")
 // with it: the pair is what makes the previous holder's late report compare as
 // stale rather than as equal. The observation is cleared as well — without
 // that, the new attempt's Pending would lose to the old attempt's terminal
-// rank and the run would never move.
+// rank and the run would never move. The ack-expiry count is cleared too: the
+// ceiling is on the scanner repeating itself, and a retry is a person deciding
+// to try again.
 func (s *Store) Retry(ctx context.Context, id runv1.ULID, by string) (Run, error) {
 	var out Run
 	err := s.inTx(ctx, func(tx *sql.Tx) error {
@@ -411,6 +413,7 @@ func (s *Store) Retry(ctx context.Context, id runv1.ULID, by string) (Run, error
 				status              = 'Queued',
 				lease_epoch         = lease_epoch + 1,
 				attempt             = 1,
+				ack_expiries        = 0,
 				cluster_id          = $2,
 				observed_phase      = NULL,
 				status_reason       = 'OperatorRetry',

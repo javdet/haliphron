@@ -591,6 +591,57 @@ func TestAckDeadlineExpiryRequeuesWithANewEpoch(t *testing.T) {
 	}
 }
 
+// An ack timeout keeps the assignment and excludes nothing, so unlike a
+// negative ack it cannot run out of clusters to try. A controller that takes
+// the lease and whose ack never arrives would be handed the run forever; the
+// ceiling ends it, and an operator's retry starts the count again.
+func TestAckDeadlineExpiriesFailTheRunAtTheCeiling(t *testing.T) {
+	t.Parallel()
+	b, a := start(t, backend.WithMaxAckExpiries(3))
+	id := b.Enqueue(sampleSpec())
+	window := time.Duration(clusterv1.DefaultTimings().AckTimeoutSeconds+1) * time.Second
+
+	var last clusterv1.Lease
+	for i := int64(1); i <= 3; i++ {
+		last = a.mustLease()
+		if last.Epoch != i {
+			t.Fatalf("lease %d carries epoch %d", i, last.Epoch)
+		}
+		b.AdvanceClock(window)
+	}
+
+	st, _ := b.RunState(id)
+	if st.Status != clusterv1.StatusFailed {
+		t.Fatalf("want Failed after three unacknowledged leases, got %s", st.Status)
+	}
+	if st.Reason != "AckTimeoutExhausted" || st.FailureClass != runv1.FailureInfra {
+		t.Errorf("want AckTimeoutExhausted/infra, got %s/%s", st.Reason, st.FailureClass)
+	}
+	if st.Epoch != last.Epoch+1 {
+		t.Errorf("want epoch %d, got %d: the last holder must be fenced", last.Epoch+1, st.Epoch)
+	}
+	if leases, _ := a.poll(1); len(leases) != 0 {
+		t.Fatalf("a failed run was handed out again: %+v", leases)
+	}
+	if p := a.ack(id, last.Epoch).problem(t); p.Action != clusterv1.ActionAbandon {
+		t.Errorf("the last holder's late ack got %s, want abandon", p.Action)
+	}
+	audited := false
+	for _, e := range b.Audit() {
+		audited = audited || (e.RunID == id && e.Kind == backend.AuditAckTimeoutExhausted)
+	}
+	if !audited {
+		t.Error("the run was failed without an audit record")
+	}
+
+	b.Retry(id)
+	a.mustLease()
+	b.AdvanceClock(window)
+	if st, _ := b.RunState(id); st.Status != clusterv1.StatusQueued {
+		t.Errorf("after a retry one expiry gave %s, want Queued: the count starts again", st.Status)
+	}
+}
+
 func TestLeaseDeadlineExpiryGivesUnknownNotQueued(t *testing.T) {
 	t.Parallel()
 	b, c := start(t)

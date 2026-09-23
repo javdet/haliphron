@@ -227,6 +227,7 @@ func (b *Backend) Retry(id runv1.ULID) {
 		r.terminalPhase = ""
 		r.completion = nil
 		r.completedAttempt = 0
+		r.ackExpiries = 0
 		b.requeue(r, "operator retry")
 	}
 	b.mu.Unlock()
