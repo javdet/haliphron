@@ -14,8 +14,9 @@
 # Image
 # -----------------------------------------------------------------------------
 image:
-  registry: ghcr.io
-  repository: automagicops/haliphron-controller
+  # Empty means Docker Hub, which is where the published images live.
+  registry: ""
+  repository: javdet/haliphron-controller
   tag: ""       # empty means .Chart.AppVersion
   digest: ""    # wins over tag; the only one of the two that is reproducible
   pullPolicy: IfNotPresent
@@ -93,6 +94,34 @@ agents:
     annotations: {}
 
   # The only thing that stops a burst of runs from taking the cluster down.
+  #
+  # The compute keys bound what is running. The count/ keys bound what is
+  # stored, and the two are different things. `pods` counts only pods that have
+  # not finished, and a Job whose pod the quota refuses is still an object: the
+  # Job controller keeps retrying the pod, and the Jobs pile up in etcd while
+  # the pod count stays put. Every run also stores a Secret of up to 1 MiB (it
+  # carries the prompt) and usually a ConfigMap. All of them stay until the
+  # AgentRun is deleted: the finished run's TTL after the backend has its
+  # outcome (a day by default), and up to seven days when it never does.
+  #
+  # So the object counts are sized by retention, not concurrency: roughly
+  # capacitySlots × runs a slot finishes in a day. The default, 1000 AgentRuns,
+  # covers 8 slots kept busy by runs of 12 minutes or more. A cluster that finishes more than
+  # that in a day needs a higher number or a shorter run TTL. Otherwise, once
+  # the limit is reached, this cluster refuses new leases with QuotaExhausted,
+  # and a run with no other cluster to go to fails. In the worst case,
+  # 1000 Secrets at the 1 MiB ceiling are about 1 GiB of etcd, so lower the
+  # number on a cluster whose etcd is small.
+  #
+  # AgentRuns must be the first count to run out. The AgentRun is the first
+  # object a lease creates, and when the quota refuses it the lease is refused
+  # cleanly. A refused Secret or ConfigMap comes after the AgentRun already
+  # exists, and a refused Job comes after the run has been acknowledged. So
+  # secrets and configmaps get the same number plus room for what the
+  # namespace holds anyway (kube-root-ca.crt, image pull secrets), and jobs get
+  # room for infra retries: each attempt is a Job, and there can be up to
+  # 1 + maxInfraRetries of them. Finished pods are bounded through the Jobs:
+  # with backoffLimit 0, each Job has one pod.
   resourceQuota:
     enabled: true
     hard:
@@ -101,6 +130,10 @@ agents:
       requests.memory: 64Gi
       limits.cpu: "40"
       limits.memory: 128Gi
+      count/agentruns.haliphron.io: "1000"
+      count/jobs.batch: "2000"
+      count/secrets: "1016"
+      count/configmaps: "1016"
 
   # A run that asks for nothing still gets something, and a run that asks for
   # everything does not get it.

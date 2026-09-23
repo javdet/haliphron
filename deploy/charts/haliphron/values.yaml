@@ -8,8 +8,9 @@
 # Image
 # -----------------------------------------------------------------------------
 image:
-  registry: ghcr.io
-  repository: automagicops/haliphron-backend
+  # Empty means Docker Hub, which is where the published images live.
+  registry: ""
+  repository: javdet/haliphron-backend
   # Empty means .Chart.AppVersion, so that a chart upgrade moves the image with
   # it. Pin a digest here for an installation that must not drift:
   #   tag: "sha256:..."  is not a tag; use image.digest instead.
@@ -274,9 +275,26 @@ bootstrapToken:
 agent:
   # Required. There is no default: the image decides what every run executes,
   # and a tag chosen by a chart would decide it silently. Pin by digest.
-  #   image: ghcr.io/automagicops/haliphron-agent@sha256:...
+  #   image: javdet/haliphron-agent@sha256:...
   image: ""
   imagePullPolicy: IfNotPresent
+
+  # Where the agent pods land, for every run that does not come from a role
+  # that says otherwise. It is set here rather than in the runtime chart
+  # because placement travels in the lease: the spec the controller
+  # materialises is rendered by the control plane, and a value the controller
+  # invented would not be visible in `kubectl get agentrun`.
+  #
+  # A role's own nodeSelector and tolerations replace these outright rather
+  # than merging, so that reading a role tells you where its runs go.
+  #   nodeSelector: {nodegroup: ai-infra}
+  #   tolerations:
+  #     - key: nodegroup
+  #       operator: Equal
+  #       value: ai-infra
+  #       effect: NoSchedule
+  nodeSelector: {}
+  tolerations: []
 
   defaultModel: anthropic/claude-opus-5
   defaultAgentType: claude-code   # claude-code | codex
@@ -285,6 +303,12 @@ agent:
   ttlSeconds: 86400       # how long a finished run is kept
   maxInfraRetries: 3
   maxRunDepth: 4
+  # How many child runs one run may start, over its whole lifetime. Depth
+  # bounds the chain; this bounds the tree. An agent that can start children
+  # without a ceiling can start a million of them, and the pod runs
+  # model-generated commands against a repository that may carry prompt
+  # injection, so the ceiling is the control rather than the agent's judgement.
+  maxRunChildren: 10
   maxPromptBytes: 0       # 0 keeps the backend's own limit
   logChunkIntervalSeconds: 5
 
@@ -354,8 +378,8 @@ frontend:
   enabled: false
 
   image:
-    registry: ghcr.io
-    repository: automagicops/haliphron-frontend
+    registry: ""
+    repository: javdet/haliphron-frontend
     # Empty means .Chart.AppVersion, so the UI and the backend move together.
     tag: ""
     digest: ""
@@ -619,10 +643,10 @@ networkPolicy:
 # Optional dependencies (evaluation only — see Chart.yaml)
 # -----------------------------------------------------------------------------
 postgresql:
-  enabled: false
+  enabled: enable
   auth:
     username: haliphron
-    password: ""
+    password: "haliphron87234!"
     database: haliphron
   primary:
     persistence:

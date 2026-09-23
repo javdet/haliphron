@@ -53,7 +53,7 @@ Listeners in this mode:
    and used exactly once:
 
    kubectl -n {{ .Release.Namespace }} port-forward svc/{{ include "haliphron.fullname" . }} {{ .Values.service.ports.api }}:{{ .Values.service.ports.api }}
-   curl -sX POST localhost:{{ .Values.service.ports.api }}/v1/clusters/bootstrap-tokens \
+   curl -sX POST localhost:{{ .Values.service.ports.api }}/api/v1/clusters/bootstrap-tokens \
      -H "Authorization: Bearer $ADMIN_TOKEN" -H 'Content-Type: application/json' -d '{}'
 
    Then install haliphron-runtime into that cluster with the token and the

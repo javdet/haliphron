@@ -13,8 +13,10 @@ import (
 	"crypto/sha256"
 	"encoding/base64"
 	"encoding/hex"
+	"encoding/json"
 	"fmt"
 	"os"
+	"regexp"
 	"strconv"
 	"strings"
 	"time"
@@ -201,6 +203,7 @@ func Load() (Config, error) {
 			LogChunkIntervalSeconds: int32Env("HALIPHRON_LOG_CHUNK_INTERVAL_SECONDS", 5),
 			MaxPromptBytes:          intEnv("HALIPHRON_MAX_PROMPT_BYTES", run.MaxPromptBytes),
 			MaxDepth:                int16(intEnv("HALIPHRON_MAX_RUN_DEPTH", run.MaxDepth)),
+			MaxChildren:             int32(intEnv("HALIPHRON_MAX_RUN_CHILDREN", run.MaxChildren)),
 		},
 
 		Limits: app.Limits{
@@ -231,6 +234,13 @@ func Load() (Config, error) {
 			cfg.Defaults.ToolPolicyCeiling = &runv1.ToolPolicy{}
 		}
 		cfg.Defaults.ToolPolicyCeiling.Allow = splitList(raw)
+	}
+
+	if err := loadJSON("HALIPHRON_AGENT_NODE_SELECTOR", &cfg.Defaults.NodeSelector); err != nil {
+		return Config{}, err
+	}
+	if err := loadJSON("HALIPHRON_AGENT_TOLERATIONS", &cfg.Defaults.Tolerations); err != nil {
+		return Config{}, err
 	}
 
 	kek, err := loadKEK()
@@ -339,6 +349,32 @@ func (c Config) validate() error {
 		return fmt.Errorf("config: unknown artifact mode %q; it is %q or %q",
 			c.Artifacts.Mode, runv1.ArtifactModeRelay, runv1.ArtifactModeObjectStore)
 	}
+	// Placement is checked here and not where it is used, because the schema
+	// that would reject it belongs to the API server in another cluster: an
+	// unsatisfiable label value is otherwise found as a failed AgentRun create,
+	// once per run, hours after the install.
+	for key, value := range c.Defaults.NodeSelector {
+		if key == "" {
+			return fmt.Errorf("config: HALIPHRON_AGENT_NODE_SELECTOR has an empty label key")
+		}
+		if !labelValuePattern.MatchString(string(value)) {
+			return fmt.Errorf("config: HALIPHRON_AGENT_NODE_SELECTOR[%s]=%q is not a Kubernetes label value",
+				key, value)
+		}
+	}
+	for _, t := range c.Defaults.Tolerations {
+		switch t.Operator {
+		case "", "Exists", "Equal":
+		default:
+			return fmt.Errorf("config: HALIPHRON_AGENT_TOLERATIONS has operator %q; it is Exists or Equal", t.Operator)
+		}
+		switch t.Effect {
+		case "", "NoSchedule", "PreferNoSchedule", "NoExecute":
+		default:
+			return fmt.Errorf("config: HALIPHRON_AGENT_TOLERATIONS has effect %q; it is NoSchedule, "+
+				"PreferNoSchedule or NoExecute", t.Effect)
+		}
+	}
 	if c.Timings.MaxWaitSeconds > 30 {
 		// The ingress's proxy_read_timeout must be greater than this, and 30
 		// is what the contract states. A longer wait turns expired polls into
@@ -348,6 +384,10 @@ func (c Config) validate() error {
 	}
 	return nil
 }
+
+// labelValuePattern is the CRD's own bound on a node selector value, repeated
+// here so that the refusal happens at startup rather than at materialisation.
+var labelValuePattern = regexp.MustCompile(`^(|[A-Za-z0-9]([-A-Za-z0-9_.]{0,61}[A-Za-z0-9])?)$`)
 
 func env(name, fallback string) string {
 	if v := os.Getenv(name); v != "" {
@@ -388,6 +428,24 @@ func durationEnv(name string, fallback time.Duration) time.Duration {
 		return fallback
 	}
 	return v
+}
+
+// loadJSON reads a structured value out of the environment.
+//
+// Placement is the one thing a deployment states that is not flat: a
+// toleration has five fields and a node selector is a map. Encoding them as
+// JSON rather than as another k=v dialect means the chart hands over exactly
+// what the CRD will carry, and a malformed value is a container that does not
+// start rather than a run placed somewhere nobody chose.
+func loadJSON(name string, into any) error {
+	raw := strings.TrimSpace(os.Getenv(name))
+	if raw == "" {
+		return nil
+	}
+	if err := json.Unmarshal([]byte(raw), into); err != nil {
+		return fmt.Errorf("config: %s is not valid JSON: %w", name, err)
+	}
+	return nil
 }
 
 func splitList(raw string) []string {

@@ -55,15 +55,67 @@ type NewRun struct {
 	// refused: clusters come and go, and a request that fails because a
 	// controller is mid-rollout is a request that should have waited.
 	ClusterID runv1.ULID
+
+	// MaxChildren is the fan-out ceiling admission is applying, passed in
+	// rather than known here: the number is policy and belongs to app, while
+	// counting and inserting without a gap between them is something only a
+	// transaction can do. Ignored when ParentRunID is empty.
+	MaxChildren int32
 }
 
+// ErrTooManyChildren is a child run refused because its parent has already
+// started as many as it may.
+var ErrTooManyChildren = errors.New("store: the parent run has started its full complement of children")
+
 // InsertRun writes an admitted run.
+//
+// It is a transaction for one statement's worth of work because of the second
+// one: a child run is admitted only if its parent is under the fan-out ceiling,
+// and counting outside the transaction that inserts would let a parent issuing
+// concurrent run_agent calls have every one of them read the same count and
+// pass. The parent row is locked first, which serialises its siblings against
+// each other and against nothing else.
 func (s *Store) InsertRun(ctx context.Context, r NewRun) error {
+	return s.inTx(ctx, func(tx *sql.Tx) error {
+		if r.ParentRunID != "" && r.MaxChildren > 0 {
+			if err := checkChildBudget(ctx, tx, r.ParentRunID, r.MaxChildren); err != nil {
+				return err
+			}
+		}
+		return insertRun(ctx, tx, r)
+	})
+}
+
+// checkChildBudget refuses a child once the parent has started its full
+// complement. It counts children ever started rather than children still
+// running: a ceiling on the concurrent ones bounds nothing, because an agent
+// can start them, wait, and start more for as long as its token lives.
+func checkChildBudget(ctx context.Context, tx *sql.Tx, parent runv1.ULID, limit int32) error {
+	// Taken before the count, and it is what makes the count mean anything: a
+	// parent making several run_agent calls at once has them queue here rather
+	// than each reading a count taken before any of them inserted.
+	if _, err := tx.ExecContext(ctx,
+		`SELECT id FROM runs WHERE id = $1 FOR UPDATE`, parent); err != nil {
+		return fmt.Errorf("store: lock parent %s: %w", parent, err)
+	}
+
+	var started int32
+	if err := tx.QueryRowContext(ctx,
+		`SELECT count(*) FROM runs WHERE parent_run_id = $1`, parent).Scan(&started); err != nil {
+		return fmt.Errorf("store: count children of %s: %w", parent, err)
+	}
+	if started >= limit {
+		return ErrTooManyChildren
+	}
+	return nil
+}
+
+func insertRun(ctx context.Context, tx *sql.Tx, r NewRun) error {
 	provider := r.RepoProvider
 	if provider == "" {
 		provider = runv1.GitProviderNone
 	}
-	_, err := s.db.ExecContext(ctx, `
+	_, err := tx.ExecContext(ctx, `
 		INSERT INTO runs (id, parent_run_id, depth, created_by, created_via, priority,
 		                  spec, prompt, prompt_sha256, agent, model, role_name,
 		                  repo_url, repo_provider, base_branch, target_branch,

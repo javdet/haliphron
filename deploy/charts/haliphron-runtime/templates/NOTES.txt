@@ -16,7 +16,7 @@
 
 2. Confirm the control plane sees the cluster:
 
-   curl -s {{ .Values.backend.url }}/../v1/clusters -H "Authorization: Bearer $ADMIN_TOKEN"
+   curl -s <control plane>/api/v1/clusters -H "Authorization: Bearer $ADMIN_TOKEN"
 
    It should be Ready within one heartbeat interval.
 

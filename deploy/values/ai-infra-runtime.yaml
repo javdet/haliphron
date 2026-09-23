@@ -1,0 +1,37 @@
+# The runtime chart on the ai-infra node group.
+#
+#   helm install haliphron-runtime deploy/charts/haliphron-runtime \
+#     -n haliphron-system -f deploy/values/ai-infra-runtime.yaml \
+#     --set cluster.name=... --set backend.url=... \
+#     --set backend.bootstrapTokenExistingSecret=haliphron-bootstrap
+
+controller:
+  nodeSelector:
+    nodegroup: ai-infra
+  tolerations:
+    - key: nodegroup
+      operator: Equal
+      value: ai-infra
+      effect: NoSchedule
+
+# The agent pods are placed by the control plane, not here: their nodeSelector
+# and tolerations arrive in the lease, from the control plane chart's
+# agent.nodeSelector and agent.tolerations. This chart's quota is what bounds
+# them once they land.
+#
+# Four vCPU and 8 GiB on one node: the default quota promises far more than
+# that, and a promise the node cannot keep is a run that sits Pending until it
+# times out.
+agents:
+  resourceQuota:
+    hard:
+      pods: "8"
+      requests.cpu: "3"
+      requests.memory: 6Gi
+      limits.cpu: "6"
+      limits.memory: 7Gi
+
+cluster:
+  # What the control plane may place here at once. It is a promise, and the
+  # quota above is what enforces it.
+  capacitySlots: 2

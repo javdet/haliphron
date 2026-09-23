@@ -297,7 +297,7 @@ erDiagram
     SCHEDULE ||--o{ RUN : "spawns"
     SCHEDULE ||--o{ WORKFLOW_INSTANCE : "spawns"
     CLUSTER ||--o{ RUN : "leases"
-    RUN ||--o{ RUN : "spawns children, depth is bounded"
+    RUN ||--o{ RUN : "spawns children, depth and breadth are bounded"
 ```
 
 ### Key entities
@@ -626,6 +626,10 @@ The "return JSON of this shape" requirement is inserted into the role's system p
 `run_agent` from MCP inside an agent remains available, but:
 - the child run is bound to its parent (`parent_run_id`) for auditing and cost accounting;
 - the depth is bounded (2 by default);
+- the breadth is bounded too (`HALIPHRON_MAX_RUN_CHILDREN`, 10 by default), counted over the
+  parent's lifetime rather than over its live children — bounding depth alone bounds nothing,
+  because breadth to the power of depth is the size of the tree, and the loophole is only
+  bounded when both halves are;
 - the budget is inherited from the parent's remainder;
 - **in v1 it is fire-and-forget only** — the parent cannot wait for a child.
 

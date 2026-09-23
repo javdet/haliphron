@@ -4,7 +4,9 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"fmt"
 	"net/http"
+	"sync"
 	"testing"
 	"time"
 
@@ -303,6 +305,123 @@ func TestTheDepthLimitStopsARunawayChain(t *testing.T) {
 		map[string]any{"prompt": "and another one"})
 	if !isError {
 		t.Fatalf("a run nine levels deep was admitted: %+v", result)
+	}
+}
+
+// Breadth is bounded for the same reason depth is, and bounding depth alone
+// does not bound the tree: ten children each starting ten is a hundred, and by
+// the depth limit it is a number nobody meant to ask for.
+func TestTheChildLimitStopsARunawayFanOut(t *testing.T) {
+	h := newHarness(t)
+
+	parent := h.Submit()
+	token, err := h.Store.CreateToken(context.Background(), store.Token{
+		Name: "run " + string(parent.ID), Kind: store.TokenKindRunMCP,
+		Scopes: []string{store.ScopeRunsWrite, store.ScopeRunsRead},
+		RunID:  parent.ID, CreatedBy: "test",
+	}, time.Hour)
+	if err != nil {
+		t.Fatalf("mint a per-run token: %v", err)
+	}
+
+	for i := 0; i < run.MaxChildren; i++ {
+		result, isError := h.callTool(t, token.Secret, "run_agent",
+			map[string]any{"prompt": fmt.Sprintf("subtask %d", i)})
+		if isError {
+			t.Fatalf("child %d of the permitted %d was refused: %+v", i+1, run.MaxChildren, result)
+		}
+	}
+
+	result, isError := h.callTool(t, token.Secret, "run_agent",
+		map[string]any{"prompt": "and one more"})
+	if !isError {
+		t.Fatalf("a child beyond the limit was admitted: %+v", result)
+	}
+
+	var children int
+	if err := h.Store.DB().QueryRowContext(context.Background(),
+		`SELECT count(*) FROM runs WHERE parent_run_id = $1`, parent.ID).Scan(&children); err != nil {
+		t.Fatalf("count the children: %v", err)
+	}
+	if children != run.MaxChildren {
+		t.Errorf("the parent has %d children, want %d", children, run.MaxChildren)
+	}
+}
+
+// The budget is over the parent's lifetime, not over what it has running. A
+// ceiling on concurrent children bounds nothing: an agent starts its ten, waits
+// for them, and starts ten more for as long as its token lives.
+func TestTheChildLimitCountsChildrenThatHaveAlreadyFinished(t *testing.T) {
+	h := newHarness(t)
+
+	parent := h.Submit()
+	token, err := h.Store.CreateToken(context.Background(), store.Token{
+		Name: "run " + string(parent.ID), Kind: store.TokenKindRunMCP,
+		Scopes: []string{store.ScopeRunsWrite, store.ScopeRunsRead},
+		RunID:  parent.ID, CreatedBy: "test",
+	}, time.Hour)
+	if err != nil {
+		t.Fatalf("mint a per-run token: %v", err)
+	}
+
+	for i := 0; i < run.MaxChildren; i++ {
+		result, isError := h.callTool(t, token.Secret, "run_agent",
+			map[string]any{"prompt": fmt.Sprintf("subtask %d", i)})
+		if isError {
+			t.Fatalf("child %d was refused: %+v", i+1, result)
+		}
+	}
+	// Every one of them is over and gone as far as scheduling is concerned.
+	if _, err := h.Store.DB().ExecContext(context.Background(),
+		`UPDATE runs SET status = 'Succeeded', finished_at = now() WHERE parent_run_id = $1`,
+		parent.ID); err != nil {
+		t.Fatalf("finish the children: %v", err)
+	}
+
+	result, isError := h.callTool(t, token.Secret, "run_agent",
+		map[string]any{"prompt": "the next batch of ten"})
+	if !isError {
+		t.Fatalf("the budget refilled when the children finished: %+v", result)
+	}
+}
+
+// Several run_agent calls at once must not each read the count the others have
+// not yet written. The check and the insert are one transaction behind a lock
+// on the parent, so the ceiling holds under concurrency rather than only in a
+// test that goes one call at a time.
+func TestConcurrentChildrenCannotExceedTheLimitTogether(t *testing.T) {
+	h := newHarness(t)
+
+	parent := h.Submit()
+	token, err := h.Store.CreateToken(context.Background(), store.Token{
+		Name: "run " + string(parent.ID), Kind: store.TokenKindRunMCP,
+		Scopes: []string{store.ScopeRunsWrite, store.ScopeRunsRead},
+		RunID:  parent.ID, CreatedBy: "test",
+	}, time.Hour)
+	if err != nil {
+		t.Fatalf("mint a per-run token: %v", err)
+	}
+
+	const callers = run.MaxChildren * 3
+	var wg sync.WaitGroup
+	wg.Add(callers)
+	for i := 0; i < callers; i++ {
+		go func(i int) {
+			defer wg.Done()
+			h.callTool(t, token.Secret, "run_agent",
+				map[string]any{"prompt": fmt.Sprintf("racing subtask %d", i)})
+		}(i)
+	}
+	wg.Wait()
+
+	var children int
+	if err := h.Store.DB().QueryRowContext(context.Background(),
+		`SELECT count(*) FROM runs WHERE parent_run_id = $1`, parent.ID).Scan(&children); err != nil {
+		t.Fatalf("count the children: %v", err)
+	}
+	if children != run.MaxChildren {
+		t.Errorf("%d concurrent calls produced %d children, want exactly %d",
+			callers, children, run.MaxChildren)
 	}
 }
 

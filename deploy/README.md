@@ -20,27 +20,55 @@ different namespaces.
 
 You need:
 
-- PostgreSQL 16 or later, and an S3-compatible bucket. Both charts can bring
-  their own for an evaluation (`--set postgresql.enabled=true`,
+- PostgreSQL 16 or later. An S3-compatible bucket is optional: the default
+  relay mode writes results to a volume and needs no object store. The control
+  plane chart can bring both for an evaluation (`--set postgresql.enabled=true`,
   `--set minio.enabled=true`); neither is a good idea for an installation that
   has to survive a year — see the note in `charts/haliphron/Chart.yaml`.
 - An agent image, pinned by digest. The chart will not choose one: the image
-  decides what every run executes.
+  decides what every run executes. The published one is
+  `javdet/haliphron-agent`; `docker buildx imagetools inspect
+  javdet/haliphron-agent:$(cat VERSION)` prints the digest to pin.
 - `helm dependency build charts/haliphron` (or `make chart-deps`). Helm
   resolves declared dependencies whether or not their condition is met, so
   this is required even with both subcharts off.
 
 ## Images
 
+The charts pull from Docker Hub, which is where CI publishes on every push to
+`main` and on every `v*` tag:
+
+| Image | Built from | Platforms |
+|---|---|---|
+| `javdet/haliphron-backend` | `backend/Dockerfile` | amd64, arm64 |
+| `javdet/haliphron-controller` | `controller/Dockerfile` | amd64, arm64 |
+| `javdet/haliphron-frontend` | `frontend/Dockerfile` | amd64 |
+| `javdet/haliphron-agent` | `image/Dockerfile` | amd64 |
+
+The tag is the content of `VERSION`, plus `latest` on `main` and the commit
+SHA on every build. Nothing has to be built by hand to install: the charts'
+defaults name these repositories, and only the agent image is passed at install
+time, by digest.
+
+The first three are static binaries on `distroless/static`: no shell, no
+package manager, non-root, and a read-only root filesystem at runtime. The
+agent image is Debian slim, because the agent CLIs need Node and a real
+userland.
+
+To publish from a laptop instead — a local change that must reach a cluster
+before it reaches `main`:
+
 ```sh
-make backend-image      # backend/Dockerfile      -> haliphron/backend:dev
-make controller-image   # controller/Dockerfile   -> haliphron/controller:dev
-make image-build        # image/Dockerfile        -> haliphron/agent:dev
+make images-push        # all four, to $(REGISTRY), for $(PLATFORM)
+make backend-push       # or one at a time
+make digests            # what to pin: each image's published digest
 ```
 
-The first two are static binaries on `distroless/static`: no shell, no package
-manager, non-root, and a read-only root filesystem at runtime. The agent image
-is Debian slim, because the agent CLIs need Node and a real userland.
+`buildx`, and `--platform linux/amd64` by default, because a native build on an
+Apple laptop is arm64 and the nodes are not. The wrong architecture is
+discovered as a CrashLoopBackOff with `exec format error`, one layer below
+where anyone looks first. `make backend-image` and friends still build for the
+local architecture, which is what the local `docker run` paths want.
 
 ## 1. The control plane
 
@@ -51,7 +79,7 @@ know — the DSN of your database:
 helm install haliphron deploy/charts/haliphron \
   --namespace haliphron --create-namespace \
   --set database.dsn='postgres://haliphron:...@postgres:5432/haliphron?sslmode=require' \
-  --set agent.image=ghcr.io/automagicops/haliphron-agent@sha256:... \
+  --set agent.image=javdet/haliphron-agent@sha256:... \
   --set ingress.api.enabled=true --set ingress.api.host=haliphron.example.com \
   --set ingress.cluster.enabled=true --set ingress.cluster.host=clusters.haliphron.example.com
 ```
@@ -83,7 +111,7 @@ helm install haliphron deploy/charts/haliphron \
   --set database.existingSecret=haliphron-database \
   --set objectStorage.existingSecret=haliphron-object-storage \
   --set encryption.existingSecret=haliphron-kek \
-  --set agent.image=ghcr.io/automagicops/haliphron-agent@sha256:... \
+  --set agent.image=javdet/haliphron-agent@sha256:... \
   --set ingress.api.enabled=true --set ingress.api.host=haliphron.example.com \
   --set ingress.cluster.enabled=true --set ingress.cluster.host=clusters.haliphron.example.com
 ```
@@ -106,6 +134,39 @@ that, or the controllers get disconnects instead of empty responses and it
 reads as network instability. The chart sets `proxy-read-timeout: 120` and
 refuses to render if you lower it below the configured wait — but it cannot see
 the load balancer in front of your ingress controller. Check that one yourself.
+
+### Where the pods run
+
+Three sets of pods, placed from two charts, and the split is not arbitrary:
+
+| Pods | Set by | Where |
+|---|---|---|
+| backend, UI | `nodeSelector` / `tolerations`, `frontend.*` | control plane chart |
+| controller | `controller.nodeSelector` / `controller.tolerations` | runtime chart |
+| agents | `agent.nodeSelector` / `agent.tolerations` | **control plane** chart |
+
+The agents are placed by the control plane because placement travels in the
+lease: what the controller materialises is rendered upstream, so a node
+selector the controller invented would not be in the `AgentRun` anybody reads.
+A role that names its own `nodeSelector` replaces the installation's outright
+rather than merging with it — two selectors merged are a conjunction nobody
+wrote, discovered as a run that stays `Pending`.
+
+A labelled node group is usually a tainted one, and a selector without the
+matching toleration places nothing. Both charts take both. `deploy/values/`
+holds a worked example for a node group labelled and tainted `nodegroup=…`:
+
+```sh
+helm install haliphron deploy/charts/haliphron -n haliphron \
+  -f deploy/values/ai-infra-control-plane.yaml ...
+helm install haliphron-runtime deploy/charts/haliphron-runtime -n haliphron-system \
+  -f deploy/values/ai-infra-runtime.yaml ...
+```
+
+A bad label value is refused when the backend starts, not when the first run is
+materialised: the schema that would reject it belongs to an API server in
+another cluster, and one run per hour failing to create is not how anyone wants
+to find a typo.
 
 ### Gateway API instead of Ingress
 
@@ -252,7 +313,7 @@ Issue a bootstrap token from the control plane. It registers one cluster, once,
 and is then exchanged for a key pair the controller keeps locally:
 
 ```sh
-curl -sX POST https://haliphron.example.com/v1/clusters/bootstrap-tokens \
+curl -sX POST https://haliphron.example.com/api/v1/clusters/bootstrap-tokens \
   -H "Authorization: Bearer $ADMIN_TOKEN" -H 'Content-Type: application/json' -d '{}'
 ```
 
@@ -293,6 +354,53 @@ There is no filtering by hostname and there cannot be: NetworkPolicy matches
 addresses, and FQDN policies are not available on every CNI. An agent that
 reaches a permitted CIDR can reach any host inside it. This is a known and
 accepted limitation.
+
+## 3. Driving it from MCP
+
+The MCP listener is the same use cases as the REST API, spoken as tools:
+JSON-RPC 2.0 over one `POST` to `/mcp` on the MCP port, authenticated by the
+same bearer tokens. There is no session and nothing streams.
+
+Reachable in one of two ways. Inside the cluster, or over a port-forward, for a
+first run:
+
+```sh
+kubectl -n haliphron port-forward svc/haliphron 8081:8081
+claude mcp add --transport http haliphron http://127.0.0.1:8081/mcp \
+  --header "Authorization: Bearer $TOKEN"
+```
+
+Or exposed, for clients that are not on the cluster:
+
+```sh
+helm upgrade haliphron deploy/charts/haliphron -n haliphron \
+  --set ingress.mcp.enabled=true --set ingress.mcp.host=mcp.haliphron.example.com
+```
+
+The token decides what the client may do: `runs:write` starts runs, `runs:read`
+reads them, `admin` implies both. Mint one for each client rather than sharing
+the bootstrap token — `tools/list` is scoped to the caller, and a revoked token
+is one client cut off rather than every one of them.
+
+Before the first `run_agent`, the installation needs the credential the pod
+will use for the model, stored under the name the backend looks for
+(`secretNames.llmApiKey`, `llm-api-key` by default) rather than as a Kubernetes
+Secret:
+
+```sh
+curl -sX PUT .../api/v1/secrets/llm-api-key \
+  -H "Authorization: Bearer $ADMIN_TOKEN" -H 'Content-Type: application/json' \
+  -d '{"value":"sk-ant-..."}'
+```
+
+A run that names a repository also needs a git credential, under `git-token`
+or `git-token-github` / `git-token-gitlab` where the two differ. A run without
+a repository needs neither.
+
+`run_agent` requires only `prompt`; `agent`, `model`, `role`, `repo` and the
+rest fall back to the installation's defaults. It returns a `run_id`
+immediately unless `async` is false. `Succeeded` on that run means the process
+exited 0 — not that the task was solved.
 
 ## Observability
 

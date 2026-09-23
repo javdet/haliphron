@@ -1,0 +1,59 @@
+# The control plane on the ai-infra node group.
+#
+# Site-specific, and therefore here rather than in the chart's defaults: a node
+# group name is true of one fleet and of no other installation.
+#
+#   helm install haliphron deploy/charts/haliphron -n haliphron \
+#     -f deploy/values/ai-infra-control-plane.yaml \
+#     --set agent.image=javdet/haliphron-agent@sha256:...
+
+# The node group is tainted as well as labelled, so a selector alone places
+# nothing: the scheduler needs the matching toleration to be allowed to put a
+# pod there at all.
+nodeSelector:
+  nodegroup: ai-infra
+tolerations:
+  - key: nodegroup
+    operator: Equal
+    value: ai-infra
+    effect: NoSchedule
+
+# The agent pods, which the control plane places because placement travels in
+# the lease. A role that names its own nodeSelector replaces this.
+agent:
+  nodeSelector:
+    nodegroup: ai-infra
+  tolerations:
+    - key: nodegroup
+      operator: Equal
+      value: ai-infra
+      effect: NoSchedule
+
+frontend:
+  nodeSelector:
+    nodegroup: ai-infra
+  tolerations:
+    - key: nodegroup
+      operator: Equal
+      value: ai-infra
+      effect: NoSchedule
+
+# One node in the group, so there is nothing to spread across. Left at the
+# chart's default the constraint is satisfied trivially; it is stated here so
+# that adding a second node does not change behaviour silently.
+topologySpreadConstraints: []
+
+# The evaluation database, if it is turned on (--set postgresql.enabled=true).
+# A subchart places its own pods, so the node group has to be repeated here;
+# leaving it out is a Postgres that lands on whatever node has room, which is
+# fine until the day the artifact volume and the database are on different
+# ones.
+postgresql:
+  primary:
+    nodeSelector:
+      nodegroup: ai-infra
+    tolerations:
+      - key: nodegroup
+        operator: Equal
+        value: ai-infra
+        effect: NoSchedule

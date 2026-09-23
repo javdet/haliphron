@@ -111,6 +111,19 @@ encryption key is not even that: it is a file, because a variable is visible in
   value: {{ .Values.agent.image | quote }}
 - name: HALIPHRON_AGENT_IMAGE_PULL_POLICY
   value: {{ .Values.agent.imagePullPolicy | quote }}
+{{/*
+  Placement for the agent pods, as JSON rather than as a k=v list: a
+  toleration is a record with five fields, and inventing a second encoding for
+  it here would be a second thing to keep in step with the CRD.
+*/}}
+{{- with .Values.agent.nodeSelector }}
+- name: HALIPHRON_AGENT_NODE_SELECTOR
+  value: {{ toJson . | quote }}
+{{- end }}
+{{- with .Values.agent.tolerations }}
+- name: HALIPHRON_AGENT_TOLERATIONS
+  value: {{ toJson . | quote }}
+{{- end }}
 - name: HALIPHRON_DEFAULT_MODEL
   value: {{ .Values.agent.defaultModel | quote }}
 - name: HALIPHRON_DEFAULT_AGENT
@@ -123,6 +136,8 @@ encryption key is not even that: it is a file, because a variable is visible in
   value: {{ .Values.agent.maxInfraRetries | quote }}
 - name: HALIPHRON_MAX_RUN_DEPTH
   value: {{ .Values.agent.maxRunDepth | quote }}
+- name: HALIPHRON_MAX_RUN_CHILDREN
+  value: {{ .Values.agent.maxRunChildren | quote }}
 - name: HALIPHRON_LOG_CHUNK_INTERVAL_SECONDS
   value: {{ .Values.agent.logChunkIntervalSeconds | quote }}
 {{- if gt (int .Values.agent.maxPromptBytes) 0 }}

@@ -168,7 +168,17 @@ func (s *Service) submit(ctx context.Context, req run.SubmitRequest) (Submitted,
 		TimeoutSeconds: spec.Runtime.TimeoutSeconds,
 		MaxCostUSD:     req.MaxCostUSD,
 		ClusterID:      cluster,
+		MaxChildren:    s.defaults.ChildLimit(),
 	}); err != nil {
+		if errors.Is(err, store.ErrTooManyChildren) {
+			// Worth a line of its own: a run that hits this is either a
+			// workflow that wants a bigger ceiling or an agent that has been
+			// talked into a fan-out bomb by the repository it was pointed at,
+			// and the two are told apart by how often it happens.
+			s.log.Warn("a run was refused because its parent has started its full complement of children",
+				"parent", req.ParentRunID, "limit", s.defaults.ChildLimit())
+			return Submitted{}, run.TooManyChildren(req.ParentRunID, s.defaults.ChildLimit())
+		}
 		return Submitted{}, err
 	}
 

@@ -4,13 +4,22 @@
 GO_IMAGE      ?= golang:1.26
 PG_IMAGE      ?= postgres:18.1-bookworm
 ENVTEST_K8S   ?= 1.34.x
-AGENT_IMAGE   ?= haliphron/agent:dev
-AGENT_VERSION ?= dev
+# The published images. The registry is Docker Hub, which is what the charts
+# default to; override REGISTRY and IMAGE_TAG to publish somewhere else.
+REGISTRY      ?= javdet
+# The same source CI uses, so a local push and a pipeline push cannot disagree.
+IMAGE_TAG     ?= $(shell tr -d '[:space:]' < VERSION)
+# The nodes that run these are amd64, and a build on an Apple laptop is arm64
+# unless it is told otherwise. Pushing the wrong architecture is discovered as
+# a CrashLoopBackOff with `exec format error`, so the platform is explicit.
+PLATFORM      ?= linux/amd64
+AGENT_IMAGE   ?= $(REGISTRY)/haliphron-agent:$(IMAGE_TAG)
+AGENT_VERSION ?= $(IMAGE_TAG)
 CONTROLLER_VERSION ?= 0.1.0
 BACKEND_VERSION    ?= 0.1.0
-BACKEND_IMAGE      ?= haliphron/backend:dev
-CONTROLLER_IMAGE   ?= haliphron/controller:dev
-FRONTEND_IMAGE     ?= haliphron/frontend:dev
+BACKEND_IMAGE      ?= $(REGISTRY)/haliphron-backend:$(IMAGE_TAG)
+CONTROLLER_IMAGE   ?= $(REGISTRY)/haliphron-controller:$(IMAGE_TAG)
+FRONTEND_IMAGE     ?= $(REGISTRY)/haliphron-frontend:$(IMAGE_TAG)
 NODE_IMAGE         ?= node:22-alpine
 # The UI's toolchain runs in a container too, for the same reason the Go one
 # does: a laptop without Node still has to be able to build and check it.
@@ -34,6 +43,7 @@ DOCKER_RUN     = docker run --rm -e GOMAXPROCS=2 \
 
 .PHONY: generate test db-test fake-test image-test image-build controller-test controller-build backend-test backend-build verify
 .PHONY: backend-image controller-image frontend-image images chart-gen chart-deps chart-lint chart-template chart-package chart-verify
+.PHONY: backend-push controller-push frontend-push image-push images-push digests
 .PHONY: frontend-deps frontend-check frontend-build frontend-dev
 .PHONY: pull-go pull-node pull-pg
 
@@ -140,8 +150,37 @@ controller-image:
 frontend-image:
 	docker build -f frontend/Dockerfile -t $(FRONTEND_IMAGE) frontend
 
-## images: every image
+## images: every image, for this machine's architecture
 images: backend-image controller-image frontend-image image-build
+
+## *-push: build for $(PLATFORM) and push to the registry the charts default to.
+##         buildx and not build: a laptop's native build is arm64, and the
+##         nodes are not.
+backend-push:
+	docker buildx build --platform $(PLATFORM) -f backend/Dockerfile \
+	  -t $(BACKEND_IMAGE) --build-arg VERSION=$(BACKEND_VERSION) --push .
+
+controller-push:
+	docker buildx build --platform $(PLATFORM) -f controller/Dockerfile \
+	  -t $(CONTROLLER_IMAGE) --build-arg VERSION=$(CONTROLLER_VERSION) --push .
+
+frontend-push:
+	docker buildx build --platform $(PLATFORM) -f frontend/Dockerfile \
+	  -t $(FRONTEND_IMAGE) --push frontend
+
+image-push:
+	docker buildx build --platform $(PLATFORM) -f image/Dockerfile \
+	  -t $(AGENT_IMAGE) --build-arg VERSION=$(AGENT_VERSION) --push .
+
+## images-push: all four, to $(REGISTRY)
+images-push: backend-push controller-push image-push frontend-push
+
+## digests: what to pin. The agent image is passed to the chart by digest,
+##          because the image is what every run executes.
+digests:
+	@for i in $(BACKEND_IMAGE) $(CONTROLLER_IMAGE) $(AGENT_IMAGE) $(FRONTEND_IMAGE); do \
+	  printf '%s\n' "$$(docker buildx imagetools inspect --format '{{.Name}}@{{.Manifest.Digest}}' $$i 2>/dev/null || echo "$$i not pushed")"; \
+	done
 
 ## chart-gen: copy the generated CRD and RBAC into the runtime chart
 chart-gen:

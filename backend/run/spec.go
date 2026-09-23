@@ -68,8 +68,35 @@ type Defaults struct {
 	OTLPEndpoint            string
 	LogChunkIntervalSeconds int32
 
+	// NodeSelector and Tolerations place the agent pods for every run whose
+	// role does not place them itself. They are installation-wide because the
+	// node group that may run untrusted code is a property of the cluster
+	// fleet, not of a request — and a caller that has to name a node label to
+	// start a run is a caller that pins a node pool forever.
+	NodeSelector map[string]runv1.LabelValue
+	Tolerations  []runv1.Toleration
+
 	MaxPromptBytes int
 	MaxDepth       int16
+	MaxChildren    int32
+}
+
+// ChildLimit is the fan-out ceiling in force, with zero meaning the built-in
+// one. It is resolved here rather than at each call site so that admission and
+// the message a refused agent reads cannot name two different numbers.
+func (d Defaults) ChildLimit() int32 {
+	if d.MaxChildren <= 0 {
+		return MaxChildren
+	}
+	return d.MaxChildren
+}
+
+// TooManyChildren is the refusal a run gets once it has spent its fan-out
+// budget. The limit is named in the message because the caller is usually a
+// model, and a refusal it cannot interpret is one it will simply retry.
+func TooManyChildren(parent runv1.ULID, limit int32) error {
+	return invalid("parent_run_id",
+		"run %s has already started %d child runs, which is the limit", parent, limit)
 }
 
 // Role is a role as admission uses it: the runtime shape it implies, the
@@ -119,6 +146,22 @@ const (
 	MinTimeoutSeconds = 60
 	MaxTimeoutSeconds = 86400
 	MaxDepth          = 8
+
+	// MaxChildren is how many child runs one run may start over its whole
+	// lifetime, and it is the breadth half of a limit whose depth half is
+	// MaxDepth.
+	//
+	// Depth alone does not bound the tree. An agent holding a per-run token
+	// can call run_agent in a loop, and each child can do the same, so the
+	// work a single submitted run can create is breadth to the power of depth
+	// — unbounded in practice long before the depth ceiling is reached. The
+	// pod runs model-generated commands in a repository that may carry prompt
+	// injection, so "the agent would not do that" is not a limit.
+	//
+	// It counts children ever started, not children still running. A ceiling
+	// on concurrent children would be no ceiling at all: start ten, wait, start
+	// ten more, forever.
+	MaxChildren = 10
 
 	// MaxPromptBytes is 512 KiB, and the number is not arbitrary.
 	//
@@ -361,6 +404,16 @@ func renderRuntime(req SubmitRequest, role *Role, def Defaults) runv1.RuntimeSpe
 	}
 	if req.MaxTurns > 0 {
 		rt.MaxTurns = req.MaxTurns
+	}
+	// The installation's placement, for a run whose role named none. A role
+	// that places its runs replaces this rather than adding to it: merging two
+	// node selectors produces a conjunction nobody wrote down, and the first
+	// unschedulable run is where it would be discovered.
+	if len(rt.NodeSelector) == 0 {
+		rt.NodeSelector = def.NodeSelector
+	}
+	if len(rt.Tolerations) == 0 {
+		rt.Tolerations = def.Tolerations
 	}
 	return rt
 }
