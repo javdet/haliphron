@@ -5,6 +5,8 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -49,6 +51,24 @@ type Runtime interface {
 	Launch(r *Run) Command
 	// Parse normalises this CLI's own output format into text and usage.
 	Parse(stdout []byte) AgentResult
+}
+
+// PluginInstaller is the part of a runtime that knows how to register a plugin
+// catalogue and install from it.
+//
+// Separate from Runtime, and asserted for rather than required, because it is
+// the one capability a runtime may genuinely lack: an agent added later with no
+// plugin system of its own should skip the phase, not fail to compile. Both
+// current runtimes implement it.
+type PluginInstaller interface {
+	// AddMarketplace registers a catalogue. The argument is normally the local
+	// directory the entrypoint has already cloned, for the reason plugins.go
+	// gives: the CLI's own clone would not carry the run's git credential. On
+	// the one path where that is refused it is called again with the original
+	// source — see reservedMarketplaceName.
+	AddMarketplace(r *Run, source string) Command
+	// InstallPlugin installs one `plugin@marketplace`.
+	InstallPlugin(r *Run, id string) Command
 }
 
 // AgentResult is what the model run produced, normalised.
@@ -116,12 +136,33 @@ func (r *Run) gitCredentialHelperPath() string {
 // in it is one `cat` away from a log, and the file it reads is 0400 and mounted
 // read-only anyway.
 func (r *Run) writeGitCredentialHelper() error {
+	// The host the token was minted for. Every clone this pod makes passes
+	// through this helper, and since the plugins phase clones marketplaces
+	// whose URL may have come out of the cloned repository, "answer whoever
+	// asks" would hand the run's token to any host a repository cared to name.
+	// git tells the helper which host it is talking to; the helper answers that
+	// one and stays silent for the rest.
+	host, err := gitHost(r.cfg.RepoURL)
+	if err != nil {
+		return fail(runv1.ExitConfig, "RepoURLUnusable", "%s", err)
+	}
+
 	tokenPath := filepath.Join(r.layout.Secrets, runv1.SecretKeyGitToken)
 	script := "#!/bin/sh\n" +
 		"# Answers git's credential protocol for haliphron runs. Only 'get' is\n" +
 		"# implemented: there is nothing to store and nothing to erase, because the\n" +
 		"# credential lives in a read-only mount for the lifetime of the pod.\n" +
+		"#\n" +
+		"# The answer is bound to one host. A clone of anything else — a plugin\n" +
+		"# marketplace on another forge, or one a repository named — proceeds\n" +
+		"# unauthenticated rather than with this run's token.\n" +
 		"[ \"$1\" = get ] || exit 0\n" +
+		"asked=\n" +
+		"while IFS='=' read -r key value; do\n" +
+		"  [ -n \"$key\" ] || break\n" +
+		"  [ \"$key\" = host ] && asked=$value\n" +
+		"done\n" +
+		"[ \"$asked\" = '" + host + "' ] || exit 0\n" +
 		"printf 'username=x-access-token\\n'\n" +
 		"printf 'password=%s\\n' \"$(cat '" + tokenPath + "')\"\n"
 
@@ -130,6 +171,28 @@ func (r *Run) writeGitCredentialHelper() error {
 		return failWrap(runv1.ExitConfig, "LayoutUnwritable", err, "writing %s", path)
 	}
 	return nil
+}
+
+// gitHost is the host[:port] git will ask the credential helper about.
+//
+// Rejected rather than defaulted when it cannot be read: a helper bound to the
+// empty host answers nobody, and a run whose repository could not be parsed
+// would fail at the clone with a confusing authentication error instead of here
+// with this one.
+func gitHost(repoURL string) (string, error) {
+	parsed, err := url.Parse(strings.TrimSpace(repoURL))
+	if err != nil {
+		return "", fmt.Errorf("%s is not a usable repository URL: %w", runv1.EnvRepoURL, err)
+	}
+	if parsed.Host == "" {
+		return "", fmt.Errorf("%s names no host: %q", runv1.EnvRepoURL, repoURL)
+	}
+	// git spells the host without credentials and with the port when there is
+	// one, which is exactly url.Host.
+	if strings.ContainsAny(parsed.Host, "'\n") {
+		return "", fmt.Errorf("%s has an unusable host: %q", runv1.EnvRepoURL, parsed.Host)
+	}
+	return parsed.Host, nil
 }
 
 // phaseMCPPrepare renders the MCP configuration for the chosen runtime.

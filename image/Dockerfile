@@ -35,6 +35,8 @@ ARG DEBIAN_FRONTEND=noninteractive
 ARG NODE_MAJOR=22
 ARG GH_VERSION=2.63.2
 ARG GLAB_VERSION=1.51.0
+ARG CLAUDE_CODE_VERSION=2.1.274
+ARG CODEX_VERSION=0.154.0
 ARG TARGETARCH
 
 # git-lfs and the two forge CLIs are here rather than installed at runtime for
@@ -56,9 +58,15 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 
 # The agent CLIs. Installed globally so that nothing has to be written under
 # $HOME at first run — which is what a read-only root would refuse.
+#
+# Pinned, by the same argument as gh and glab above: versions that drift
+# uncontrolled are versions nobody can reproduce on the second attempt. It
+# matters more here than it did, because the plugins phase depends on specific
+# subcommands — `plugin marketplace add`, `plugin install`, `plugin add` — whose
+# spelling and flags have changed between releases.
 RUN npm install -g --no-fund --no-audit \
-      @anthropic-ai/claude-code \
-      @openai/codex \
+      @anthropic-ai/claude-code@${CLAUDE_CODE_VERSION} \
+      @openai/codex@${CODEX_VERSION} \
  && npm cache clean --force \
  && rm -rf /root/.npm
 

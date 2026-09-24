@@ -159,6 +159,11 @@ const (
 	// gets the agent to rewrite "its instructions" rewrites nothing that is
 	// read again.
 	DirRunPrivate = "/haliphron/run"
+	// DirMarketplaces is where the plugins phase clones the role's plugin
+	// catalogues. Under DirRunPrivate and not in the work tree, because a
+	// marketplace checked out into the workspace is a marketplace in the diff,
+	// the commit and the pull request.
+	DirMarketplaces = "/haliphron/run/marketplaces"
 
 	// HomeDir is writable (emptyDir). Every cache the CLIs would put under a
 	// read-only root is redirected here, which is what makes
@@ -176,11 +181,24 @@ const (
 // reservation and the reason it is named here rather than agreed informally.
 const RoleConfigKeyOutputSchema = "output.schema.json"
 
+// RoleConfigKeyPlugins is the second reserved key in the per-run ConfigMap: the
+// role's plugin marketplaces and the plugins to enable, rendered by the backend.
+//
+// Reserved by the same argument as RoleConfigKeyOutputSchema, and carried here
+// rather than in RenderedRunSpec for the reason the spec states about itself —
+// the controller turns roleConfig into a ConfigMap and only its name rides in
+// the CR. It is a haliphron-owned document rather than a rendered
+// settings.<role>.json because both runtimes read it and neither of their
+// configuration formats would survive the other.
+//
+// A role that ships a file under this name loses it.
+const RoleConfigKeyPlugins = "plugins.json"
+
 // RuntimePhase names one step of the entrypoint. The names are contract, not
 // logging: they key the checkpoint, they are the phase field of PhaseTiming,
 // and the UI groups a run's timeline by them.
 //
-// +kubebuilder:validation:Enum=init;validate;fetch;checkpoint;auth;clone;role;mcp-prepare;mcp-verify;run;parse;output;persist;commit;push;pr;finalize;notify
+// +kubebuilder:validation:Enum=init;validate;fetch;checkpoint;auth;clone;role;plugins;mcp-prepare;mcp-verify;run;parse;output;persist;commit;push;pr;finalize;notify
 type RuntimePhase string
 
 const (
@@ -208,6 +226,20 @@ const (
 	// RuntimePhaseRole resolves the role config chain and intersects it with
 	// the policy ceiling.
 	RuntimePhaseRole RuntimePhase = "role"
+	// RuntimePhasePlugins installs the role's plugins into the runtime's own
+	// configuration directory, from marketplaces the entrypoint has cloned
+	// itself.
+	//
+	// A phase of its own rather than a tail of RuntimePhaseRole because it is
+	// the only step between the clone and the agent that reaches the network:
+	// it needs its own timing, its own place in the checkpoint so a retry does
+	// not reinstall, and its own observedPhase for the operator who has to ask
+	// why a role's plugin is missing.
+	//
+	// After the clone, because the repository's own settings are the first
+	// source in the chain; before RuntimePhaseMCPPrepare, because a plugin may
+	// ship MCP servers of its own and mcp-verify should see them.
+	RuntimePhasePlugins RuntimePhase = "plugins"
 	// RuntimePhaseMCPPrepare renders the MCP configuration for the runtime,
 	// referencing secrets rather than inlining them.
 	RuntimePhaseMCPPrepare RuntimePhase = "mcp-prepare"
@@ -254,7 +286,7 @@ const (
 // done", which is only meaningful against a fixed sequence.
 var RuntimePhases = []RuntimePhase{
 	RuntimePhaseInit, RuntimePhaseValidate, RuntimePhaseFetch, RuntimePhaseCheckpoint,
-	RuntimePhaseAuth, RuntimePhaseClone, RuntimePhaseRole,
+	RuntimePhaseAuth, RuntimePhaseClone, RuntimePhaseRole, RuntimePhasePlugins,
 	RuntimePhaseMCPPrepare, RuntimePhaseMCPVerify,
 	RuntimePhaseRun, RuntimePhaseParse, RuntimePhaseOutput, RuntimePhasePersist,
 	RuntimePhaseCommit, RuntimePhasePush, RuntimePhasePR,

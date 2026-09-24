@@ -324,13 +324,16 @@ func phaseRole(_ context.Context, r *Run) error {
 }
 
 // roleChain is the resolution order, most specific first.
+//
+// The repository's two candidates are shared with the plugins phase, which
+// resolves the same files for the plugin half of a role. Two lists of the same
+// paths would drift, and the drift would look like "the settings the log named
+// are not the settings the plugins came from".
 func (r *Run) roleChain() []string {
 	var chain []string
-	if r.cfg.Role != "" {
-		chain = append(chain,
-			filepath.Join(r.layout.Workspace, ".claude", "settings."+r.cfg.Role+".json"),
-			filepath.Join(r.layout.RoleConfig, "settings."+r.cfg.Role+".json"),
-		)
+	if path := r.repositoryRoleSettingsPath(); path != "" {
+		chain = append(chain, path,
+			filepath.Join(r.layout.RoleConfig, "settings."+r.cfg.Role+".json"))
 	}
-	return append(chain, filepath.Join(r.layout.Workspace, ".claude", "settings.json"))
+	return append(chain, r.repositoryDefaultSettingsPath())
 }

@@ -1241,9 +1241,9 @@ components:
       type: string
       maxLength: 32
       enum:
-        [init, validate, fetch, checkpoint, auth, clone, role, mcp-prepare,
-         mcp-verify, run, parse, output, persist, commit, push, pr, finalize,
-         notify]
+        [init, validate, fetch, checkpoint, auth, clone, role, plugins,
+         mcp-prepare, mcp-verify, run, parse, output, persist, commit, push, pr,
+         finalize, notify]
       description: |
         One step of the agent image's entrypoint. The set and its order are the
         runtime contract's, and both are contract rather than logging: the
@@ -1761,9 +1761,9 @@ components:
 
     RuntimePhase:
       type: string
-      enum: [init, validate, fetch, checkpoint, auth, clone, role, mcp-prepare,
-             mcp-verify, run, parse, output, persist, commit, push, pr,
-             finalize, notify]
+      enum: [init, validate, fetch, checkpoint, auth, clone, role, plugins,
+             mcp-prepare, mcp-verify, run, parse, output, persist, commit, push,
+             pr, finalize, notify]
       description: |
         A phase of the image's entrypoint. Not to be confused with `Phase`: that
         one is about what the controller observes in the cluster, this one about

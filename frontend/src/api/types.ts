@@ -153,10 +153,82 @@ export interface LogPage {
   next_after?: string
 }
 
+export type PermissionMode = '' | 'plan' | 'acceptEdits' | 'bypassPermissions'
+
+export const PERMISSION_MODES: { value: PermissionMode; label: string }[] = [
+  { value: '', label: 'Platform default' },
+  { value: 'plan', label: 'plan — read only' },
+  { value: 'acceptEdits', label: 'acceptEdits — write in the workspace' },
+  { value: 'bypassPermissions', label: 'bypassPermissions — no sandbox' },
+]
+
+export type McpTransport = 'stdio' | 'http' | 'sse'
+
+export interface McpServer {
+  name: string
+  transport: McpTransport
+  url?: string
+  command?: string
+  args?: string[]
+}
+
+export interface PluginMarketplace {
+  /** The name the catalogue declares for itself — the `@suffix` in `enabled`. */
+  name?: string
+  /** `owner/repo` or an https git URL. */
+  url: string
+  /** A branch or tag; empty means the default branch. */
+  ref?: string
+}
+
+export interface PluginSpec {
+  marketplaces?: PluginMarketplace[]
+  /** `plugin@marketplace`, one per plugin. */
+  enabled?: string[]
+  /** Unset means true: the repository's own settings may choose plugins. */
+  trustRepositorySources?: boolean
+}
+
+export interface ToolPolicy {
+  allow?: string[]
+  deny?: string[]
+}
+
+/**
+ * A role spec, as the backend parses it.
+ *
+ * camelCase, unlike the rest of this file: the envelope around a role is the
+ * public API's snake_case, and the document inside it is the same vocabulary
+ * the machine contracts use. See docs/reference/role-spec.md.
+ *
+ * The index signature is not laziness. The backend ignores keys it does not
+ * understand so that a role written for a newer control plane still runs, and
+ * the form preserves them for the same reason — it round-trips what it cannot
+ * render rather than dropping it on save.
+ */
+export interface RoleSpec {
+  agent?: AgentType | string
+  model?: string
+  image?: string
+
+  permissionMode?: PermissionMode
+  maxTurns?: number
+  env?: { name: string; value: string }[]
+  mcpServers?: McpServer[]
+
+  toolPolicy?: ToolPolicy
+  plugins?: PluginSpec
+
+  configFiles?: Record<string, string>
+  clusterSelector?: Record<string, string>
+
+  [key: string]: unknown
+}
+
 export interface Role {
   name: string
-  /** An opaque document: the backend stores and replaces it whole. */
-  spec: unknown
+  /** Stored and replaced whole; unknown keys survive a round trip. */
+  spec: RoleSpec
   created_by: string
   updated_at: string
 }

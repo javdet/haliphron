@@ -117,6 +117,38 @@ func (s *Service) materials(ctx context.Context, runID runv1.ULID, spec runv1.Re
 				return nil, nil, err
 			}
 			roleConfig = parsed.ConfigFiles
+
+			// The reserved key is taken off the operator's own files
+			// unconditionally, not only when the role has plugins. A file left
+			// under that name would be read by the pod as the control plane's
+			// rendered document — an operator-supplied file deciding which code
+			// the agent runs — which is the whole of what the reservation is
+			// for.
+			_, shadowed := roleConfig[runv1.RoleConfigKeyPlugins]
+			if shadowed || parsed.Plugins.Declares() {
+				if shadowed {
+					s.log.Warn("a role ships a file under the reserved plugins key; it is dropped",
+						"run", runID, "role", spec.Role, "key", runv1.RoleConfigKeyPlugins)
+				}
+				// Copied into a fresh map: ConfigFiles came from the decoded
+				// role and is not this function's to mutate.
+				merged := make(map[string]string, len(roleConfig)+1)
+				for name, body := range roleConfig {
+					if name != runv1.RoleConfigKeyPlugins {
+						merged[name] = body
+					}
+				}
+				// Rendered rather than referenced: the pod reads one file and
+				// never learns that a roles table exists.
+				if parsed.Plugins.Declares() {
+					encoded, err := json.Marshal(parsed.Plugins)
+					if err != nil {
+						return nil, nil, fmt.Errorf("render plugins for %s: %w", runID, err)
+					}
+					merged[runv1.RoleConfigKeyPlugins] = string(encoded)
+				}
+				roleConfig = merged
+			}
 		case errors.Is(err, store.ErrNotFound):
 			// The role was deleted after the run was admitted. The spec is
 			// frozen and still describes what to run, so the run proceeds

@@ -13,7 +13,7 @@ did not choose. Nothing here assumes otherwise.
 
 | Path | What |
 |---|---|
-| `entrypoint/` | the eighteen phases, as a package |
+| `entrypoint/` | the nineteen phases, as a package |
 | `cmd/haliphron-entrypoint/` | the binary the image runs |
 | `Dockerfile` | Debian slim, Node, both agent CLIs, non-root, read-only root |
 

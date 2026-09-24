@@ -246,31 +246,72 @@ func TestExitCodeTableMatchesGo(t *testing.T) {
 // not in the schema would be a checkpoint the database refuses to record, and
 // a retry that never learns the model already ran.
 func TestRuntimePhaseDomainMatchesGo(t *testing.T) {
-	raw, err := os.ReadFile(filepath.Join(repoRoot(), "db", "migrations", "0001_domains.sql"))
-	if err != nil {
-		t.Fatalf("read the domains migration: %v", err)
-	}
-
-	// The CHECK list of the runtime_phase domain, read back out of the DDL.
+	// The effective constraint, not the first one declared. A domain's CHECK
+	// cannot be added to — it is dropped and re-added — so every phase this
+	// system gains amends runtime_phase in a migration of its own, and the set
+	// a fresh database ends up with is the last declaration, not 0001's.
+	//
 	// Reading the text rather than the database keeps this test in the contract
 	// suite, which has no PostgreSQL; test/store asserts the same set against a
 	// live server.
-	const marker = "CREATE DOMAIN runtime_phase AS text"
-	ddl := string(raw)
-	idx := strings.Index(ddl, marker)
-	if idx < 0 {
-		t.Fatal("0001_domains.sql declares no runtime_phase domain; " +
+	names, from := runtimePhaseDomain(t)
+	if names == nil {
+		t.Fatal("no migration declares the runtime_phase domain; " +
 			"run_attempts.completed_phases has nothing to constrain it")
 	}
-	body := ddl[idx : idx+strings.Index(ddl[idx:], ";")]
+	t.Logf("runtime_phase is constrained by %s", from)
+	assertSameSet(t, "runtime_phase domain", phaseStrings(), names)
+}
 
-	var names []string
-	for _, quoted := range strings.Split(body, "'") {
-		if quoted != "" && !strings.ContainsAny(quoted, "(), \n\t") {
-			names = append(names, quoted)
+// runtimePhaseDomain returns the last CHECK list any migration puts on
+// runtime_phase, and the file it came from.
+func runtimePhaseDomain(t *testing.T) (names []string, from string) {
+	t.Helper()
+
+	dir := filepath.Join(repoRoot(), "db", "migrations")
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		t.Fatalf("read the migrations: %v", err)
+	}
+	files := make([]string, 0, len(entries))
+	for _, e := range entries {
+		if !e.IsDir() && strings.HasSuffix(e.Name(), ".sql") {
+			files = append(files, e.Name())
 		}
 	}
-	assertSameSet(t, "runtime_phase domain", phaseStrings(), names)
+	// Lexical order is apply order: the migrations are numbered.
+	sort.Strings(files)
+
+	// Both spellings that constrain the domain — the original declaration and
+	// the drop-and-re-add a later migration must use.
+	markers := []string{
+		"CREATE DOMAIN runtime_phase AS text",
+		"ALTER DOMAIN runtime_phase ADD CONSTRAINT",
+	}
+	for _, name := range files {
+		raw, err := os.ReadFile(filepath.Join(dir, name))
+		if err != nil {
+			t.Fatalf("read %s: %v", name, err)
+		}
+		ddl := string(raw)
+		for _, marker := range markers {
+			idx := strings.Index(ddl, marker)
+			if idx < 0 {
+				continue
+			}
+			body := ddl[idx : idx+strings.Index(ddl[idx:], ";")]
+			var found []string
+			for _, quoted := range strings.Split(body, "'") {
+				if quoted != "" && !strings.ContainsAny(quoted, "(), \n\t") {
+					found = append(found, quoted)
+				}
+			}
+			if len(found) > 0 {
+				names, from = found, name
+			}
+		}
+	}
+	return names, from
 }
 
 func TestRuntimePhaseEnumMatchesGo(t *testing.T) {

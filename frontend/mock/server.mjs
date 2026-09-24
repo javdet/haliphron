@@ -100,7 +100,7 @@ const attempts = {
 const LOG = `[init]     haliphron agent-runtime 0.1.0 (claude-code)
 [validate] run 01JD8QK3R4ZP7WN2XA5T6M9BCD, role coder, model claude-opus-5
 [clone]    https://github.com/acme/checkout @ main → 9f2c1ab
-[role]     8 skills, 3 mcp servers, tool policy: write-in-workspace
+[plugins]  marketplace playneta, installed playneta-infra-coder@playneta\n[role]     8 skills, 3 mcp servers, tool policy: write-in-workspace
 [run]      turn 1 · reading src/checkout/refund.go
 [run]      turn 2 · reading src/checkout/refund_test.go
 [run]      turn 6 · editing src/checkout/refund.go
@@ -108,14 +108,33 @@ const LOG = `[init]     haliphron agent-runtime 0.1.0 (claude-code)
 [run]      turn 14 · writing the summary
 `
 
+// camelCase inside the spec, snake_case around it — see
+// docs/reference/role-spec.md. These fixtures are the shape backend/app/role.go
+// actually parses; an earlier set used `allowed_tools`, which is not a field of
+// a role spec and which the backend silently discarded.
 const roles = [
-  { name: 'coder', spec: { agent: 'claude-code', model: 'claude-opus-5', allowed_tools: ['Read', 'Edit', 'Bash'] },
+  { name: 'coder',
+    spec: { agent: 'claude-code', model: 'anthropic/claude-opus-5',
+      permissionMode: 'acceptEdits',
+      toolPolicy: { allow: ['Read', 'Edit', 'Bash'] },
+      plugins: {
+        marketplaces: [{ name: 'playneta', url: 'playneta/claude-plugin' }],
+        enabled: ['playneta-infra-coder@playneta'],
+      } },
     created_by: 'maria', updated_at: iso(9 * 86400000) },
-  { name: 'code-reviewer', spec: { agent: 'claude-code', model: 'claude-sonnet-5', allowed_tools: ['Read', 'Grep'] },
+  { name: 'code-reviewer',
+    spec: { agent: 'claude-code', model: 'anthropic/claude-sonnet-5',
+      permissionMode: 'plan',
+      toolPolicy: { allow: ['Read', 'Grep'] } },
     created_by: 'maria', updated_at: iso(4 * 86400000) },
-  { name: 'sre', spec: { agent: 'codex', model: 'gpt-5.1-codex', allowed_tools: ['Read', 'Bash'] },
+  { name: 'sre',
+    spec: { agent: 'codex', model: 'openai/gpt-5.1-codex',
+      toolPolicy: { allow: ['Read', 'Bash'], deny: ['WebFetch'] } },
     created_by: 'dmitri', updated_at: iso(2 * 86400000) },
-  { name: 'devsecops', spec: { agent: 'claude-code', allowed_tools: ['Read'] },
+  { name: 'devsecops',
+    spec: { agent: 'claude-code',
+      plugins: { marketplaces: [{ name: 'playneta', url: 'playneta/claude-plugin' }],
+        enabled: ['security-review@playneta'], trustRepositorySources: false } },
     created_by: 'dmitri', updated_at: iso(86400000) },
 ]
 

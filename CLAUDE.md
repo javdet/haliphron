@@ -86,7 +86,7 @@ NetworkPolicy.
 | `api/` | the four wire contracts as Go types + OpenAPI/JSON Schema. Depends on nothing internal |
 | `backend/` | control plane: `restapi` `mcp` `clusterapi` listeners → `app` use cases → `store` (pgx) |
 | `controller/` | the in-cluster controller: `lease` → `materialize` → `agentrun` reconciler → `launcher` (Job) |
-| `image/` | the agent image entrypoint: eighteen phases, `entrypoint/runner.go` is the spine |
+| `image/` | the agent image entrypoint: nineteen phases, `entrypoint/runner.go` is the spine |
 | `db/` | migrations and the contract queries (`lease.sql`, `expire_*.sql`, `lock_run.sql`) |
 | `fake/` | `backend`, `controller`, `controlplane` — one faithful implementation of each contract side |
 | `test/*` | cross-module contract suites, one per track, kept out of the shipping modules |

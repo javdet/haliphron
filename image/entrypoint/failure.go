@@ -1,4 +1,4 @@
-// Package entrypoint is the agent image's entrypoint: the eighteen phases
+// Package entrypoint is the agent image's entrypoint: the nineteen phases
 // between a pod starting and a completion report being posted.
 //
 // It exists as a Go package rather than a shell script for a reason the

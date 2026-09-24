@@ -573,6 +573,7 @@ spec:
                   - auth
                   - clone
                   - role
+                  - plugins
                   - mcp-prepare
                   - mcp-verify
                   - run

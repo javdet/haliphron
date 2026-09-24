@@ -233,7 +233,7 @@ func (b Builder) env(cr *agentrunv1alpha1.AgentRun, attempt int32, completedPhas
 	}
 	// Absent on the first attempt, which the entrypoint reads as "nothing is
 	// done yet" — the same non-event the old 404 on state.json was. Set as a
-	// literal because it is neither secret nor large: eighteen phase names.
+	// literal because it is neither secret nor large: nineteen phase names.
 	if len(completedPhases) > 0 {
 		vals[runv1.EnvCompletedPhases] = joinPhases(completedPhases)
 	}

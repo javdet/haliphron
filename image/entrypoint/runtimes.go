@@ -1,8 +1,11 @@
 package entrypoint
 
 import (
+	"bytes"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"sort"
@@ -33,6 +36,14 @@ func baseEnv(r *Run) []string {
 		"XDG_DATA_HOME=" + filepath.Join(home, ".local", "share"),
 		"npm_config_cache=" + filepath.Join(home, ".npm"),
 		"TMPDIR=/tmp",
+		// A run installs the plugin versions the plugins phase resolved and
+		// then keeps them. Without this both CLIs refresh catalogues and
+		// upgrade plugins in the background, so the same role could run
+		// different code on two attempts of one run — and would reach the
+		// network from inside the model's turn, which is the one place this
+		// image has no way to report a failure from.
+		"DISABLE_AUTOUPDATER=1",
+		"CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1",
 		// The agent is told which run it is, so its own output can reference it.
 		// Nothing here is a credential and nothing here is a capability.
 		runv1.EnvRunID + "=" + string(r.cfg.RunID),
@@ -124,6 +135,29 @@ func (claudeCode) VerifyMCP(r *Run) (Command, bool) {
 		Dir:  r.layout.Workspace,
 		Env:  r.agentEnv,
 	}, true
+}
+
+// AddMarketplace registers a cloned catalogue.
+//
+// --scope user rather than project: project scope writes into the cloned
+// repository's own .claude/settings.json, which would put the marketplace in
+// the diff and then in the pull request.
+func (claudeCode) AddMarketplace(r *Run, source string) Command {
+	return Command{
+		Path: "claude",
+		Args: []string{"plugin", "marketplace", "add", source, "--scope", "user"},
+		Dir:  r.layout.Workspace,
+		Env:  r.agentEnv,
+	}
+}
+
+func (claudeCode) InstallPlugin(r *Run, id string) Command {
+	return Command{
+		Path: "claude",
+		Args: []string{"plugin", "install", id, "--scope", "user", "--json"},
+		Dir:  r.layout.Workspace,
+		Env:  r.agentEnv,
+	}
 }
 
 func (claudeCode) Launch(r *Run) Command {
@@ -221,10 +255,40 @@ func (codex) PrepareMCP(r *Run) ([]string, error) {
 	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
 		return nil, failWrap(runv1.ExitConfig, "LayoutUnwritable", err, "creating %s", filepath.Dir(path))
 	}
-	if err := os.WriteFile(path, []byte(servers), 0o600); err != nil {
+	// Appended, not written. The plugins phase runs before this one and records
+	// what it installed in this same file — codex keeps its marketplaces and
+	// its enabled plugins in config.toml — so a truncating write here would
+	// silently undo the whole of it on every codex run.
+	existing, err := os.ReadFile(path)
+	if err != nil && !errors.Is(err, fs.ErrNotExist) {
+		return nil, failWrap(runv1.ExitConfig, "LayoutUnreadable", err, "reading %s", path)
+	}
+	body := servers
+	if len(bytes.TrimSpace(existing)) > 0 {
+		body = string(existing) + "\n" + servers
+	}
+	if err := os.WriteFile(path, []byte(body), 0o600); err != nil {
 		return nil, failWrap(runv1.ExitConfig, "LayoutUnwritable", err, "writing %s", path)
 	}
 	return env, nil
+}
+
+func (codex) AddMarketplace(r *Run, source string) Command {
+	return Command{
+		Path: "codex",
+		Args: []string{"plugin", "marketplace", "add", source, "--json"},
+		Dir:  r.layout.Workspace,
+		Env:  r.agentEnv,
+	}
+}
+
+func (codex) InstallPlugin(r *Run, id string) Command {
+	return Command{
+		Path: "codex",
+		Args: []string{"plugin", "add", id, "--json"},
+		Dir:  r.layout.Workspace,
+		Env:  r.agentEnv,
+	}
 }
 
 func (codex) VerifyMCP(r *Run) (Command, bool) {

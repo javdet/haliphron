@@ -244,7 +244,7 @@ func TestARolesFilesTravelBesideTheSpecAndNotInsideIt(t *testing.T) {
 		"permissionMode": "acceptEdits",
 		"maxTurns": 40,
 		"toolPolicy": {"allow": ["Bash", "Edit", "Read"], "deny": ["WebFetch"]},
-		"configFiles": {".claude/settings.json": "{\"permissions\":{}}"}
+		"configFiles": {"settings.coder.json": "{\"permissions\":{}}"}
 	}`
 	if _, err := h.Store.UpsertRole(context.Background(), "coder", json.RawMessage(roleSpec), "test"); err != nil {
 		t.Fatalf("create role: %v", err)
@@ -263,7 +263,11 @@ func TestARolesFilesTravelBesideTheSpecAndNotInsideIt(t *testing.T) {
 	if lease.Spec.ToolPolicy == nil || len(lease.Spec.ToolPolicy.Allow) != 3 {
 		t.Errorf("tool policy = %+v, want the role's allow list", lease.Spec.ToolPolicy)
 	}
-	if lease.RoleConfig[".claude/settings.json"] == "" {
+	// The key is flat. It becomes a ConfigMap data key verbatim, and a
+	// ConfigMap key may not contain a separator — a role written with
+	// ".claude/settings.json" in it fails materialisation in the cluster, which
+	// is why PutRole refuses the key rather than rewriting it.
+	if lease.RoleConfig["settings.coder.json"] == "" {
 		t.Error("the role's files did not travel with the lease")
 	}
 

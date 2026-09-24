@@ -30,21 +30,25 @@ type Layout struct {
 	RoleConfig string
 	Secrets    string
 	RunPrivate string
-	Home       string
+	// Marketplaces is where the plugins phase clones catalogues. Inside
+	// RunPrivate, so it is collected with the pod and never seen by git.
+	Marketplaces string
+	Home         string
 }
 
 // DefaultLayout is the layout inside the image.
 func DefaultLayout() Layout {
 	return Layout{
-		Workspace:  runv1.MountWorkspace,
-		RunIO:      runv1.DirRunIO,
-		Output:     runv1.FileOutput,
-		Inputs:     runv1.DirInputs,
-		Artifacts:  runv1.DirArtifacts,
-		RoleConfig: runv1.MountRoleConfig,
-		Secrets:    runv1.MountSecrets,
-		RunPrivate: runv1.DirRunPrivate,
-		Home:       runv1.HomeDir,
+		Workspace:    runv1.MountWorkspace,
+		RunIO:        runv1.DirRunIO,
+		Output:       runv1.FileOutput,
+		Inputs:       runv1.DirInputs,
+		Artifacts:    runv1.DirArtifacts,
+		RoleConfig:   runv1.MountRoleConfig,
+		Secrets:      runv1.MountSecrets,
+		RunPrivate:   runv1.DirRunPrivate,
+		Marketplaces: runv1.DirMarketplaces,
+		Home:         runv1.HomeDir,
 	}
 }
 
@@ -54,15 +58,16 @@ func DefaultLayout() Layout {
 func LayoutUnder(root string) Layout {
 	under := func(p string) string { return filepath.Join(root, p) }
 	return Layout{
-		Workspace:  under(runv1.MountWorkspace),
-		RunIO:      under(runv1.DirRunIO),
-		Output:     under(runv1.FileOutput),
-		Inputs:     under(runv1.DirInputs),
-		Artifacts:  under(runv1.DirArtifacts),
-		RoleConfig: under(runv1.MountRoleConfig),
-		Secrets:    under(runv1.MountSecrets),
-		RunPrivate: under(runv1.DirRunPrivate),
-		Home:       under(runv1.HomeDir),
+		Workspace:    under(runv1.MountWorkspace),
+		RunIO:        under(runv1.DirRunIO),
+		Output:       under(runv1.FileOutput),
+		Inputs:       under(runv1.DirInputs),
+		Artifacts:    under(runv1.DirArtifacts),
+		RoleConfig:   under(runv1.MountRoleConfig),
+		Secrets:      under(runv1.MountSecrets),
+		RunPrivate:   under(runv1.DirRunPrivate),
+		Marketplaces: under(runv1.DirMarketplaces),
+		Home:         under(runv1.HomeDir),
 	}
 }
 

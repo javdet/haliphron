@@ -199,3 +199,158 @@ export function tokens(n: number): string {
   if (n < 1_000_000) return `${(n / 1000).toFixed(1)}k`
   return `${(n / 1_000_000).toFixed(2)}M`
 }
+
+/**
+ * A collapsible section. Used for the settings a role usually leaves alone, so
+ * the fields that are actually edited are not buried among them.
+ */
+export function Section({
+  title,
+  hint,
+  children,
+  open,
+}: {
+  title: string
+  hint?: string
+  children: ReactNode
+  open?: boolean
+}) {
+  return (
+    <details className="section" open={open}>
+      <summary>
+        <span>{title}</span>
+        {hint && <span className="small muted">{hint}</span>}
+      </summary>
+      <div className="stack">{children}</div>
+    </details>
+  )
+}
+
+/**
+ * An editable list of strings, shown as removable chips.
+ *
+ * Entries are added on Enter, because the alternative — a free-text box the
+ * caller splits on commas — makes an accidental comma a second, silently wrong
+ * entry, and every list here is a name something else will be looked up by.
+ */
+export function StringList({
+  value,
+  onChange,
+  placeholder,
+  validate,
+}: {
+  value: string[]
+  onChange: (next: string[]) => void
+  placeholder?: string
+  /** Returns a message when the entry may not be added. */
+  validate?: (entry: string) => string | undefined
+}) {
+  const [draft, setDraft] = useState('')
+  const [error, setError] = useState('')
+
+  const add = () => {
+    const entry = draft.trim()
+    if (!entry) return
+    if (value.includes(entry)) {
+      setError('already in the list')
+      return
+    }
+    const complaint = validate?.(entry)
+    if (complaint) {
+      setError(complaint)
+      return
+    }
+    setError('')
+    setDraft('')
+    onChange([...value, entry])
+  }
+
+  return (
+    <div className="stack" style={{ gap: 6 }}>
+      {value.length > 0 && (
+        <div className="chips">
+          {value.map((entry) => (
+            <span key={entry} className="chip">
+              <span className="mono">{entry}</span>
+              <button
+                type="button"
+                className="chip-x"
+                aria-label={`Remove ${entry}`}
+                onClick={() => onChange(value.filter((v) => v !== entry))}
+              >
+                ✕
+              </button>
+            </span>
+          ))}
+        </div>
+      )}
+      <div className="row" style={{ gap: 6, flexWrap: 'nowrap' }}>
+        <input
+          value={draft}
+          placeholder={placeholder}
+          onChange={(e) => {
+            setDraft(e.target.value)
+            setError('')
+          }}
+          onKeyDown={(e) => {
+            if (e.key === 'Enter') {
+              e.preventDefault()
+              add()
+            }
+          }}
+        />
+        <button type="button" className="ghost sm" onClick={add} disabled={!draft.trim()}>
+          Add
+        </button>
+      </div>
+      {error && <span className="err">{error}</span>}
+    </div>
+  )
+}
+
+/**
+ * A repeatable row of structured entries: MCP servers, marketplaces, variables.
+ *
+ * The blank row is created by the caller's `empty`, so a row always arrives
+ * with the shape the rest of the form expects rather than as a partial object
+ * that every reader has to guard against.
+ */
+export function Rows<T>({
+  value,
+  onChange,
+  empty,
+  addLabel,
+  children,
+}: {
+  value: T[]
+  onChange: (next: T[]) => void
+  empty: () => T
+  addLabel: string
+  children: (row: T, set: (next: T) => void, index: number) => ReactNode
+}) {
+  const replace = (index: number, next: T) =>
+    onChange(value.map((row, i) => (i === index ? next : row)))
+
+  return (
+    <div className="stack" style={{ gap: 8 }}>
+      {value.map((row, index) => (
+        <div key={index} className="rowset">
+          <div className="rowset-fields">{children(row, (next) => replace(index, next), index)}</div>
+          <button
+            type="button"
+            className="ghost sm"
+            aria-label="Remove row"
+            onClick={() => onChange(value.filter((_, i) => i !== index))}
+          >
+            ✕
+          </button>
+        </div>
+      ))}
+      <div>
+        <button type="button" className="ghost sm" onClick={() => onChange([...value, empty()])}>
+          {addLabel}
+        </button>
+      </div>
+    </div>
+  )
+}

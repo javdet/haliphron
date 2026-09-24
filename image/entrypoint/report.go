@@ -60,7 +60,7 @@ func (r *Run) buildReport() *runv1.CompletionReport {
 		// that is assembling it, nor of the one that will send it, and the
 		// alternative — sending the report before it is complete — trades a
 		// fact nobody needs for the one thing the report exists to deliver.
-		// The checkpoint, written a few lines later, does have all eighteen.
+		// The checkpoint, written a few lines later, does have all nineteen.
 		PhaseTimings: r.timings,
 	}
 	report.FailureClass = runv1.FailureClassForExitCode(report.ExitCode)

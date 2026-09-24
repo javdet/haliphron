@@ -130,6 +130,11 @@ type Role struct {
 
 	// ClusterSelector restricts placement to clusters carrying these labels.
 	ClusterSelector map[string]string
+
+	// Plugins are the role's marketplaces and the plugins to enable. Like
+	// ConfigFiles they are material rather than spec: they become a key of the
+	// per-run ConfigMap and never appear in the CR.
+	Plugins *runv1.PluginSpec
 }
 
 var (

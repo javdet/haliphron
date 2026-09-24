@@ -89,7 +89,7 @@ means](../explanation/what-succeeded-means.md).
 
 ## Runtime phases
 
-The eighteen phases of the agent image entrypoint, in execution order. The
+The nineteen phases of the agent image entrypoint, in execution order. The
 order is contract: the checkpoint's resume rule is "every phase before the
 first unfinished one is done", which is only meaningful against a fixed
 sequence.
@@ -103,17 +103,18 @@ sequence.
 | 5 | `auth` | wires the model credential and the git credential helper |
 | 6 | `clone` | clones the repository |
 | 7 | `role` | resolves the role chain and intersects it with the policy ceiling |
-| 8 | `mcp-prepare` | renders MCP configuration, referencing secrets rather than inlining them |
-| 9 | `mcp-verify` | proves the MCP servers came up |
-| 10 | `run` | the agent CLI, under the timeout |
-| 11 | `parse` | normalises the runtime's output into `result.md` and usage |
-| 12 | `output` | wraps the payload in the envelope and validates any declared schema |
-| 13 | `persist` | uploads the result, output and log so far |
-| 14 | `commit` | commits what the agent left uncommitted |
-| 15 | `push` | pushes with `--force-with-lease` |
-| 16 | `pr` | creates or updates the pull request |
-| 17 | `finalize` | uploads the final log and the completion report |
-| 18 | `notify` | posts the report to the controller |
+| 8 | `plugins` | registers the role's marketplaces and installs its plugins |
+| 9 | `mcp-prepare` | renders MCP configuration, referencing secrets rather than inlining them |
+| 10 | `mcp-verify` | proves the MCP servers came up |
+| 11 | `run` | the agent CLI, under the timeout |
+| 12 | `parse` | normalises the runtime's output into `result.md` and usage |
+| 13 | `output` | wraps the payload in the envelope and validates any declared schema |
+| 14 | `persist` | uploads the result, output and log so far |
+| 15 | `commit` | commits what the agent left uncommitted |
+| 16 | `push` | pushes with `--force-with-lease` |
+| 17 | `pr` | creates or updates the pull request |
+| 18 | `finalize` | uploads the final log and the completion report |
+| 19 | `notify` | posts the report to the controller |
 
 `persist` runs **before** the git phases, so what the model produced is durable
 before anything allowed to fail. See [what "Succeeded"

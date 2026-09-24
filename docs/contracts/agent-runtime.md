@@ -230,17 +230,18 @@ not logging.
 | 5 | `auth` | Model credentials, git credential helper, `gh`/`glab` | 30 |
 | 6 | `clone` | Clone, checkout base, create the target branch | 20 / 30 |
 | 7 | `role` | The resolution chain, intersected with the policy ceiling | 30 |
-| 8 | `mcp-prepare` | Render the MCP configuration for the runtime, secrets by reference | 30 |
-| 9 | `mcp-verify` | Check that the servers came up | 30 |
-| 10 | `run` | The agent CLI under a timeout, tee'd to the log and chunked upstream | 10 / 11 |
-| 11 | `parse` | Normalize the runtime's output into `result.md` and `usage` | 10 |
-| 12 | `output` | Wrap the agent's output in the envelope, validate against the node schema | 12 |
-| 13 | `persist` | Upload `result.md`, `output.json` and the log so far | 21 |
-| 14 | `commit` | Commit any leftover changes | 20 |
-| 15 | `push` | `push --force-with-lease` to the deterministic branch | 20 |
-| 16 | `pr` | create-or-update the PR/MR | 20 |
-| 17 | `finalize` | Upload the final log and `completion.json` | 21 |
-| 18 | `notify` | POST the report to the controller | — |
+| 8 | `plugins` | Register the role's marketplaces and install its plugins | 20 / 30 |
+| 9 | `mcp-prepare` | Render the MCP configuration for the runtime, secrets by reference | 30 |
+| 10 | `mcp-verify` | Check that the servers came up | 30 |
+| 11 | `run` | The agent CLI under a timeout, tee'd to the log and chunked upstream | 10 / 11 |
+| 12 | `parse` | Normalize the runtime's output into `result.md` and `usage` | 10 |
+| 13 | `output` | Wrap the agent's output in the envelope, validate against the node schema | 12 |
+| 14 | `persist` | Upload `result.md`, `output.json` and the log so far | 21 |
+| 15 | `commit` | Commit any leftover changes | 20 |
+| 16 | `push` | `push --force-with-lease` to the deterministic branch | 20 |
+| 17 | `pr` | create-or-update the PR/MR | 20 |
+| 18 | `finalize` | Upload the final log and `completion.json` | 21 |
+| 19 | `notify` | POST the report to the controller | — |
 
 ### Why `persist` comes before git rather than after
 
@@ -481,6 +482,145 @@ mounted read-only the same way, and it is consumed once. A role that puts a file
 under that name will lose it — that is the price of the reservation and the
 reason it is named here rather than agreed verbally. A separate lease field is
 introduced in phase 3, once nodes begin declaring schemas in earnest.
+
+---
+
+## 7a. Plugins
+
+`/haliphron/role/plugins.json` is the **second reserved key**, on the same terms
+as the first: rendered by the backend from the role, mounted read-only, consumed
+once, and lost to a role that ships a file under that name. It is a
+haliphron-owned document rather than a rendered `settings.<role>.json` because
+both runtimes read it and neither one's configuration format would survive the
+other.
+
+```json
+{
+  "marketplaces": [{"name": "playneta", "url": "playneta/claude-plugin", "ref": "main"}],
+  "enabled": ["playneta-infra-coder@playneta"],
+  "trustRepositorySources": true
+}
+```
+
+`url` is `owner/repo` or an `https://` git URL; nothing else is admitted, because
+the pod holds an https token and no key. `enabled` is always
+`plugin@marketplace` — a bare name resolves against every catalogue the CLI
+knows, which is an ambiguity a role must not be able to express — and the
+marketplace half must be one the **same document** declares, since the chain
+picks a single source and nothing else will register it.
+`trustRepositorySources` defaults to **true** when absent.
+
+### The chain
+
+Executed in the `plugins` phase, after `role`, most specific first. The first
+source that declares anything wins **outright**; sources are not merged, because
+a repository that could add to the role's list is a repository choosing code the
+operator did not.
+
+1. `$REPO/.claude/settings.<role>.json` — its `extraKnownMarketplaces` and
+   `enabledPlugins`, read only when `trustRepositorySources` is true
+2. `/haliphron/role/plugins.json` — the role's own list
+3. `$REPO/.claude/settings.json` — the same two keys, same condition
+4. nothing: the agent starts with whatever the image already has
+
+Steps 1 and 3 are **claude-code only**. Those files are that CLI's own format
+and say nothing about what codex should load; a codex run takes its plugins from
+the role and nowhere else, rather than issuing `codex plugin add` for a list
+written for the other runtime.
+
+A settings file that enables plugins without declaring the marketplaces they
+come from — an ordinary thing to find, since the catalogues were added once by
+hand on a developer's machine — declares nothing this pod can act on. It is
+skipped, and the chain carries on to the role, rather than winning and then
+failing the run at an install nothing could have registered.
+
+A run with no repository has neither 1 nor 3, so it falls through to the role's
+list and then to nothing.
+
+Reading those keys and issuing the commands is not optional politeness: a
+settings file **does not install anything by itself** in a pod. Both CLIs apply
+`extraKnownMarketplaces` only after the workspace is trusted, and a plugin from
+an external source that is merely listed in `enabledPlugins` waits for an
+explicit install. Headless, neither ever happens.
+
+### Why the entrypoint clones the marketplace itself
+
+Each CLI will fetch a marketplace named to it, and neither will do so with the
+run's credential: the token lives in a file that only the helper from the `auth`
+phase knows how to read, and it is kept out of the agent's environment on
+purpose. So the entrypoint clones each catalogue with its own git — credential
+helper attached — into `/haliphron/run/marketplaces/<name>`, and registers that
+**local directory** with the CLI.
+
+Two consequences are contract. A private marketplace works, which is the case
+the feature exists for. And the checkout is under `DirRunPrivate`, never in the
+workspace: a marketplace in the work tree is a marketplace in the diff, the
+commit and the pull request.
+
+**The credential helper is bound to one host** — the run repository's — and this
+is what makes the above safe rather than dangerous. Every clone the pod makes
+goes through that one helper, and with `trustRepositorySources` on, a
+marketplace URL may have come out of the cloned repository. A helper that
+answered whichever host git happened to be talking to would hand the run's git
+token to any server a repository cared to name: point the clone at it, answer
+`401` with a Basic challenge, read the token out of the header. git states the
+host on the helper's stdin; the helper answers that one and stays silent for
+every other. A marketplace on a different forge is therefore cloned
+unauthenticated — public catalogues work, private ones elsewhere do not, and
+that is the correct trade.
+
+| haliphron concept | claude-code | codex |
+|---|---|---|
+| register a catalogue | `claude plugin marketplace add <dir> --scope user` | `codex plugin marketplace add <dir> --json` |
+| install a plugin | `claude plugin install <p>@<m> --scope user --json` | `codex plugin add <p>@<m> --json` |
+| where the state lands | `$CLAUDE_CONFIG_DIR/settings.json` | `$CODEX_HOME/config.toml` |
+
+`--scope user` rather than `project`: project scope writes into the cloned
+repository, which would put the marketplace in the pull request.
+
+One exception to the local-directory rule. claude-code reserves the names of
+Anthropic's own marketplaces and refuses to let a local directory claim one, so
+a role naming `anthropics/claude-code` fails for a reason that has nothing to do
+with credentials. On that refusal — and only that one — the registration is
+retried with the original source. Those catalogues are public and need no token.
+Any other refusal fails the run, because retrying by source would ask the CLI to
+fetch a private catalogue with a credential it does not have and report that
+instead of the real problem.
+
+Both runtimes run with `DISABLE_AUTOUPDATER=1`, so a run keeps the plugin
+versions this phase resolved. Without it the CLIs refresh catalogues and upgrade
+plugins in the background, and the same role could run different code on two
+attempts of one run — reaching the network from inside the model's turn, which
+is the one place this image cannot report a failure from.
+
+A marketplace that cannot be reached is exit 20 and retryable; one that is
+refused — 404, 403, bad credential — is exit 30, by the same classification the
+`clone` phase uses. A plugin that will not install is exit 30: a name that is
+not in the catalogue will not appear on a second attempt.
+
+### What a plugin can do
+
+A plugin is arbitrary code: hooks that run shell commands, MCP servers, and
+executables placed on the agent's `PATH`. The tool ceiling constrains **tool
+names**; it does not constrain a plugin's hooks, and a plugin's own MCP servers
+do not pass through the role's `mcpServers`.
+
+Marketplaces named by the role are an operator's decision — `PUT /roles` is
+admin-scoped and a run request cannot name one. Step 1 of the chain is not: it
+comes from the cloned repository, which this system treats as untrusted and
+possibly prompt-injected, and it lets that repository choose what runs beside
+the agent. `trustRepositorySources: false` is the switch, and it is the right
+setting for a role that runs against code the installation does not control. A
+role that sets only that flag still ships a `plugins.json`, because a pod that
+found no document would apply the default and turn the repository back on.
+
+What a repository declares is validated exactly as a role's own list is,
+including `MaxPluginMarketplaces` and `MaxPluginsEnabled` — a repository that
+could name a few thousand catalogues could spend the whole lease fetching them.
+A settings file that fails that validation is ignored with a line in the log
+rather than failing the run: it is written for a developer's machine, and may
+name a marketplace kind this pod has no credential for or a shape a newer CLI
+understands.
 
 ---
 

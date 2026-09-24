@@ -8,7 +8,7 @@ import (
 	runv1 "github.com/automagicops/haliphron/api/run/v1"
 )
 
-// The eighteen phases, in the order the contract fixes.
+// The nineteen phases, in the order the contract fixes.
 //
 // The order is contract rather than implementation detail, for a reason that
 // only shows up on a retry: the checkpoint's resume rule is "every phase before
@@ -58,6 +58,7 @@ func steps() []step {
 		{runv1.RuntimePhaseAuth, phaseAuth, runv1.ExitConfig, false},
 		{runv1.RuntimePhaseClone, phaseClone, runv1.ExitGit, false},
 		{runv1.RuntimePhaseRole, phaseRole, runv1.ExitConfig, false},
+		{runv1.RuntimePhasePlugins, phasePlugins, runv1.ExitConfig, false},
 		{runv1.RuntimePhaseMCPPrepare, phaseMCPPrepare, runv1.ExitConfig, false},
 		{runv1.RuntimePhaseMCPVerify, phaseMCPVerify, runv1.ExitConfig, false},
 		{runv1.RuntimePhaseRun, phaseRun, runv1.ExitAgentError, false},

@@ -36,8 +36,9 @@ Every field is optional.
 | `mcpServers` | array of [MCPServer](#mcpserver) | |
 | `nodeSelector` | object of string to string | replaces the installation default outright |
 | `tolerations` | array of [Toleration](#toleration) | replaces the installation default outright |
-| `toolPolicy` | [ToolPolicy](#toolpolicy) | |
-| `configFiles` | object of string to string | filename to contents |
+| `toolPolicy` | [ToolPolicy](#toolpolicy) | omit it, or leave `allow` empty, for everything the installation permits |
+| `plugins` | [PluginSpec](#pluginspec) | marketplaces to fetch and plugins to install |
+| `configFiles` | object of string to string | **flat** filename to contents — not a path; see below |
 | `clusterSelector` | object of string to string | restricts placement to clusters carrying these labels |
 
 ### Example
@@ -50,14 +51,66 @@ Every field is optional.
   "maxTurns": 40,
   "resources": {"cpu": "2", "memory": "4Gi", "ephemeralStorage": "20Gi"},
   "toolPolicy": {"deny": ["Bash(rm:*)"]},
+  "plugins": {
+    "marketplaces": [{"name": "playneta", "url": "playneta/claude-plugin"}],
+    "enabled": ["playneta-infra-coder@playneta"]
+  },
   "configFiles": {
-    ".claude/settings.json": "{\"outputStyle\":\"concise\"}"
+    "settings.coder.json": "{\"outputStyle\":\"concise\"}"
   },
   "clusterSelector": {"region": "eu-central-1"}
 }
 ```
 
 ---
+
+### PluginSpec
+
+| Field | Type | Notes |
+|---|---|---|
+| `marketplaces` | array of [PluginMarketplace](#pluginmarketplace) | at most 16 |
+| `enabled` | array of string | `plugin@marketplace`, at most 64 |
+| `trustRepositorySources` | boolean | default **true**; see below |
+
+### PluginMarketplace
+
+| Field | Type | Notes |
+|---|---|---|
+| `name` | string | the name the catalogue declares for itself — the `@suffix` in `enabled` |
+| `url` | string | `owner/repo` or an `https://` git URL. Required |
+| `ref` | string | branch or tag; empty means the default branch |
+
+The marketplace name is **not** derivable from the repository: a catalogue in
+`playneta/claude-plugin` may well call itself `playneta`, and that is the half
+after the `@`.
+
+Every `enabled` entry must name a marketplace the **same document** declares, or
+the role is refused with a 422 naming the entry. The resolution chain picks one
+source and that source is the only one that speaks, so a plugin whose catalogue
+is declared somewhere else would never have it registered: the install could only
+fail in the pod, after the lease was cut.
+
+Only `owner/repo` and `https://` are accepted. The pod authenticates to git with
+an https token and has no key, so an `ssh://` or `git@` source could not be
+fetched; it is refused when the role is saved rather than an hour later in a
+pod. A private repository is fetched with the run's own git credential, so that
+credential must reach both the run's repository and the marketplace.
+
+`trustRepositorySources` decides whether the cloned repository's own
+`.claude/settings.<role>.json` may choose marketplaces and plugins, overriding
+the list above. It defaults to true. A plugin is arbitrary code that runs beside
+the agent, so set it to `false` for a role that runs against repositories the
+installation does not control. The full resolution order is in
+[the agent runtime contract](../contracts/agent-runtime.md).
+
+### A note on `configFiles` keys
+
+The keys are flat file names — `settings.coder.json` — and not paths. They
+become ConfigMap data keys verbatim, and a ConfigMap key may not contain a
+separator, so a role written with `".claude/settings.json"` in it would fail
+materialisation in the cluster. It is refused when the role is saved rather than
+rewritten, because a key silently rewritten is a file the role believes it
+shipped and the pod never sees.
 
 ## `configFiles`
 

@@ -63,12 +63,8 @@ func (s *Server) putRole(w http.ResponseWriter, r *http.Request, c caller) {
 	if _, ok := s.decode(w, r, &spec); !ok {
 		return
 	}
-	if len(spec) == 0 || spec[0] != '{' {
-		s.fail(w, http.StatusUnprocessableEntity, "invalid_request", "a role spec is an object", "spec")
-		return
-	}
 
-	role, err := s.app.Store().UpsertRole(r.Context(), r.PathValue("name"), spec, c.Name())
+	role, err := s.app.PutRole(r.Context(), r.PathValue("name"), spec, c.Name())
 	if err != nil {
 		s.failFor(w, r, err)
 		return

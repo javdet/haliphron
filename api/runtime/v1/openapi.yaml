@@ -363,9 +363,9 @@ components:
 
     RuntimePhase:
       type: string
-      enum: [init, validate, fetch, checkpoint, auth, clone, role, mcp-prepare,
-             mcp-verify, run, parse, output, persist, commit, push, pr,
-             finalize, notify]
+      enum: [init, validate, fetch, checkpoint, auth, clone, role, plugins,
+             mcp-prepare, mcp-verify, run, parse, output, persist, commit, push,
+             pr, finalize, notify]
       description: An entrypoint phase. The names are contract, not logging.
 
     PhaseOutcome:
