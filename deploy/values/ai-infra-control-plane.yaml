@@ -4,8 +4,7 @@
 # group name is true of one fleet and of no other installation.
 #
 #   helm install haliphron deploy/charts/haliphron -n haliphron \
-#     -f deploy/values/ai-infra-control-plane.yaml \
-#     --set agent.image=javdet/haliphron-agent@sha256:...
+#     -f deploy/values/ai-infra-control-plane.yaml
 
 # The node group is tainted as well as labelled, so a selector alone places
 # nothing: the scheduler needs the matching toleration to be allowed to put a
@@ -29,7 +28,15 @@ agent:
       value: ai-infra
       effect: NoSchedule
 
+# The UI, and the one route that serves it.
+#
+# The route points at the frontend Service rather than at the backend: the UI's
+# nginx serves the page and proxies /api to the backend behind it, so the page
+# and the API it calls are one origin. The backend sends no CORS headers — its
+# callers are controllers and scripts, not browsers — so a UI on a second
+# hostname could not call it at all.
 frontend:
+  enabled: true
   nodeSelector:
     nodegroup: ai-infra
   tolerations:
@@ -37,6 +44,38 @@ frontend:
       operator: Equal
       value: ai-infra
       effect: NoSchedule
+
+httpRoute:
+  api:
+    enabled: true
+    hostnames:
+      - agent-gw.theinfranod.com
+    parentRefs:
+      - group: gateway.networking.k8s.io
+        kind: Gateway
+        name: infra-gateway
+        namespace: gateway-api
+        sectionName: infra
+
+  # MCP is a second listener on a second port, and the UI's nginx does not
+  # proxy it — only /api. Exposing it is a separate decision from exposing the
+  # UI, so it is written out here and left off: an MCP endpoint on the public
+  # internet accepts a bearer token from anyone who has one.
+  #
+  # mcp:
+  #   enabled: true
+  #   hostnames:
+  #     - agent-gw.theinfranod.com
+  #   matches:
+  #     - path:
+  #         type: PathPrefix
+  #         value: /mcp
+  #   parentRefs:
+  #     - group: gateway.networking.k8s.io
+  #       kind: Gateway
+  #       name: infra-gateway
+  #       namespace: gateway-api
+  #       sectionName: infra
 
 # One node in the group, so there is nothing to spread across. Left at the
 # chart's default the constraint is satisfied trivially; it is stated here so
@@ -49,6 +88,11 @@ topologySpreadConstraints: []
 # fine until the day the artifact volume and the database are on different
 # ones.
 postgresql:
+  enabled: true
+  auth:
+    username: haliphron
+    password: "haliphron87234!"
+    database: haliphron
   primary:
     nodeSelector:
       nodegroup: ai-infra
@@ -57,3 +101,6 @@ postgresql:
         operator: Equal
         value: ai-infra
         effect: NoSchedule
+    persistence:
+      enabled: true
+      size: 20Gi

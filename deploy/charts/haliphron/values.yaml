@@ -1,7 +1,7 @@
 # The Haliphron control plane.
 #
-# Four values have no default and the chart refuses to render without them:
-# the database DSN, the two object-storage credentials and the agent image.
+# Three values have no default and the chart refuses to render without them:
+# the database DSN and the two object-storage credentials.
 # Everything else has an answer that is right for most installations.
 
 # -----------------------------------------------------------------------------
@@ -273,10 +273,10 @@ bootstrapToken:
 # What the runs default to
 # -----------------------------------------------------------------------------
 agent:
-  # Required. There is no default: the image decides what every run executes,
-  # and a tag chosen by a chart would decide it silently. Pin by digest.
-  #   image: javdet/haliphron-agent@sha256:...
-  image: ""
+  # The image decides what every run executes. `latest` moves under you, so
+  # a production install should override this with a digest:
+  #   --set agent.image=javdet/haliphron-agent@sha256:...
+  image: javdet/haliphron-agent:latest
   imagePullPolicy: IfNotPresent
 
   # Where the agent pods land, for every run that does not come from a role
@@ -486,9 +486,9 @@ httpRoute:
     enabled: false
     annotations: {}
     labels: {}
-    # Required when enabled. A namespace other than the release's needs a
-    # ReferenceGrant on the Gateway's side, or the route is rejected with
-    # NotAllowedByListeners.
+    # Required when enabled. A Gateway in another namespace attaches only if
+    # its listener's allowedRoutes.namespaces admits this one; otherwise the
+    # route is rejected with NotAllowedByListeners.
     parentRefs: []
     #  - name: external
     #    namespace: gateway-system

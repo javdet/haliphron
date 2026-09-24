@@ -264,6 +264,11 @@ controller:
     runAsNonRoot: true
     runAsUser: 65532
     runAsGroup: 65532
+    # Not optional. The bootstrap token is mounted 0400 and a secret volume is
+    # owned by root until an fsGroup is set; without this the controller cannot
+    # read the one file it needs to register, and the spool PVC it has to write
+    # to comes up owned by root as well.
+    fsGroup: 65532
     seccompProfile:
       type: RuntimeDefault
 

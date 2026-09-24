@@ -392,7 +392,7 @@ and refused for anything with persistence turned off by accident.
 {{- end -}}
 
 {{- if not .Values.agent.image -}}
-{{- fail "agent.image is required: it decides what every run executes, so the chart will not choose it for you. Pin it by digest." -}}
+{{- fail "agent.image is empty: it decides what every run executes. Pin it by digest." -}}
 {{- end -}}
 
 {{/*
