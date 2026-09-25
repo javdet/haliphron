@@ -378,10 +378,11 @@ tree and outside anything the agent is pointed at, so that a prompt injection
 which talks the agent into rewriting "its instructions" rewrites nothing that is
 read again.
 
-The role's system prompt is a separate entity; it arrives as a file from
-`/haliphron/role/` and is supplied through the runtime's own mechanism
-(section 8). Once a node declares an output schema, the "return JSON of this
-shape" requirement is appended there automatically, from the schema.
+The role's system prompt is a separate entity; it arrives as the reserved file
+`/haliphron/role/system-prompt.md` (section 7b) and is supplied through the
+runtime's own mechanism (section 8). Once a node declares an output schema, the
+"return JSON of this shape" requirement is appended there automatically, from
+the schema.
 
 ---
 
@@ -621,6 +622,35 @@ A settings file that fails that validation is ignored with a line in the log
 rather than failing the run: it is written for a developer's machine, and may
 name a marketplace kind this pod has no credential for or a shape a newer CLI
 understands.
+
+
+## 7b. The role's system prompt
+
+`/haliphron/role/system-prompt.md` is the **third reserved key**, on the same
+terms as the other two: rendered by the backend from the role's `systemPrompt`,
+mounted read-only, consumed once, and lost to a role that ships a file under
+that name. It is absent when the role has no prompt or only whitespace.
+
+The `role` phase reads it and trims it. It is **appended, never substituted**,
+and the order is fixed:
+
+1. the CLI's own system prompt
+2. the entrypoint's instruction — the output file, the artifacts directory, the
+   branch rule, the node's output schema
+3. the role's prompt
+
+claude-code receives 2 and 3 as one `--append-system-prompt` argument, and is
+never launched with `--system-prompt`, which would discard 1 and the tool
+instructions in it. codex receives 2 and 3 as a prefix of the prompt, in the
+same order, followed by the task.
+
+A role that could replace 2 could turn off the rules the git phases rely on,
+and the run would still exit 0. That is why the role gets the last word in the
+text and no say over what comes before it.
+
+The backend refuses a prompt over 32 KiB (`MaxRoleSystemPromptBytes`) when the
+role is saved. It shares one command-line argument with step 2, and Linux caps
+a single argument at 128 KiB.
 
 ---
 

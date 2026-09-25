@@ -194,6 +194,29 @@ const RoleConfigKeyOutputSchema = "output.schema.json"
 // A role that ships a file under this name loses it.
 const RoleConfigKeyPlugins = "plugins.json"
 
+// RoleConfigKeySystemPrompt is the third reserved key in the per-run ConfigMap:
+// the role's own system prompt, rendered by the backend from the role's
+// systemPrompt field.
+//
+// It is appended, never substituted. The pod puts the CLI's own system prompt
+// first, then the entrypoint's instruction — where structured output goes, that
+// the branch is not the agent's to name — and then this. A role that could
+// replace either would be a role that could switch off the rules the rest of
+// the pipeline relies on, and it would do so silently: the run would still
+// succeed, and push to a branch nobody expected.
+//
+// A role that ships a file under this name loses it.
+const RoleConfigKeySystemPrompt = "system-prompt.md"
+
+// MaxRoleSystemPromptBytes bounds a role's system prompt.
+//
+// The prompt reaches claude-code as one argument of --append-system-prompt, and
+// Linux caps a single argument at 128 KiB (MAX_ARG_STRLEN) whatever ARG_MAX
+// says. The entrypoint's own instruction and the node's output schema share
+// that argument, so the role gets a quarter of it and the refusal happens when
+// the role is saved rather than as an E2BIG in a pod.
+const MaxRoleSystemPromptBytes = 32 << 10
+
 // RuntimePhase names one step of the entrypoint. The names are contract, not
 // logging: they key the checkpoint, they are the phase field of PhaseTiming,
 // and the UI groups a run's timeline by them.

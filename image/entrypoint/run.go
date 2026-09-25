@@ -51,6 +51,9 @@ type Run struct {
 
 	prompt     []byte
 	nodeSchema []byte
+	// rolePrompt is the role's own system prompt, trimmed; empty when the role
+	// has none. It follows the entrypoint's instruction and never replaces it.
+	rolePrompt string
 	// agentEnv is the environment handed to the agent's child process, built
 	// rather than inherited. It carries the model key under the name that CLI
 	// expects and the MCP header values, and nothing else: the git token, the

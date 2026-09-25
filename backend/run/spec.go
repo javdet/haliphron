@@ -135,6 +135,12 @@ type Role struct {
 	// ConfigFiles they are material rather than spec: they become a key of the
 	// per-run ConfigMap and never appear in the CR.
 	Plugins *runv1.PluginSpec
+
+	// SystemPrompt is appended to the agent's system prompt, after the CLI's
+	// own and the entrypoint's instruction; it replaces neither. Material, like
+	// Plugins: it becomes the RoleConfigKeySystemPrompt key of the per-run
+	// ConfigMap and never appears in the CR.
+	SystemPrompt string
 }
 
 var (

@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -755,6 +756,91 @@ func TestUsageIsNormalisedForBothRuntimes(t *testing.T) {
 		// record would grow that branch in four places.
 		if usage.DurationMs == 0 {
 			t.Error("durationMs is zero for codex")
+		}
+	})
+}
+
+func TestARolesSystemPromptIsAppendedToTheBuiltInInstructionAndReplacesNothing(t *testing.T) {
+	t.Parallel()
+	const builtIn = "You are running as a haliphron agent run."
+	const rolePrompt = "Answer in the voice of a terse release engineer."
+
+	t.Run("claude-code", func(t *testing.T) {
+		t.Parallel()
+		h := newHarness(t, controlplane.RunRequest{
+			Prompt:     "hello",
+			Agent:      runv1.AgentClaudeCode,
+			RoleConfig: map[string]string{runv1.RoleConfigKeySystemPrompt: "\n" + rolePrompt + "\n\n"},
+		})
+		h.commander.handle = agentScript(h, "done", "")
+
+		run, code := h.executeRun()
+		if code != runv1.ExitSuccess {
+			t.Fatalf("exit %d (%v)", code, run.Failure())
+		}
+		var launch []string
+		for _, c := range h.commander.invocations("claude") {
+			if len(c.Args) > 0 && c.Args[0] == "-p" {
+				launch = c.Args
+			}
+		}
+		if launch == nil {
+			t.Fatal("claude was never launched")
+		}
+		var appended string
+		for i, arg := range launch {
+			// --system-prompt would discard the CLI's own prompt, and with it
+			// every tool instruction the CLI ships with.
+			if arg == "--system-prompt" || arg == "--system-prompt-file" {
+				t.Fatalf("the launch replaces the CLI's system prompt: %q", launch)
+			}
+			if arg == "--append-system-prompt" && i+1 < len(launch) {
+				appended = launch[i+1]
+			}
+		}
+		builtInAt, roleAt := strings.Index(appended, builtIn), strings.Index(appended, rolePrompt)
+		switch {
+		case builtInAt < 0:
+			t.Errorf("the role's prompt displaced the entrypoint's instruction: %q", appended)
+		case roleAt < 0:
+			t.Errorf("the role's prompt did not reach the CLI: %q", appended)
+		case roleAt < builtInAt:
+			t.Errorf("the role's prompt comes before the entrypoint's instruction: %q", appended)
+		}
+	})
+
+	t.Run("codex", func(t *testing.T) {
+		t.Parallel()
+		h := newHarness(t, controlplane.RunRequest{
+			Prompt:     "the task itself",
+			Agent:      runv1.AgentCodex,
+			RoleConfig: map[string]string{runv1.RoleConfigKeySystemPrompt: rolePrompt},
+		})
+		var mu sync.Mutex
+		var sent string
+		h.commander.handle = func(c entrypoint.Command) (entrypoint.CommandResult, error) {
+			if c.Path == "codex" && len(c.Args) > 0 && c.Args[0] == "exec" {
+				mu.Lock()
+				sent = c.Args[len(c.Args)-1]
+				mu.Unlock()
+				c.Stdout.Write([]byte(`{"type":"agent_message","session_id":"s1","message":"done"}` + "\n"))
+			}
+			return entrypoint.CommandResult{}, nil
+		}
+
+		run, code := h.executeRun()
+		if code != runv1.ExitSuccess {
+			t.Fatalf("exit %d (%v)", code, run.Failure())
+		}
+		mu.Lock()
+		defer mu.Unlock()
+		// codex has no append flag, so the same order is kept in the prompt
+		// itself: the instruction, then the role, then the task.
+		builtInAt := strings.Index(sent, builtIn)
+		roleAt := strings.Index(sent, rolePrompt)
+		taskAt := strings.Index(sent, "the task itself")
+		if builtInAt < 0 || roleAt < builtInAt || taskAt < roleAt {
+			t.Errorf("want instruction, role prompt, task in that order: %q", sent)
 		}
 	})
 }

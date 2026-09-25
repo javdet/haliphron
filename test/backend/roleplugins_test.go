@@ -176,3 +176,83 @@ func TestARoleCannotShipItsOwnFileUnderTheReservedPluginsKey(t *testing.T) {
 		t.Errorf("a role's own file was mounted under the reserved key: %s", body)
 	}
 }
+
+func TestARolesSystemPromptTravelsAsMaterialAndNotInTheSpec(t *testing.T) {
+	h := newHarness(t)
+	const prompt = "Answer in the voice of a terse release engineer."
+	spec, _ := json.Marshal(map[string]any{"systemPrompt": prompt})
+	if _, err := h.Store.UpsertRole(context.Background(), "coder", spec, "test"); err != nil {
+		t.Fatalf("create role: %v", err)
+	}
+
+	p := newProbe(t, h, "east")
+	h.Submit(func(r *run.SubmitRequest) { r.Role = "coder" })
+	lease := p.LeaseOne()
+
+	if got := lease.RoleConfig[runv1.RoleConfigKeySystemPrompt]; got != prompt {
+		t.Fatalf("the role's system prompt did not travel with the lease: %q; keys were %v",
+			got, keysOf(lease.RoleConfig))
+	}
+	encoded, err := json.Marshal(lease.Spec)
+	if err != nil {
+		t.Fatalf("encode spec: %v", err)
+	}
+	if strings.Contains(string(encoded), "release engineer") {
+		t.Error("the role's system prompt reached the spec")
+	}
+}
+
+func TestARoleWithABlankSystemPromptShipsNoPromptFile(t *testing.T) {
+	h := newHarness(t)
+	if _, err := h.Store.UpsertRole(context.Background(), "coder",
+		json.RawMessage(`{"systemPrompt":"  \n\t"}`), "test"); err != nil {
+		t.Fatalf("create role: %v", err)
+	}
+
+	p := newProbe(t, h, "east")
+	h.Submit(func(r *run.SubmitRequest) { r.Role = "coder" })
+	lease := p.LeaseOne()
+
+	if _, present := lease.RoleConfig[runv1.RoleConfigKeySystemPrompt]; present {
+		t.Error("a role with a blank system prompt still shipped a prompt file")
+	}
+}
+
+func TestARoleCannotShipItsOwnFileUnderTheReservedSystemPromptKey(t *testing.T) {
+	h := newHarness(t)
+	if _, err := h.Store.UpsertRole(context.Background(), "sneaky", json.RawMessage(
+		`{"configFiles":{"system-prompt.md":"from a file","settings.sneaky.json":"{}"}}`,
+	), "test"); err != nil {
+		t.Fatalf("create role: %v", err)
+	}
+
+	p := newProbe(t, h, "east")
+	h.Submit(func(r *run.SubmitRequest) { r.Role = "sneaky" })
+	lease := p.LeaseOne()
+
+	if body, present := lease.RoleConfig[runv1.RoleConfigKeySystemPrompt]; present {
+		t.Errorf("a role's own file was mounted under the reserved key: %s", body)
+	}
+	// Dropping the reserved key must not take the role's other files with it.
+	if _, present := lease.RoleConfig["settings.sneaky.json"]; !present {
+		t.Errorf("the role's other files were lost; keys were %v", keysOf(lease.RoleConfig))
+	}
+}
+
+func TestAnOversizedSystemPromptIsRefusedWhenTheRoleIsSaved(t *testing.T) {
+	h := newHarness(t)
+	admin := h.Token(store.ScopeAdmin)
+
+	body, _ := json.Marshal(map[string]any{
+		"systemPrompt": strings.Repeat("x", runv1.MaxRoleSystemPromptBytes+1),
+	})
+	var out map[string]any
+	status := h.call(t, admin, http.MethodPut, "/api/v1/roles/verbose", json.RawMessage(body), &out)
+	if status != http.StatusUnprocessableEntity {
+		t.Fatalf("status %d, want 422: the prompt reaches the CLI as one argument and would fail in the pod", status)
+	}
+	errObj, _ := out["error"].(map[string]any)
+	if field, _ := errObj["field"].(string); field != "systemPrompt" {
+		t.Errorf("the refusal names field %q, want systemPrompt: %v", field, out)
+	}
+}

@@ -74,6 +74,12 @@ func modelID(qualified string) string {
 // text this image puts in front of a model, and it says the two things the
 // model cannot infer: where structured output goes, and that the branch is not
 // its to name.
+//
+// The role's own system prompt, when it has one, comes after it. Added to, not
+// instead of: a role that could replace this text could silently switch off
+// the rules the git phases rely on, and a role that could replace the CLI's own
+// prompt would lose the tool instructions the CLI ships with — which is why
+// claude-code gets --append-system-prompt and never --system-prompt.
 func systemPrompt(r *Run) string {
 	var b strings.Builder
 	b.WriteString("You are running as a haliphron agent run.\n")
@@ -87,6 +93,11 @@ func systemPrompt(r *Run) string {
 	}
 	if len(r.nodeSchema) > 0 {
 		fmt.Fprintf(&b, "The output object must satisfy this JSON Schema:\n%s\n", r.nodeSchema)
+	}
+	if r.rolePrompt != "" {
+		b.WriteString("\n")
+		b.WriteString(r.rolePrompt)
+		b.WriteString("\n")
 	}
 	return b.String()
 }

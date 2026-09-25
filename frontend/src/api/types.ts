@@ -213,6 +213,11 @@ export interface RoleSpec {
 
   permissionMode?: PermissionMode
   maxTurns?: number
+  /**
+   * Appended to the agent's system prompt, after the CLI's own and after
+   * haliphron's instruction. It replaces neither.
+   */
+  systemPrompt?: string
   env?: { name: string; value: string }[]
   mcpServers?: McpServer[]
 

@@ -5,9 +5,12 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"slices"
+	"strings"
 	"time"
 
 	runv1 "github.com/automagicops/haliphron/api/run/v1"
+	"github.com/automagicops/haliphron/backend/run"
 	"github.com/automagicops/haliphron/backend/store"
 )
 
@@ -116,38 +119,9 @@ func (s *Service) materials(ctx context.Context, runID runv1.ULID, spec runv1.Re
 			if err != nil {
 				return nil, nil, err
 			}
-			roleConfig = parsed.ConfigFiles
-
-			// The reserved key is taken off the operator's own files
-			// unconditionally, not only when the role has plugins. A file left
-			// under that name would be read by the pod as the control plane's
-			// rendered document — an operator-supplied file deciding which code
-			// the agent runs — which is the whole of what the reservation is
-			// for.
-			_, shadowed := roleConfig[runv1.RoleConfigKeyPlugins]
-			if shadowed || parsed.Plugins.Declares() {
-				if shadowed {
-					s.log.Warn("a role ships a file under the reserved plugins key; it is dropped",
-						"run", runID, "role", spec.Role, "key", runv1.RoleConfigKeyPlugins)
-				}
-				// Copied into a fresh map: ConfigFiles came from the decoded
-				// role and is not this function's to mutate.
-				merged := make(map[string]string, len(roleConfig)+1)
-				for name, body := range roleConfig {
-					if name != runv1.RoleConfigKeyPlugins {
-						merged[name] = body
-					}
-				}
-				// Rendered rather than referenced: the pod reads one file and
-				// never learns that a roles table exists.
-				if parsed.Plugins.Declares() {
-					encoded, err := json.Marshal(parsed.Plugins)
-					if err != nil {
-						return nil, nil, fmt.Errorf("render plugins for %s: %w", runID, err)
-					}
-					merged[runv1.RoleConfigKeyPlugins] = string(encoded)
-				}
-				roleConfig = merged
+			roleConfig, err = s.renderRoleConfig(runID, parsed)
+			if err != nil {
+				return nil, nil, err
 			}
 		case errors.Is(err, store.ErrNotFound):
 			// The role was deleted after the run was admitted. The spec is
@@ -162,6 +136,60 @@ func (s *Service) materials(ctx context.Context, runID runv1.ULID, spec runv1.Re
 	}
 
 	return secrets, roleConfig, nil
+}
+
+// renderRoleConfig is the role's files plus the documents the control plane
+// renders from the role itself, each under its reserved key.
+//
+// The reserved keys are taken off the operator's own files unconditionally,
+// not only when the role has something to render there. A file left under one
+// of those names would be read by the pod as the control plane's document — an
+// operator-supplied plugins.json deciding which code the agent runs — which is
+// the whole of what the reservation is for.
+func (s *Service) renderRoleConfig(runID runv1.ULID, role *run.Role) (map[string]string, error) {
+	rendered := map[string]string{}
+
+	// Rendered rather than referenced: the pod reads one file and never learns
+	// that a roles table exists.
+	if role.Plugins.Declares() {
+		encoded, err := json.Marshal(role.Plugins)
+		if err != nil {
+			return nil, fmt.Errorf("render plugins for %s: %w", runID, err)
+		}
+		rendered[runv1.RoleConfigKeyPlugins] = string(encoded)
+	}
+	// Only when it says something. An empty file would tell the pod the role
+	// had an opinion, and the log line would say a prompt was appended when
+	// nothing was.
+	if strings.TrimSpace(role.SystemPrompt) != "" {
+		rendered[runv1.RoleConfigKeySystemPrompt] = role.SystemPrompt
+	}
+
+	reserved := []string{runv1.RoleConfigKeyPlugins, runv1.RoleConfigKeySystemPrompt}
+	shadowed := false
+	for _, key := range reserved {
+		if _, ok := role.ConfigFiles[key]; ok {
+			shadowed = true
+			s.log.Warn("a role ships a file under a reserved key; it is dropped",
+				"run", runID, "role", role.Name, "key", key)
+		}
+	}
+	if !shadowed && len(rendered) == 0 {
+		return role.ConfigFiles, nil
+	}
+
+	// Copied into a fresh map: ConfigFiles came from the decoded role and is
+	// not this function's to mutate.
+	merged := make(map[string]string, len(role.ConfigFiles)+len(rendered))
+	for name, body := range role.ConfigFiles {
+		if !slices.Contains(reserved, name) {
+			merged[name] = body
+		}
+	}
+	for name, body := range rendered {
+		merged[name] = body
+	}
+	return merged, nil
 }
 
 // mcpConfig renders the MCP configuration, including the per-run token.

@@ -53,6 +53,11 @@ type roleSpec struct {
 	// before the agent starts. Material, not spec: they are rendered into the
 	// per-run ConfigMap beside ConfigFiles, under RoleConfigKeyPlugins.
 	Plugins *runv1.PluginSpec `json:"plugins,omitempty"`
+
+	// SystemPrompt is added to the agent's system prompt — after the CLI's own
+	// and after the entrypoint's instruction, never instead of them. Material
+	// by the same argument as Plugins, under RoleConfigKeySystemPrompt.
+	SystemPrompt string `json:"systemPrompt,omitempty"`
 }
 
 func parseRole(r store.Role) (*run.Role, error) {
@@ -76,6 +81,7 @@ func parseRole(r store.Role) (*run.Role, error) {
 		ConfigFiles:     spec.ConfigFiles,
 		ClusterSelector: spec.ClusterSelector,
 		Plugins:         spec.Plugins,
+		SystemPrompt:    spec.SystemPrompt,
 	}, nil
 }
 
@@ -103,6 +109,11 @@ func (s *Service) PutRole(ctx context.Context, name string, spec json.RawMessage
 	}
 	if field, err := runv1.ValidatePluginSpec(parsed.Plugins); err != nil {
 		return store.Role{}, &run.InvalidRequestError{Field: field, Detail: err.Error()}
+	}
+	if n := len(parsed.SystemPrompt); n > runv1.MaxRoleSystemPromptBytes {
+		return store.Role{}, &run.InvalidRequestError{Field: "systemPrompt", Detail: fmt.Sprintf(
+			"%d bytes is over the %d-byte limit: the prompt reaches the CLI as a single argument",
+			n, runv1.MaxRoleSystemPromptBytes)}
 	}
 	for key := range parsed.ConfigFiles {
 		// A config file key becomes a ConfigMap data key verbatim, and a

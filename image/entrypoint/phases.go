@@ -308,6 +308,19 @@ func phaseRole(_ context.Context, r *Run) error {
 		return failWrap(runv1.ExitConfig, "RoleConfigUnreadable", err, "reading %s", schemaPath)
 	}
 
+	// The role's own system prompt. Appended by the runtime after the CLI's
+	// own and after the entrypoint's instruction; this phase only picks it up.
+	promptPath := filepath.Join(r.layout.RoleConfig, runv1.RoleConfigKeySystemPrompt)
+	switch prompt, err := os.ReadFile(promptPath); {
+	case err == nil:
+		if text := strings.TrimSpace(string(prompt)); text != "" {
+			r.rolePrompt = text
+			r.logf("the role supplies a system prompt (%d bytes); it is appended, not substituted", len(text))
+		}
+	case !errors.Is(err, fs.ErrNotExist):
+		return failWrap(runv1.ExitConfig, "RoleConfigUnreadable", err, "reading %s", promptPath)
+	}
+
 	chain := r.roleChain()
 	for _, candidate := range chain {
 		if _, err := os.Stat(candidate); err == nil {

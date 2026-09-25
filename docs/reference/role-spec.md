@@ -31,6 +31,7 @@ Every field is optional.
 | `image` | string | overrides the installation's agent image |
 | `permissionMode` | string | `default`, `acceptEdits`, `bypassPermissions` or `plan` |
 | `maxTurns` | integer | |
+| `systemPrompt` | string | **appended** to the agent's system prompt, never substituted; at most 32 KiB; see below |
 | `env` | array of [EnvVar](#envvar) | |
 | `resources` | [Resources](#resources) | |
 | `mcpServers` | array of [MCPServer](#mcpserver) | |
@@ -111,6 +112,35 @@ separator, so a role written with `".claude/settings.json"` in it would fail
 materialisation in the cluster. It is refused when the role is saved rather than
 rewritten, because a key silently rewritten is a file the role believes it
 shipped and the pod never sees.
+
+## `systemPrompt`
+
+Text added to the agent's system prompt. It extends what is already there and
+replaces nothing. The agent sees, in order:
+
+1. the CLI's own system prompt — claude-code's tool instructions, left intact
+2. haliphron's instruction: where structured output goes, where artifacts go,
+   that the branch already exists and is not the agent's to push, and the
+   node's output schema when there is one
+3. the role's `systemPrompt`
+
+On claude-code, 2 and 3 are passed together through `--append-system-prompt`.
+codex has no equivalent flag, so they become a prefix of the prompt in the same
+order.
+
+A role cannot switch the rules in step 2 off. They are what the git phases rely
+on, and a role that could replace them would produce runs that exit 0 and push
+somewhere nobody expected.
+
+It is material, not spec: the backend renders it into the per-run ConfigMap
+under the reserved key `system-prompt.md`, and a file the role ships under that
+name in `configFiles` is dropped. A prompt that is empty or only whitespace
+ships no file.
+
+The limit is 32 KiB (`MaxRoleSystemPromptBytes`), measured in bytes. The prompt
+reaches claude-code as a single command-line argument, and Linux caps one
+argument at 128 KiB. A longer prompt is refused with a 422 when the role is
+saved.
 
 ## `configFiles`
 

@@ -26,7 +26,7 @@ import {
 
 /** The keys this form renders. Everything else is carried through untouched. */
 const KNOWN = [
-  'agent', 'model', 'image', 'permissionMode', 'maxTurns', 'env',
+  'agent', 'model', 'image', 'permissionMode', 'maxTurns', 'systemPrompt', 'env',
   'mcpServers', 'toolPolicy', 'plugins', 'configFiles', 'clusterSelector',
 ] as const
 
@@ -36,6 +36,7 @@ export interface RoleFormState {
   image: string
   permissionMode: string
   maxTurns: string
+  systemPrompt: string
   allow: string[]
   deny: string[]
   marketplaces: PluginMarketplace[]
@@ -75,6 +76,7 @@ export function split(spec: RoleSpec | undefined): RoleFormState {
     image: s.image ?? '',
     permissionMode: s.permissionMode ?? '',
     maxTurns: s.maxTurns ? String(s.maxTurns) : '',
+    systemPrompt: s.systemPrompt ?? '',
     allow: s.toolPolicy?.allow ?? [],
     deny: s.toolPolicy?.deny ?? [],
     marketplaces: s.plugins?.marketplaces ?? [],
@@ -106,6 +108,11 @@ export function merge(form: RoleFormState): RoleSpec {
 
   const turns = Number(form.maxTurns)
   set('maxTurns', turns, !!form.maxTurns && Number.isFinite(turns) && turns > 0)
+
+  // Sent as written, not trimmed: whitespace inside a prompt can be meaningful,
+  // and the pod trims the ends itself. Omitted when there is nothing but
+  // whitespace, so an emptied field clears the prompt rather than storing "".
+  set('systemPrompt', form.systemPrompt, !!form.systemPrompt.trim())
 
   // Omitted rather than sent empty. An absent toolPolicy means the role adds no
   // narrowing of its own and the installation's ceiling applies — which is what
@@ -144,6 +151,15 @@ export function merge(form: RoleFormState): RoleSpec {
   )
 
   return spec
+}
+
+/** Mirrors api/run/v1.MaxRoleSystemPromptBytes. Bytes, not characters. */
+const MAX_SYSTEM_PROMPT_BYTES = 32 * 1024
+
+function systemPromptError(prompt: string): string | undefined {
+  const bytes = new TextEncoder().encode(prompt).length
+  if (bytes <= MAX_SYSTEM_PROMPT_BYTES) return undefined
+  return `${bytes} bytes; the limit is ${MAX_SYSTEM_PROMPT_BYTES}`
 }
 
 /** Mirrors api/run/v1.PluginID, so a typo is caught before the round trip. */
@@ -213,6 +229,19 @@ export function RoleForm({
             <option key={m.value} value={m.value}>{m.label}</option>
           ))}
         </select>
+      </Field>
+
+      <Field
+        label="System prompt"
+        error={systemPromptError(form.systemPrompt)}
+        hint="Added after the agent's built-in system prompt and haliphron's own instructions — it extends them, never replaces them. Blank for none."
+      >
+        <textarea
+          rows={6}
+          value={form.systemPrompt}
+          placeholder="You are working in someone else's repository…"
+          onChange={(e) => set({ systemPrompt: e.target.value })}
+        />
       </Field>
 
       <Section title="Plugins" hint="marketplaces to fetch, and what to install from them" open>
