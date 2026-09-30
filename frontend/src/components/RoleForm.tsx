@@ -26,11 +26,12 @@ import {
 
 /** The keys this form renders. Everything else is carried through untouched. */
 const KNOWN = [
-  'agent', 'model', 'image', 'permissionMode', 'maxTurns', 'systemPrompt', 'env',
+  'description', 'agent', 'model', 'image', 'permissionMode', 'maxTurns', 'systemPrompt', 'env',
   'mcpServers', 'toolPolicy', 'plugins', 'configFiles', 'clusterSelector',
 ] as const
 
 export interface RoleFormState {
+  description: string
   agent: string
   model: string
   image: string
@@ -71,6 +72,7 @@ export function split(spec: RoleSpec | undefined): RoleFormState {
     if (!(KNOWN as readonly string[]).includes(key)) rest[key] = value
   }
   return {
+    description: s.description ?? '',
     agent: typeof s.agent === 'string' ? s.agent : '',
     model: s.model ?? '',
     image: s.image ?? '',
@@ -101,6 +103,7 @@ export function merge(form: RoleFormState): RoleSpec {
     else delete spec[key]
   }
 
+  set('description', form.description.trim(), !!form.description.trim())
   set('agent', form.agent, !!form.agent)
   set('model', form.model.trim(), !!form.model.trim())
   set('image', form.image.trim(), !!form.image.trim())
@@ -153,6 +156,15 @@ export function merge(form: RoleFormState): RoleSpec {
   return spec
 }
 
+/** Mirrors backend/app.MaxRoleDescriptionBytes. Bytes, not characters. */
+const MAX_DESCRIPTION_BYTES = 1024
+
+function descriptionError(description: string): string | undefined {
+  const bytes = new TextEncoder().encode(description.trim()).length
+  if (bytes <= MAX_DESCRIPTION_BYTES) return undefined
+  return `${bytes} bytes; the limit is ${MAX_DESCRIPTION_BYTES}`
+}
+
 /** Mirrors api/run/v1.MaxRoleSystemPromptBytes. Bytes, not characters. */
 const MAX_SYSTEM_PROMPT_BYTES = 32 * 1024
 
@@ -194,6 +206,19 @@ export function RoleForm({
 
   return (
     <div className="stack">
+      <Field
+        label="Description"
+        error={descriptionError(form.description)}
+        hint="What this role is for. An agent choosing a role for a child run reads this and the name, and nothing else."
+      >
+        <textarea
+          rows={2}
+          value={form.description}
+          placeholder="Reviews a change and reports problems. Pushes nothing."
+          onChange={(e) => set({ description: e.target.value })}
+        />
+      </Field>
+
       <div className="grid-3">
         <Field label="Agent" hint="Which CLI runs. A run may override it.">
           <select value={form.agent} onChange={(e) => set({ agent: e.target.value })}>

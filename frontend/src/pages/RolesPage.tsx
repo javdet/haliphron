@@ -174,7 +174,12 @@ export function RolesPage() {
               <tbody>
                 {(roles.data ?? []).map((role) => (
                   <tr key={role.name}>
-                    <td>{role.name}</td>
+                    <td>
+                      {role.name}
+                      {role.spec.description && (
+                        <div className="small muted">{role.spec.description}</div>
+                      )}
+                    </td>
                     <td className="mono small muted">
                       <span className="trunc">{JSON.stringify(role.spec)}</span>
                     </td>

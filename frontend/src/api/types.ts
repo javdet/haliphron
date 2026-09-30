@@ -207,6 +207,11 @@ export interface ToolPolicy {
  * render rather than dropping it on save.
  */
 export interface RoleSpec {
+  /**
+   * What the role is for. Configures nothing; it is what an agent reads from
+   * list_roles to choose a role for a child run.
+   */
+  description?: string
   agent?: AgentType | string
   model?: string
   image?: string

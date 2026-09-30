@@ -20,6 +20,12 @@ import (
 // rather than refused, by the same rule the wire contracts follow, so a role
 // written for a newer control plane still runs here.
 type roleSpec struct {
+	// Description says what the role is for, in words written for whoever is
+	// choosing between roles — an agent reading list_roles as much as a person
+	// reading the UI. It configures nothing: parseRole does not carry it into
+	// the run, and no run behaves differently because of it.
+	Description string `json:"description,omitempty"`
+
 	Agent runv1.AgentType `json:"agent,omitempty"`
 	Model string          `json:"model,omitempty"`
 	Image string          `json:"image,omitempty"`
@@ -85,6 +91,27 @@ func parseRole(r store.Role) (*run.Role, error) {
 	}, nil
 }
 
+// MaxRoleDescriptionBytes bounds a role's description.
+//
+// list_roles returns every role's description at once, into the context of the
+// agent deciding which one to start a child under. A description is a sentence
+// or two; one that is an essay costs every caller, every time it lists.
+const MaxRoleDescriptionBytes = 1 << 10
+
+// RoleDescription reads a stored role's description. A spec that does not
+// decode has none, rather than failing the listing it appears in: one
+// malformed row must not hide every other role from the caller choosing
+// between them.
+func RoleDescription(r store.Role) string {
+	var spec struct {
+		Description string `json:"description"`
+	}
+	if err := json.Unmarshal(r.Spec, &spec); err != nil {
+		return ""
+	}
+	return spec.Description
+}
+
 // PutRole validates a role's spec and stores it.
 //
 // It is here rather than in the REST handler for the reason the package comment
@@ -109,6 +136,11 @@ func (s *Service) PutRole(ctx context.Context, name string, spec json.RawMessage
 	}
 	if field, err := runv1.ValidatePluginSpec(parsed.Plugins); err != nil {
 		return store.Role{}, &run.InvalidRequestError{Field: field, Detail: err.Error()}
+	}
+	if n := len(parsed.Description); n > MaxRoleDescriptionBytes {
+		return store.Role{}, &run.InvalidRequestError{Field: "description", Detail: fmt.Sprintf(
+			"%d bytes is over the %d-byte limit: list_roles puts every description into the caller's context",
+			n, MaxRoleDescriptionBytes)}
 	}
 	if n := len(parsed.SystemPrompt); n > runv1.MaxRoleSystemPromptBytes {
 		return store.Role{}, &run.InvalidRequestError{Field: "systemPrompt", Detail: fmt.Sprintf(

@@ -140,6 +140,71 @@ func TestTheMCPHandshakeAndToolListing(t *testing.T) {
 	}
 }
 
+// list_roles is how an agent chooses the role for a child run, so it answers
+// with what a choice needs — the name and what the role is for — and nothing of
+// how the role is configured. The spec carries the system prompt, env values
+// and MCP server addresses; an agent choosing a role has no use for them.
+func TestListRolesReturnsEachRolesNameAndDescriptionAndNotItsSpec(t *testing.T) {
+	h := newHarness(t)
+	token := h.Token(store.ScopeRunsWrite, store.ScopeRunsRead)
+
+	if _, err := h.Store.UpsertRole(context.Background(), "reviewer", json.RawMessage(`{
+		"description": "Reads a change and reports what is wrong with it. Pushes nothing.",
+		"systemPrompt": "the confidential part",
+		"env": [{"name": "SECRET_ISH", "value": "do-not-leak"}]
+	}`), "test"); err != nil {
+		t.Fatalf("seed role: %v", err)
+	}
+	if _, err := h.Store.UpsertRole(context.Background(), "coder",
+		json.RawMessage(`{"model": "anthropic/claude-sonnet-5"}`), "test"); err != nil {
+		t.Fatalf("seed role: %v", err)
+	}
+
+	resp := h.rpc(t, token, "tools/call", map[string]any{"name": "list_roles", "arguments": map[string]any{}})
+	if resp.Error != nil {
+		t.Fatalf("list_roles: rpc error %d %s", resp.Error.Code, resp.Error.Message)
+	}
+	var result struct {
+		Content []struct {
+			Text string `json:"text"`
+		} `json:"content"`
+		StructuredContent struct {
+			Roles []map[string]any `json:"roles"`
+		} `json:"structuredContent"`
+		IsError bool `json:"isError"`
+	}
+	if err := json.Unmarshal(resp.Result, &result); err != nil {
+		t.Fatalf("decode tool result: %v (%s)", err, resp.Result)
+	}
+	if result.IsError {
+		t.Fatalf("list_roles failed: %s", resp.Result)
+	}
+
+	want := []map[string]any{
+		{"name": "coder", "description": ""},
+		{"name": "reviewer", "description": "Reads a change and reports what is wrong with it. Pushes nothing."},
+	}
+	if len(result.StructuredContent.Roles) != len(want) {
+		t.Fatalf("roles = %v, want %v", result.StructuredContent.Roles, want)
+	}
+	for i, role := range result.StructuredContent.Roles {
+		if len(role) != 2 || role["name"] != want[i]["name"] || role["description"] != want[i]["description"] {
+			t.Errorf("role %d = %v, want exactly %v", i, role, want[i])
+		}
+	}
+
+	// The model reads the text block, so the description has to be there too.
+	text := result.Content[0].Text
+	if !bytes.Contains([]byte(text), []byte("reviewer — Reads a change")) {
+		t.Errorf("the text block does not carry the description: %q", text)
+	}
+	for _, leaked := range []string{"the confidential part", "do-not-leak"} {
+		if bytes.Contains(resp.Result, []byte(leaked)) {
+			t.Errorf("list_roles returned %q from the role's spec: %s", leaked, resp.Result)
+		}
+	}
+}
+
 // run_agent is the REST command under another name, and it produces the same
 // run: one admission path, one set of rules, one list to look at afterwards.
 func TestRunAgentAdmitsTheSameRunAsTheAPI(t *testing.T) {

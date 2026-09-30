@@ -136,6 +136,24 @@ The roles a run may be started under. Takes no arguments.
 
 Scope: `runs:read`.
 
+Returns each role's name and [`description`](role-spec.md#description), and
+nothing else of its spec. The structured content is:
+
+```json
+{
+  "roles": [
+    {"name": "coder", "description": "Implements a change and opens a pull request."},
+    {"name": "reviewer", "description": ""}
+  ]
+}
+```
+
+A role saved without a description has `""`. The text block has one line per
+role, `name — description`, or just the name when there is no description.
+With no roles it is `(none)`.
+
+Pass the chosen `name` as `run_agent`'s `role`.
+
 ## `list_clusters`
 
 The clusters registered with this control plane, and their capacity. Takes no

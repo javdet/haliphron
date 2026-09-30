@@ -8,6 +8,7 @@ import (
 	"testing"
 
 	runv1 "github.com/automagicops/haliphron/api/run/v1"
+	"github.com/automagicops/haliphron/backend/app"
 	"github.com/automagicops/haliphron/backend/run"
 	"github.com/automagicops/haliphron/backend/store"
 )
@@ -254,5 +255,23 @@ func TestAnOversizedSystemPromptIsRefusedWhenTheRoleIsSaved(t *testing.T) {
 	errObj, _ := out["error"].(map[string]any)
 	if field, _ := errObj["field"].(string); field != "systemPrompt" {
 		t.Errorf("the refusal names field %q, want systemPrompt: %v", field, out)
+	}
+}
+
+func TestAnOversizedDescriptionIsRefusedWhenTheRoleIsSaved(t *testing.T) {
+	h := newHarness(t)
+	admin := h.Token(store.ScopeAdmin)
+
+	body, _ := json.Marshal(map[string]any{
+		"description": strings.Repeat("x", app.MaxRoleDescriptionBytes+1),
+	})
+	var out map[string]any
+	status := h.call(t, admin, http.MethodPut, "/api/v1/roles/verbose", json.RawMessage(body), &out)
+	if status != http.StatusUnprocessableEntity {
+		t.Fatalf("status %d, want 422: list_roles puts every description into the caller's context", status)
+	}
+	errObj, _ := out["error"].(map[string]any)
+	if field, _ := errObj["field"].(string); field != "description" {
+		t.Errorf("the refusal names field %q, want description: %v", field, out)
 	}
 }

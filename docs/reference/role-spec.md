@@ -26,6 +26,7 @@ Every field is optional.
 
 | Field | Type | Notes |
 |---|---|---|
+| `description` | string | what the role is for; configures nothing; at most 1 KiB; see below |
 | `agent` | string | `claude-code` or `codex` |
 | `model` | string | |
 | `image` | string | overrides the installation's agent image |
@@ -46,6 +47,7 @@ Every field is optional.
 
 ```json
 {
+  "description": "Implements a change and opens a pull request.",
   "agent": "claude-code",
   "model": "anthropic/claude-opus-5",
   "permissionMode": "acceptEdits",
@@ -112,6 +114,21 @@ separator, so a role written with `".claude/settings.json"` in it would fail
 materialisation in the cluster. It is refused when the role is saved rather than
 rewritten, because a key silently rewritten is a file the role believes it
 shipped and the pod never sees.
+
+## `description`
+
+What the role is for, in a sentence or two. It configures nothing, and no run
+behaves differently because of it.
+
+It is written for whoever chooses between roles. The UI shows it beside the
+name. The MCP tool `list_roles` returns only the name and the description of
+each role, and an agent reads that when it picks a role for a child run. Say
+what the role does and what it will not do, for example "Reviews a change and
+reports problems. Pushes nothing.", rather than how it is configured.
+
+The limit is 1 KiB (`MaxRoleDescriptionBytes` in `backend/app`), measured in
+bytes, because `list_roles` puts every description into the caller's context at
+once. A longer description is refused with a 422 when the role is saved.
 
 ## `systemPrompt`
 

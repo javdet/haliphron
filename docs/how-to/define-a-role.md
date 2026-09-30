@@ -13,6 +13,7 @@ curl -sX PUT https://haliphron.example.com/api/v1/roles/coder \
   -H "Authorization: Bearer $ADMIN_TOKEN" \
   -H 'Content-Type: application/json' \
   -d '{
+    "description": "Implements a change and opens a pull request.",
     "agent": "claude-code",
     "model": "anthropic/claude-opus-5",
     "permissionMode": "acceptEdits",
@@ -233,4 +234,6 @@ curl -s https://haliphron.example.com/api/v1/roles \
 ```
 
 Callers can also list roles over MCP with `list_roles`, which is how an agent
-discovers what it may start a child run under.
+discovers what it may start a child run under. It returns only each role's name
+and `description`, so the description is the only thing an agent has to choose
+by. Write it for that reader: what the role is for, and what it will not do.

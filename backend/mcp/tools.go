@@ -99,7 +99,7 @@ func toolDefinitions(c Caller) []tool {
 		{
 			Name:        "list_roles",
 			Title:       "List roles",
-			Description: "The roles a run may be started under.",
+			Description: "The roles a run may be started under, each with a description of what it is for. Pass the chosen name as run_agent's role.",
 			InputSchema: map[string]any{"type": "object", "properties": map[string]any{}},
 		},
 	}
@@ -378,13 +378,22 @@ func (s *Server) listRoles(r *http.Request) (any, *rpcError) {
 	if err != nil {
 		return toolError(err), nil
 	}
-	names := make([]string, 0, len(roles))
+	// The name and what the role is for, and nothing of how it is configured.
+	// The caller is choosing a role, not auditing one, and the spec holds what
+	// an agent has no business reading: the system prompt, env values, MCP
+	// server addresses.
+	lines := make([]string, 0, len(roles))
 	items := make([]any, 0, len(roles))
 	for _, role := range roles {
-		names = append(names, role.Name)
-		items = append(items, map[string]any{"name": role.Name, "spec": role.Spec})
+		description := app.RoleDescription(role)
+		line := role.Name
+		if description != "" {
+			line += " — " + description
+		}
+		lines = append(lines, line)
+		items = append(items, map[string]any{"name": role.Name, "description": description})
 	}
-	return ok(joinLines(names), map[string]any{"roles": items}), nil
+	return ok(joinLines(lines), map[string]any{"roles": items}), nil
 }
 
 func (s *Server) listClusters(r *http.Request) (any, *rpcError) {

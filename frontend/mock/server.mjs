@@ -114,7 +114,8 @@ const LOG = `[init]     haliphron agent-runtime 0.1.0 (claude-code)
 // a role spec and which the backend silently discarded.
 const roles = [
   { name: 'coder',
-    spec: { agent: 'claude-code', model: 'anthropic/claude-opus-5',
+    spec: { description: 'Implements a change and opens a pull request.',
+      agent: 'claude-code', model: 'anthropic/claude-opus-5',
       permissionMode: 'acceptEdits',
       toolPolicy: { allow: ['Read', 'Edit', 'Bash'] },
       plugins: {
@@ -123,7 +124,8 @@ const roles = [
       } },
     created_by: 'maria', updated_at: iso(9 * 86400000) },
   { name: 'code-reviewer',
-    spec: { agent: 'claude-code', model: 'anthropic/claude-sonnet-5',
+    spec: { description: 'Reviews a change and reports problems. Pushes nothing.',
+      agent: 'claude-code', model: 'anthropic/claude-sonnet-5',
       permissionMode: 'plan',
       toolPolicy: { allow: ['Read', 'Grep'] } },
     created_by: 'maria', updated_at: iso(4 * 86400000) },
