@@ -1,0 +1,57 @@
+# Changelog
+
+All notable changes to Haliphron are recorded here. The version is the content
+of `VERSION`, and it is the tag of the published images.
+
+## 0.3.0 — 2026-09-30
+
+### Fixed
+
+- **Agent image: every run with a repository failed in `clone`.** `phaseInit`
+  creates the run's exchange directory inside `/workspace`, so the plain
+  `git clone <url> .` that followed was always refused with `destination path
+  '.' already exists and is not an empty directory` (exit code 20, class `git`).
+  The repository is now cloned with `--separate-git-dir` into the workspace's
+  `.git`, the throwaway work tree goes under the run-private directory, and the
+  checkout is done in place with `git reset --hard`. Untracked files, including
+  the exchange directory, are left alone. Submodules are initialised after the
+  checkout rather than during the clone.
+- **Controller: retries no longer come faster than the schedule.** The pause
+  before a controller-local retry started at 15 s with half-range jitter
+  *below* it, which let a pod that failed fast produce three Jobs in half a
+  minute. It now starts at 30 s and doubles (30 s, 60 s, 120 s, …) up to 5
+  minutes, and jitter of up to a tenth is only ever added on top.
+
+### Added
+
+- **Run retention.** `runRetention` in the chart (`HALIPHRON_RUN_RETENTION`, a
+  Go duration such as `720h`) deletes a finished run after that long, along
+  with its attempts, logs, results and artifacts. It is off by default, so runs
+  are kept forever unless you set it. Every deleted run stays in the audit log.
+- **Deleting a run.** `DELETE /api/v1/runs/{id}` needs the `admin` scope; an
+  agent pod's `runs:write` token cannot delete runs. A run that has not ended
+  is refused with `409 run_live`: cancel it first. The UI has a delete action
+  on the run list and the run page.
+- **MCP tasks.** A client that negotiates protocol revision `2025-11-25` can
+  call `run_agent` as an MCP task and poll `tasks/get` / `tasks/result` /
+  `tasks/cancel` itself. The task ID is the run ID. Clients on `2025-06-18`
+  work as before.
+- **Model credential.** `GET` and `PUT /api/v1/model-credential` set the
+  installation's model credential, which is either an Anthropic API key or a
+  Claude subscription OAuth token. The kind is detected from the value and
+  passed to the agent the way its CLI expects. The UI has a page for it under
+  Secrets.
+- **Role descriptions.** A role spec can carry a `description` of up to 1 KiB.
+  It changes nothing about how the role runs. The UI shows it, and the MCP
+  tool `list_roles` now returns each role's name and description so an agent
+  can pick a role for a child run.
+- **`maxInfraRetries`** in the chart: the number of extra attempts (0–10) the
+  controller starts on its own after an `infra` or `git` failure. The backend
+  refuses to start if the value is outside that range.
+
+### Upgrading
+
+- The agent image is published as `javdet/haliphron-agent:0.3.0`. A node that
+  already has `:latest` cached keeps running the old image under
+  `imagePullPolicy: IfNotPresent`, and that old image still has the `clone`
+  failure above. Pin the agent image to `0.3.0`, or pull with `Always`.
