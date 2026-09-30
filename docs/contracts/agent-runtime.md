@@ -662,7 +662,7 @@ the launch command and the output parser.
 
 | haliphron concept | claude-code | codex |
 |---|---|---|
-| model key | `ANTHROPIC_API_KEY` / `ANTHROPIC_AUTH_TOKEN` | `OPENAI_API_KEY` |
+| model key | `ANTHROPIC_API_KEY` / `ANTHROPIC_AUTH_TOKEN`; a Claude subscription token (`sk-ant-oat…`) as `CLAUDE_CODE_OAUTH_TOKEN` alone | `OPENAI_API_KEY`; a subscription token is refused with `CredentialMismatch` |
 | model | `ANTHROPIC_MODEL` | `OPENAI_MODEL` |
 | `toolPolicy.allow` | `--allowedTools` | `enabled_tools` on the MCP server + the sandbox mode |
 | `toolPolicy.deny` | `--disallowedTools` | `disabled_tools` on the server |

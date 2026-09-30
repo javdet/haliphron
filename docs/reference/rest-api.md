@@ -352,6 +352,41 @@ Both, or neither, is refused with `422`.
 
 Returns `200` with `name` and `kind`, plus `ref` for a referenced secret.
 
+`409` with code `no_kek` when a `value` is sent to an installation with no key
+encryption key.
+
+### `GET /api/v1/model-credential`
+
+Scope: `runs:read`. The stored secret every lease reads the model key from,
+without its value.
+
+| Field | Type | Meaning |
+|---|---|---|
+| `secret_name` | string | the name leases read: `HALIPHRON_LLM_SECRET`, `llm-api-key` by default |
+| `configured` | boolean | whether a secret by that name is stored |
+| `kind` | string | `managed` or `referenced`; absent when not configured |
+| `type` | string | `api_key` or `oauth_token`, derived from the value; absent for a reference or a value this process cannot decrypt |
+| `ref` | string | the reference, for a referenced secret |
+| `updated_at` | timestamp | |
+| `problem` | string | why a stored credential will not reach a pod; absent when leases will carry it |
+
+Runs:read rather than admin, because whoever submits runs is owed the reason
+they will all fail.
+
+### `PUT /api/v1/model-credential`
+
+Scope: `admin`. Stores the credential under `secret_name`.
+
+| Field | Type | Meaning |
+|---|---|---|
+| `type` | string | required: `api_key` or `oauth_token` |
+| `value` | string | the credential, trimmed before it is stored |
+| `ref` | string | a pointer into an external manager |
+
+Exactly one of `value` and `ref`. A `value` whose shape contradicts `type` is
+refused with `422`: an `oauth_token` starts with `sk-ant-oat`, and an
+`api_key` does not. Returns `200` with the same body as the `GET`.
+
 ---
 
 ## Tokens

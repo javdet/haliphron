@@ -1,4 +1,5 @@
-import { NavLink, Route, Routes } from 'react-router-dom'
+import { Link, NavLink, Route, Routes, useLocation } from 'react-router-dom'
+import { useModelCredential } from './api/hooks'
 import { RunsPage } from './pages/RunsPage'
 import { RunDetailPage } from './pages/RunDetailPage'
 import { ClustersPage } from './pages/ClustersPage'
@@ -38,11 +39,40 @@ function Sidebar() {
   )
 }
 
+/**
+ * Shown on every page while the model credential is missing or unusable: every
+ * run fails in the pod without it, and the failure surfaces minutes later on a
+ * run, far from the page where it is fixed.
+ */
+function ModelCredentialWarning() {
+  const cred = useModelCredential()
+  const { pathname } = useLocation()
+  const c = cred.data
+  // The Secrets page carries the full card; a second banner there is noise.
+  if (!c || (c.configured && !c.problem) || pathname === '/secrets') return null
+  return (
+    <div className="content-banner">
+      <div className="banner" role="alert">
+        <div>
+          <div className="banner-title">
+            {c.configured ? 'The model credential cannot reach runs' : 'No model credential is set'}
+          </div>
+          <div className="small muted">
+            {c.problem ?? 'Every run will fail before the agent starts.'}{' '}
+            <Link to="/secrets">Set it on the Secrets page</Link>
+          </div>
+        </div>
+      </div>
+    </div>
+  )
+}
+
 export default function App() {
   return (
     <div className="shell">
       <Sidebar />
       <div className="main">
+        <ModelCredentialWarning />
         <Routes>
           <Route path="/" element={<RunsPage />} />
           <Route path="/runs" element={<RunsPage />} />

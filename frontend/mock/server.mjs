@@ -163,6 +163,11 @@ const clusters = [
 return { runs, attempts, LOG, roles, clusters }
 }
 
+// The one piece of state the mock keeps: whether the model credential has been
+// set, so the warning banner can be seen to appear and go away. It starts unset
+// because that is the state a fresh installation is in.
+let modelCredential = { secret_name: 'llm-api-key', configured: false }
+
 const routes = [
   ['GET', /^\/api\/v1\/runs$/, (_m, url, { runs }) => {
     const wanted = url.searchParams.getAll('status')
@@ -213,8 +218,19 @@ const routes = [
   })],
   ['DELETE', /^\/api\/v1\/tokens\/([^/]+)$/, () => ({})],
   ['POST', /^\/api\/v1\/tokens\/([^/]+)\/remove$/, () => ({})],
+  ['GET', /^\/api\/v1\/model-credential$/, () => modelCredential],
+  ['PUT', /^\/api\/v1\/model-credential$/, () => {
+    // The body is not read here; the type is the one the fixture shows.
+    modelCredential = {
+      secret_name: 'llm-api-key', configured: true, kind: 'managed', type: 'oauth_token', updated_at: iso(0),
+    }
+    return modelCredential
+  }],
   ['GET', /^\/api\/v1\/secrets$/, () => ({
     secrets: [
+      ...(modelCredential.configured
+        ? [{ name: 'llm-api-key', kind: 'managed', updated_at: modelCredential.updated_at }]
+        : []),
       { name: 'anthropic-api-key', kind: 'managed', updated_at: iso(60 * 86400000), rotated_at: iso(9 * 86400000) },
       { name: 'github-app-key', kind: 'managed', updated_at: iso(88 * 86400000) },
       { name: 'openai-api-key', kind: 'referenced', ref: 'vault://kv/data/agents#openai', updated_at: iso(12 * 86400000) },

@@ -107,6 +107,13 @@ func phaseAuth(_ context.Context, r *Run) error {
 	if err != nil {
 		return err
 	}
+	if r.cfg.Agent != runv1.AgentClaudeCode && runv1.IsClaudeOAuthToken(r.secrets.LLMAPIKey) {
+		// Refused here rather than left to the provider: codex would send the
+		// token to OpenAI and report a 401 that says nothing about why.
+		return fail(runv1.ExitConfig, "CredentialMismatch",
+			"the model credential is a Claude subscription OAuth token, which authenticates "+
+				"claude-code only; %s needs an API key for its own provider", r.cfg.Agent)
+	}
 	// What the agent's child process gets, and the whole of it. Not the git
 	// token, not the callback token, not one presigned link: the entrypoint
 	// handles those before and after the run, and the agent has a shell.

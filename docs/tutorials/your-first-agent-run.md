@@ -158,16 +158,23 @@ Use our own value from the response, not the one printed above.
 An agent needs a model key, and — because our run will touch a repository — a
 git token. Both live in the control plane, never in a prompt or a role.
 
+The model key has an endpoint of its own, because every run needs it. We say
+what kind of key it is — `api_key` here; a Claude subscription token from
+`claude setup-token` would be `oauth_token`:
+
 ```sh
-curl -s -X PUT localhost:8080/api/v1/secrets/llm-api-key \
+curl -s -X PUT localhost:8080/api/v1/model-credential \
   -H "Authorization: Bearer $TOKEN" \
   -H 'Content-Type: application/json' \
-  -d "{\"value\":\"$LLM_KEY\"}"
+  -d "{\"type\":\"api_key\",\"value\":\"$LLM_KEY\"}"
 ```
 
 ```json
-{"name":"llm-api-key","kind":"managed"}
+{"configured":true,"kind":"managed","secret_name":"llm-api-key","type":"api_key","updated_at":"2026-09-24T09:13:58Z"}
 ```
+
+It is stored as an ordinary secret named `llm-api-key`, which is the name every
+lease reads.
 
 ```sh
 curl -s -X PUT localhost:8080/api/v1/secrets/git-token \

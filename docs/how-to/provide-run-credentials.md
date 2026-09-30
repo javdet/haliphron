@@ -7,17 +7,54 @@ and handed to a pod for the life of one run.
 The pod never receives a credential it can keep. Nothing here puts a secret
 into a role, a prompt, or a Kubernetes Secret you manage.
 
-## Store the two secrets
+## Set the model credential
 
-The backend looks for them under fixed names — `llm-api-key` and `git-token`
-by default.
+Every run needs one, so it has a place of its own: **Secrets → Model
+credential** in the UI, or its own endpoint. Choose what kind it is:
+
+| Type | What | Works for |
+|---|---|---|
+| `api_key` | an Anthropic key (`sk-ant-api…`), an OpenAI key, or a gateway's token | claude-code and codex |
+| `oauth_token` | a Claude Pro/Max subscription token from `claude setup-token` (`sk-ant-oat…`) | claude-code only |
 
 ```sh
-curl -sX PUT https://haliphron.example.com/api/v1/secrets/llm-api-key \
+curl -sX PUT https://haliphron.example.com/api/v1/model-credential \
   -H "Authorization: Bearer $ADMIN_TOKEN" \
   -H 'Content-Type: application/json' \
-  -d '{"value":"sk-..."}'
+  -d '{"type":"api_key","value":"sk-ant-api03-..."}'
+```
 
+A value whose shape contradicts the declared type is refused with `422`: a
+subscription token pasted as an API key would otherwise be sent to the model as
+one and fail in the pod with a `401`.
+
+It is stored as the secret `llm-api-key` (see [Use different
+names](#use-different-names)). Until it is set, every page of the UI says so.
+
+### Use a Claude subscription instead of an API key
+
+On a machine signed in to the plan:
+
+```sh
+claude setup-token        # prints sk-ant-oat01-...
+```
+
+Then store it with `"type":"oauth_token"`, or choose **Claude subscription
+(OAuth)** in the UI. The pod hands it to claude-code as
+`CLAUDE_CODE_OAUTH_TOKEN` and sets no `ANTHROPIC_*` key, which the CLI would
+otherwise prefer.
+
+Runs then count against the plan's usage limits rather than an API bill, and
+the `cost_usd` a run reports is what the CLI computed, not what was charged.
+A codex run with a subscription token fails in the `auth` phase with
+`CredentialMismatch`. Check that the plan's terms allow automated use before
+relying on it for more than trying Haliphron out.
+
+## Store the git token
+
+The backend looks for it under a fixed name — `git-token` by default.
+
+```sh
 curl -sX PUT https://haliphron.example.com/api/v1/secrets/git-token \
   -H "Authorization: Bearer $ADMIN_TOKEN" \
   -H 'Content-Type: application/json' \
@@ -35,9 +72,16 @@ credentials](manage-installation-credentials.md#supply-your-own-key-encryption-k
 ## Confirm they are there
 
 ```sh
+curl -s https://haliphron.example.com/api/v1/model-credential \
+  -H "Authorization: Bearer $TOKEN"
+
 curl -s https://haliphron.example.com/api/v1/secrets \
   -H "Authorization: Bearer $ADMIN_TOKEN"
 ```
+
+The first answers `configured`, `type`, and a `problem` when a stored
+credential cannot reach a pod — a missing key encryption key, or a reference
+the backend does not resolve.
 
 ## Rotate one
 

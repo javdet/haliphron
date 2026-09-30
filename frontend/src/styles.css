@@ -362,3 +362,6 @@ pre.snippet {
 @media (prefers-reduced-motion: reduce) {
   * { animation-duration: 0.001ms !important; transition-duration: 0.001ms !important; }
 }
+
+/* The installation-wide warning above every page's own top bar. */
+.content-banner { padding: 12px var(--gutter) 0; }

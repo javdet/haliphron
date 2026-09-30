@@ -86,6 +86,118 @@ func TestAMissingSecretFileNamesTheFile(t *testing.T) {
 	}
 }
 
+// --- model credential -------------------------------------------------------
+
+// A missing model key is the one missing secret an operator fixes in the UI
+// rather than in the cluster: the backend leaves the key out when it has none
+// stored. The message has to say so.
+func TestAMissingModelCredentialSaysWhereToSetIt(t *testing.T) {
+	t.Parallel()
+	h := newHarness(t, controlplane.RunRequest{Prompt: "hello"})
+	removeSecret(t, h, runv1.SecretKeyLLMAPIKey)
+
+	f := h.loadFails()
+	if f.Code != runv1.ExitConfig {
+		t.Fatalf("exit %d, want %d", f.Code, runv1.ExitConfig)
+	}
+	for _, want := range []string{runv1.SecretKeyLLMAPIKey, "Model credential", "/api/v1/model-credential"} {
+		if !strings.Contains(f.Message(), want) {
+			t.Errorf("the message does not mention %q: %s", want, f.Message())
+		}
+	}
+}
+
+// claudeLaunchEnv is the environment the scripted claude was launched with.
+func claudeLaunchEnv(t *testing.T, h *harness) map[string]string {
+	t.Helper()
+	for _, c := range h.commander.invocations("claude") {
+		if len(c.Args) == 0 || c.Args[0] != "-p" {
+			continue
+		}
+		env := map[string]string{}
+		for _, kv := range c.Env {
+			if k, v, ok := strings.Cut(kv, "="); ok {
+				env[k] = v
+			}
+		}
+		return env
+	}
+	t.Fatal("claude was never launched")
+	return nil
+}
+
+// claude-code sends ANTHROPIC_API_KEY and ANTHROPIC_AUTH_TOKEN ahead of an
+// OAuth token, so a subscription token exported under those names goes out as
+// an API key and is refused. Each kind of credential gets its own variables and
+// only those.
+func TestTheModelCredentialReachesClaudeUnderTheVariableItsKindNeeds(t *testing.T) {
+	t.Parallel()
+	const apiKey = "sk-ant-api03-an-api-key-for-this-test"
+	const oauth = "sk-ant-oat01-a-subscription-token-for-this-test"
+
+	for _, tc := range []struct {
+		name, value  string
+		want, absent []string
+	}{
+		{"api key", apiKey,
+			[]string{"ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN"}, []string{"CLAUDE_CODE_OAUTH_TOKEN"}},
+		{"oauth token", oauth + "\n",
+			[]string{"CLAUDE_CODE_OAUTH_TOKEN"}, []string{"ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN"}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			h := newHarness(t, controlplane.RunRequest{
+				Prompt:  "hello",
+				Agent:   runv1.AgentClaudeCode,
+				Secrets: map[string]string{runv1.SecretKeyLLMAPIKey: tc.value},
+			})
+			h.commander.handle = agentScript(h, "done", "")
+
+			run, code := h.executeRun()
+			if code != runv1.ExitSuccess {
+				t.Fatalf("exit %d (%v)", code, run.Failure())
+			}
+			env := claudeLaunchEnv(t, h)
+			for _, name := range tc.want {
+				// Trimmed: a token pasted with a newline must not carry it.
+				if env[name] != strings.TrimSpace(tc.value) {
+					t.Errorf("%s = %q, want the credential", name, env[name])
+				}
+			}
+			for _, name := range tc.absent {
+				if _, ok := env[name]; ok {
+					t.Errorf("%s is set; the CLI would pick it over the right variable", name)
+				}
+			}
+		})
+	}
+}
+
+// A subscription token authenticates claude-code and nothing else. codex would
+// send it to its own provider and report a 401 that explains nothing.
+func TestAClaudeOAuthTokenIsRefusedForCodexBeforeTheModel(t *testing.T) {
+	t.Parallel()
+	h := newHarness(t, controlplane.RunRequest{
+		Prompt:  "hello",
+		Agent:   runv1.AgentCodex,
+		Secrets: map[string]string{runv1.SecretKeyLLMAPIKey: "sk-ant-oat01-a-subscription-token"},
+	})
+	h.commander.handle = agentScript(h, "done", "")
+
+	run, code := h.executeRun()
+	if code != runv1.ExitConfig {
+		t.Fatalf("exit %d, want %d (%v)", code, runv1.ExitConfig, run.Failure())
+	}
+	if f := run.Failure(); f == nil || f.Reason != "CredentialMismatch" {
+		t.Errorf("failure %v, want reason CredentialMismatch", f)
+	}
+	for _, c := range h.commander.invocations("codex") {
+		if len(c.Args) > 0 && c.Args[0] == "exec" {
+			t.Fatal("codex was launched with a credential that cannot work")
+		}
+	}
+}
+
 // --- prompt and storage -----------------------------------------------------
 
 func TestAPromptDigestMismatchNeverCallsTheModel(t *testing.T) {

@@ -76,6 +76,10 @@ func (s *Server) Handler() http.Handler {
 
 	mux.HandleFunc("GET "+BasePath+"/secrets", s.scoped(store.ScopeAdmin, s.listSecrets))
 	mux.HandleFunc("PUT "+BasePath+"/secrets/{name}", s.scoped(store.ScopeAdmin, s.putSecret))
+	// Readable with runs:read: whoever submits runs is owed the reason they
+	// will all fail, and the answer carries no value.
+	mux.HandleFunc("GET "+BasePath+"/model-credential", s.scoped(store.ScopeRunsRead, s.getModelCredential))
+	mux.HandleFunc("PUT "+BasePath+"/model-credential", s.scoped(store.ScopeAdmin, s.putModelCredential))
 
 	mux.HandleFunc("POST "+BasePath+"/tokens", s.scoped(store.ScopeAdmin, s.createToken))
 	mux.HandleFunc("GET "+BasePath+"/tokens", s.scoped(store.ScopeAdmin, s.listTokens))
@@ -182,6 +186,11 @@ func (s *Server) failFor(w http.ResponseWriter, r *http.Request, err error) {
 		s.fail(w, http.StatusUnprocessableEntity, "invalid_request", invalid.Detail, invalid.Field)
 	case errors.Is(err, store.ErrNotFound):
 		s.fail(w, http.StatusNotFound, "not_found", "no such object", "")
+	case errors.Is(err, store.ErrNoKEK):
+		// A deployment gap, not a server fault: a 500 would hide the one
+		// sentence that says what to configure.
+		s.fail(w, http.StatusConflict, "no_kek",
+			"no key encryption key is configured, so a secret value cannot be stored", "value")
 	case errors.Is(err, store.ErrRunTerminal):
 		s.fail(w, http.StatusConflict, "run_terminal", "this run has already ended", "")
 	case errors.Is(err, store.ErrTokenLive):

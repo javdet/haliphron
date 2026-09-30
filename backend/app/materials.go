@@ -94,10 +94,10 @@ func (s *Service) materials(ctx context.Context, runID runv1.ULID, spec runv1.Re
 		case err == nil:
 			secrets[runv1.SecretKeyLLMAPIKey] = string(value)
 		case errors.Is(err, store.ErrNotFound):
-			// An installation using a provider that authenticates some other
-			// way — a proxy with its own credentials, a self-hosted model — is
-			// legitimate, and the pod fails at its auth phase with a message
-			// about the provider rather than about this table.
+			// Not a lease failure: the run is leased without the key and the
+			// pod refuses it in its validate phase, with a message that points
+			// at Secrets → Model credential. ModelCredential reports the same
+			// absence before any run is tried, which is what the UI warns on.
 		default:
 			return nil, nil, fmt.Errorf("resolve model credential: %w", err)
 		}

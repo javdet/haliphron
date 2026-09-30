@@ -408,9 +408,18 @@ func LoadSecrets(dir string, c *Config) (*Secrets, error) {
 	// reaches anything that could explain why.
 	s.CallbackToken = strings.TrimSpace(string(token))
 
-	key, err := read(runv1.SecretKeyLLMAPIKey, true)
+	key, err := read(runv1.SecretKeyLLMAPIKey, false)
 	if err != nil {
 		return nil, err
+	}
+	if key == nil {
+		// Named for what the operator has to do. The backend leaves the key
+		// out when it has no model credential stored, so "the volume was not
+		// mounted" would send them to the cluster when the fix is in the UI.
+		return nil, fail(runv1.ExitConfig, "MissingSecret",
+			"%s is not in the secret mount: the control plane has no model credential stored. "+
+				"Set one under Secrets → Model credential in the UI, or PUT /api/v1/model-credential, "+
+				"then start a new run", filepath.Join(dir, runv1.SecretKeyLLMAPIKey))
 	}
 	s.LLMAPIKey = strings.TrimSpace(string(key))
 

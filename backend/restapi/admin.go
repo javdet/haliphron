@@ -6,6 +6,7 @@ import (
 	"time"
 
 	runv1 "github.com/automagicops/haliphron/api/run/v1"
+	"github.com/automagicops/haliphron/backend/app"
 	"github.com/automagicops/haliphron/backend/store"
 )
 
@@ -277,6 +278,54 @@ func (s *Server) listSecrets(w http.ResponseWriter, r *http.Request, _ caller) {
 		})
 	}
 	s.write(w, http.StatusOK, map[string]any{"secrets": items})
+}
+
+type modelCredentialRequest struct {
+	Type  string `json:"type"`
+	Value string `json:"value,omitempty"`
+	Ref   string `json:"ref,omitempty"`
+}
+
+func (s *Server) getModelCredential(w http.ResponseWriter, r *http.Request, _ caller) {
+	cred, err := s.app.ModelCredential(r.Context())
+	if err != nil {
+		s.failFor(w, r, err)
+		return
+	}
+	s.write(w, http.StatusOK, modelCredentialBody(cred))
+}
+
+func (s *Server) putModelCredential(w http.ResponseWriter, r *http.Request, c caller) {
+	var req modelCredentialRequest
+	if _, ok := s.decode(w, r, &req); !ok {
+		return
+	}
+	cred, err := s.app.PutModelCredential(r.Context(), app.ModelCredentialRequest{
+		Type: req.Type, Value: req.Value, Ref: req.Ref,
+	}, c.Name())
+	if err != nil {
+		s.failFor(w, r, err)
+		return
+	}
+	s.write(w, http.StatusOK, modelCredentialBody(cred))
+}
+
+func modelCredentialBody(cred app.ModelCredential) map[string]any {
+	body := map[string]any{
+		"secret_name": cred.SecretName,
+		"configured":  cred.Configured,
+	}
+	for k, v := range map[string]string{
+		"kind": cred.Kind, "type": cred.Type, "ref": cred.Ref, "problem": cred.Problem,
+	} {
+		if v != "" {
+			body[k] = v
+		}
+	}
+	if cred.UpdatedAt != nil {
+		body["updated_at"] = cred.UpdatedAt
+	}
+	return body
 }
 
 // ---------------------------------------------------------------------------

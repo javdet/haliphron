@@ -19,6 +19,8 @@ import {
   type Cluster,
   type CreateRunRequest,
   type LogPage,
+  type ModelCredential,
+  type ModelCredentialType,
   type Role,
   type Run,
   type RunList,
@@ -46,6 +48,7 @@ export const keys = {
   bootstrapTokens: () => ['bootstrap-tokens'] as const,
   tokens: () => ['tokens'] as const,
   secrets: () => ['secrets'] as const,
+  modelCredential: () => ['model-credential'] as const,
 }
 
 /** How often a run that has not finished is re-read. */
@@ -309,6 +312,37 @@ export function usePutSecret() {
         method: 'PUT',
         body: value ? { value } : { ref },
       }),
-    onSuccess: () => void qc.invalidateQueries({ queryKey: keys.secrets() }),
+    onSuccess: () => {
+      void qc.invalidateQueries({ queryKey: keys.secrets() })
+      // The generic dialog can write the model credential's row too.
+      void qc.invalidateQueries({ queryKey: keys.modelCredential() })
+    },
+  })
+}
+
+/**
+ * The one secret every run needs. Read on every page, because without it
+ * every run fails in the pod and nothing else in the UI would say why.
+ */
+export function useModelCredential() {
+  return useQuery({
+    queryKey: keys.modelCredential(),
+    queryFn: ({ signal }) => request<ModelCredential>('/model-credential', { signal }),
+    staleTime: 60_000,
+  })
+}
+
+export function usePutModelCredential() {
+  const qc = useQueryClient()
+  return useMutation({
+    mutationFn: ({ type, value, ref }: { type: ModelCredentialType; value?: string; ref?: string }) =>
+      request<ModelCredential>('/model-credential', {
+        method: 'PUT',
+        body: value ? { type, value } : { type, ref },
+      }),
+    onSuccess: (cred) => {
+      qc.setQueryData(keys.modelCredential(), cred)
+      void qc.invalidateQueries({ queryKey: keys.secrets() })
+    },
   })
 }

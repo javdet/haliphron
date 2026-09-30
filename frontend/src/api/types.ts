@@ -313,6 +313,27 @@ export interface Secret {
   rotated_at?: string
 }
 
+/**
+ * What a model credential is: a provider API key (or a gateway's token), or a
+ * Claude subscription token from `claude setup-token`, which works for
+ * claude-code runs only.
+ */
+export type ModelCredentialType = 'api_key' | 'oauth_token'
+
+/** The installation's model credential, without its value. */
+export interface ModelCredential {
+  /** The stored secret every lease reads the model key from. */
+  secret_name: string
+  configured: boolean
+  kind?: 'managed' | 'referenced'
+  /** Absent when the value is not there to classify: a reference, or undecryptable. */
+  type?: ModelCredentialType
+  ref?: string
+  updated_at?: string
+  /** Why a stored credential will not reach a pod. */
+  problem?: string
+}
+
 /** The error envelope every non-2xx answer carries. */
 export interface ErrorBody {
   error: { code: string; message: string; field?: string }

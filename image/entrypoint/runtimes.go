@@ -111,17 +111,23 @@ func (claudeCode) Name() runv1.AgentType { return runv1.AgentClaudeCode }
 
 func (claudeCode) Env(r *Run) []string {
 	env := append(baseEnv(r),
-		// ANTHROPIC_AUTH_TOKEN rather than ANTHROPIC_API_KEY: the former is
-		// what a gateway in front of the model expects, and the CLI accepts it
-		// for a direct key too. One name covers both deployments.
-		"ANTHROPIC_AUTH_TOKEN="+r.secrets.LLMAPIKey,
-		"ANTHROPIC_API_KEY="+r.secrets.LLMAPIKey,
 		"ANTHROPIC_MODEL="+modelID(r.cfg.Model),
 		// Into $HOME, or the CLI writes to a read-only root and the pod dies
 		// with a permission error nobody expected.
 		"CLAUDE_CONFIG_DIR="+filepath.Join(r.layout.Home, ".claude"),
 	)
-	return env
+	if runv1.IsClaudeOAuthToken(r.secrets.LLMAPIKey) {
+		// A subscription token, and nothing under the ANTHROPIC_ names: the
+		// CLI prefers those, and would send this token as an API key.
+		return append(env, "CLAUDE_CODE_OAUTH_TOKEN="+r.secrets.LLMAPIKey)
+	}
+	return append(env,
+		// ANTHROPIC_AUTH_TOKEN rather than ANTHROPIC_API_KEY: the former is
+		// what a gateway in front of the model expects, and the CLI accepts it
+		// for a direct key too. One name covers both deployments.
+		"ANTHROPIC_AUTH_TOKEN="+r.secrets.LLMAPIKey,
+		"ANTHROPIC_API_KEY="+r.secrets.LLMAPIKey,
+	)
 }
 
 func (claudeCode) PrepareMCP(r *Run) ([]string, error) {

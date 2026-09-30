@@ -15,6 +15,8 @@ const (
 	// well, because gh and glab each insist on their own name.
 	SecretKeyGitToken = "git-token"
 	// SecretKeyLLMAPIKey authenticates the agent CLI to the model provider.
+	// It holds either a provider API key or a Claude subscription OAuth
+	// token; IsClaudeOAuthToken tells them apart.
 	SecretKeyLLMAPIKey = "llm-api-key"
 	// SecretKeyMCPConfig holds the rendered MCP configuration including header
 	// values, which is why it is a secret and not a ConfigMap.
