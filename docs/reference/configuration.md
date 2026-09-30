@@ -128,7 +128,7 @@ Filled in at admission when the request does not state them.
 | `HALIPHRON_DEFAULT_MODEL` | `anthropic/claude-opus-5` | |
 | `HALIPHRON_DEFAULT_TIMEOUT_SECONDS` | `3600` | |
 | `HALIPHRON_RUN_TTL_SECONDS` | `86400` | how long a finished run's objects survive in the cluster |
-| `HALIPHRON_MAX_INFRA_RETRIES` | `3` | controller-local retries per run |
+| `HALIPHRON_MAX_INFRA_RETRIES` | `3` | controller-local retries per run, 0 to 10; the pause before each doubles from 30 s |
 | `HALIPHRON_LOG_CHUNK_INTERVAL_SECONDS` | `5` | how often the pod uploads a log chunk |
 | `HALIPHRON_OTLP_ENDPOINT` | — | passed to the pod |
 | `HALIPHRON_AGENT_NODE_SELECTOR` | — | JSON object |
@@ -167,9 +167,18 @@ in, which is capped at 1 MiB across all its keys together.
 | Variable | Default | Meaning |
 |---|---|---|
 | `HALIPHRON_SWEEP_INTERVAL` | `5s` | lease and ack expiry scan |
-| `HALIPHRON_REAP_INTERVAL` | `1h` | artifact retention scan, relay mode |
+| `HALIPHRON_REAP_INTERVAL` | `1h` | artifact retention scan (relay mode) and run retention scan |
+| `HALIPHRON_RUN_RETENTION` | `0` (keep forever) | delete a run this long after it finished, e.g. `720h` for 30 days |
 | `HALIPHRON_LOG_LEVEL` | `info` | |
 | `HALIPHRON_LOG_FORMAT` | `json` | |
+
+`HALIPHRON_RUN_RETENTION` deletes the run and everything stored for it:
+attempts, logs, result and artifacts. It counts from `finished_at`. Runs that
+have not ended are never deleted. The scan runs where the Cluster API runs
+(`HALIPHRON_MODE` `all` or `cluster`), in both artifact modes, and writes a
+`run.deleted` audit record for every run it removes. The artifact retentions
+above still apply on their own terms. A run can outlive its logs, but no
+object outlives its run.
 
 ---
 

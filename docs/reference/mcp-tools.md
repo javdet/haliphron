@@ -16,14 +16,20 @@ POST /mcp
 | Property | Value |
 |---|---|
 | Transport | JSON-RPC 2.0 over HTTP, one POST per request |
-| MCP protocol revision | `2025-06-18` |
+| MCP protocol revision | `2025-06-18`; `2025-11-25` when the client asks for it |
 | Server name | `haliphron`, version `1` |
-| Capabilities | `tools` |
+| Capabilities | `tools`; plus `tasks` under `2025-11-25` — see [Tasks](#tasks) |
 | Maximum request body | 8 MiB |
 | Authentication | `Authorization: Bearer <token>`, same tokens and scopes as the REST API |
 
 There is no SSE and no long-lived session. A run that takes ten minutes is
 waited for by the caller, not pushed to it.
+
+`initialize` answers `2025-11-25` to a client that requests exactly that, and
+`2025-06-18` to every other request. Since there is no session, later requests
+are read at the version in their `MCP-Protocol-Version` header: only a request
+carrying `2025-11-25` sees anything to do with tasks. A request without the
+header is answered as it was before tasks existed.
 
 ## Methods
 
@@ -32,7 +38,10 @@ waited for by the caller, not pushed to it.
 | `initialize` | no | `protocolVersion`, `capabilities`, `serverInfo` |
 | `ping` | no | `{}` |
 | `tools/list` | yes | `{"tools": [ ... ]}` |
-| `tools/call` | yes | a [tool result](#tool-results) |
+| `tools/call` | yes | a [tool result](#tool-results), or a task under `2025-11-25` |
+| `tasks/get` | yes | a [task](#the-task-object) |
+| `tasks/result` | yes | the run's tool result, once the task has ended |
+| `tasks/cancel` | yes | the task, cancelled |
 
 A JSON-RPC notification — a request with no `id` — is answered with HTTP `202`
 and no body.
@@ -163,6 +172,109 @@ Scope: `runs:read`.
 
 **Not offered to a per-run token.** `tools/list` omits this tool when the
 caller is an agent inside a pod. It exists for an operator without a UI.
+
+---
+
+## Tasks
+
+A client that negotiated `2025-11-25` can call `run_agent` as an
+[MCP task](https://modelcontextprotocol.io/specification/2025-11-25/basic/utilities/tasks):
+the call returns at once with a task, and the host polls `tasks/get` and
+collects the result with `tasks/result`, rather than the model calling
+`get_run_result`. The feature is experimental in the specification.
+
+| Property | Value |
+|---|---|
+| Declared capability | `tasks.requests.tools.call`, `tasks.cancel` |
+| `tasks/list` | not offered: use `list_runs` |
+| Tools that may be tasks | `run_agent`, with `execution.taskSupport: "optional"` |
+| Task ID | the run ID |
+| `ttl` | `null`, or the run retention in milliseconds when `HALIPHRON_RUN_RETENTION` is set |
+| `pollInterval` | 5000 |
+| Status notifications | none: poll |
+
+`run_agent` without a `task` field works exactly as documented above. With
+one, `async` and `wait_seconds` are ignored, and the answer is:
+
+```json
+{
+  "task": {
+    "taskId": "01J...",
+    "status": "working",
+    "statusMessage": "run is Queued",
+    "createdAt": "2026-09-30T10:30:00Z",
+    "lastUpdatedAt": "2026-09-30T10:30:00Z",
+    "ttl": null,
+    "pollInterval": 5000
+  },
+  "_meta": {"io.modelcontextprotocol/model-immediate-response": "Run 01J... has started as a task. ..."}
+}
+```
+
+A `task` field on any other tool is error `-32601`. A `task` field from a
+client that did not negotiate `2025-11-25` is ignored, and the call is served
+as a plain call.
+
+### The task object
+
+Nothing is stored for a task. Its status is derived from the run on every read:
+
+| Task status | When |
+|---|---|
+| `working` | the run has not ended, or it has ended and its report is still being collected |
+| `completed` | the run is `Succeeded`: the agent exited 0, and nothing more is implied |
+| `failed` | the run is `Failed` or `TimedOut` |
+| `cancelled` | a cancellation was requested, through any interface, or the run is `Cancelled` |
+
+A cancelled task stays cancelled. Cancellation reaches the cluster on its next
+heartbeat, so the run can still finish afterwards; the run shows what happened,
+while the task stays `cancelled`.
+
+A run that has ended while its report is still missing stays `working` for up to
+five minutes after it finished. After that the task ends with the run as it
+is, usually `CompletedWithoutResult`, so a lost report cannot block a waiter
+forever.
+
+The task is the run, so an operator retry, which puts the run back to
+`Queued`, puts the task back to `working`. That is the one transition the
+specification does not allow. A host that has already collected the result
+does not see it.
+
+### `tasks/result`
+
+Blocks until the task has ended, then answers with what `run_agent` answers
+after waiting for the end: the run object in `structuredContent`, and the same
+text as `get_run_result`. `isError` is `true` when the task `failed`. Here
+this differs from the plain `run_agent`, whose failed run is not a tool
+error. The result carries `_meta["io.modelcontextprotocol/related-task"]`.
+
+A blocked `tasks/result` holds the request open for as long as the run takes,
+so a gateway in front of the listener can cut it off with its own timeout. The
+run is unaffected: the host goes back to `tasks/get`, and calls `tasks/result`
+again once the task has ended.
+
+### `tasks/cancel`
+
+`cancel_run` with no reason, answered with the task, now `cancelled`. Needs
+`runs:write`. A task that has already ended, or a run that has ended while its
+report is still being collected, is error `-32602`.
+
+### Errors
+
+| Case | Code |
+|---|---|
+| unknown task, malformed ID, or a run the token does not reach | `-32602` `Failed to retrieve task: Task not found` |
+| a refused admission for `run_agent` as a task: bad argument, missing scope, a depth or child limit | `-32602` with the same message the plain call would return as a tool error |
+| cancelling a task that has ended | `-32602` |
+| an internal failure | `-32603` |
+
+A refused admission is a protocol error, not a tool error. The call can only
+be answered with a task, and when nothing is admitted there is no task.
+
+A task is bound to the token's reach, the same bound as `get_run_result`. A
+service token with `runs:read` reaches every run. A per-run token reaches its
+own run and its children. A run outside that reach gets the same answer as one
+that does not exist.
 
 ---
 

@@ -12,6 +12,11 @@
 // request, the response in the body. No SSE and no long-lived session, because
 // nothing here streams — the tools return an identifier or a result, and a run
 // that takes ten minutes is waited for by the caller, not pushed to it.
+//
+// A client that negotiates 2025-11-25 may also start run_agent as a task
+// (tasks.go): the same run, polled by the host through tasks/get and collected
+// through tasks/result rather than by the model calling get_run_result. Every
+// other client is answered exactly as before.
 package mcp
 
 import (
@@ -21,6 +26,7 @@ import (
 	"log/slog"
 	"net/http"
 	"strings"
+	"time"
 
 	"github.com/automagicops/haliphron/backend/app"
 	"github.com/automagicops/haliphron/backend/store"
@@ -30,6 +36,9 @@ import (
 type Server struct {
 	app *app.Service
 	log *slog.Logger
+	// runRetention is how long a finished run is kept, zero for ever. It is
+	// what a task's ttl is derived from.
+	runRetention time.Duration
 }
 
 // New builds it over the use cases.
@@ -40,12 +49,43 @@ func New(service *app.Service, logger *slog.Logger) *Server {
 	return &Server{app: service, log: logger}
 }
 
+// WithRunRetention tells the server how long finished runs are kept, so that a
+// task can say how long it will be there. Zero, the default, is for ever.
+func (s *Server) WithRunRetention(keep time.Duration) *Server {
+	s.runRetention = keep
+	return s
+}
+
 // Path is where the endpoint lives. It is what goes into the pod's mcp.json,
 // so it is a constant rather than a configuration value with two spellings.
 const Path = "/mcp"
 
-// protocolVersion is the MCP revision this server implements.
-const protocolVersion = "2025-06-18"
+// The MCP revisions this server speaks. protocolVersion is the one every
+// client is answered with unless it asks for protocolVersionTasks, which adds
+// tasks and nothing else this server uses — so a client that has not asked for
+// tasks sees the server it saw before they existed.
+const (
+	protocolVersion      = "2025-06-18"
+	protocolVersionTasks = "2025-11-25"
+)
+
+// negotiate is the version answer to initialize. The specification has the
+// server answer with the requested version when it supports it, and with
+// another it does support otherwise.
+func negotiate(requested string) string {
+	if requested == protocolVersionTasks {
+		return protocolVersionTasks
+	}
+	return protocolVersion
+}
+
+// speaksTasks reports whether the request comes from a client that negotiated
+// tasks. There is no session to remember the handshake in; the transport has
+// the client repeat the negotiated version on every request instead, and a
+// request without it is, by the specification, from a 2025-03-26 client.
+func speaksTasks(r *http.Request) bool {
+	return r.Header.Get("MCP-Protocol-Version") == protocolVersionTasks
+}
 
 const maxRequestBytes = 8 << 20
 
@@ -79,6 +119,8 @@ type rpcError struct {
 	Message string `json:"message"`
 	Data    any    `json:"data,omitempty"`
 }
+
+func (e *rpcError) Error() string { return e.Message }
 
 // JSON-RPC error codes, plus the one this server adds.
 const (
@@ -123,9 +165,22 @@ func (s *Server) serve(w http.ResponseWriter, r *http.Request) {
 
 	switch req.Method {
 	case "initialize":
+		var hello struct {
+			ProtocolVersion string `json:"protocolVersion"`
+		}
+		_ = json.Unmarshal(req.Params, &hello)
+		version := negotiate(hello.ProtocolVersion)
+		capabilities := map[string]any{"tools": map[string]any{}}
+		if version == protocolVersionTasks {
+			// No list: a task here is a run, and listing runs is list_runs.
+			capabilities["tasks"] = map[string]any{
+				"cancel":   map[string]any{},
+				"requests": map[string]any{"tools": map[string]any{"call": map[string]any{}}},
+			}
+		}
 		s.reply(w, response{JSONRPC: "2.0", ID: req.ID, Result: map[string]any{
-			"protocolVersion": protocolVersion,
-			"capabilities":    map[string]any{"tools": map[string]any{}},
+			"protocolVersion": version,
+			"capabilities":    capabilities,
 			"serverInfo":      map[string]any{"name": "haliphron", "version": "1"},
 		}})
 		return
@@ -143,14 +198,16 @@ func (s *Server) serve(w http.ResponseWriter, r *http.Request) {
 
 	switch req.Method {
 	case "tools/list":
-		s.reply(w, response{JSONRPC: "2.0", ID: req.ID, Result: map[string]any{"tools": toolDefinitions(c)}})
+		s.reply(w, response{JSONRPC: "2.0", ID: req.ID, Result: map[string]any{
+			"tools": toolDefinitions(c, speaksTasks(r))}})
 	case "tools/call":
-		result, rpcErr := s.call(r, c, req.Params)
-		if rpcErr != nil {
-			s.reply(w, response{JSONRPC: "2.0", ID: req.ID, Error: rpcErr})
-			return
-		}
-		s.reply(w, response{JSONRPC: "2.0", ID: req.ID, Result: result})
+		s.answer(w, req.ID)(s.call(r, c, req.Params))
+	case "tasks/get":
+		s.answer(w, req.ID)(s.getTask(r, c, req.Params))
+	case "tasks/result":
+		s.answer(w, req.ID)(s.taskResult(r, c, req.Params))
+	case "tasks/cancel":
+		s.answer(w, req.ID)(s.cancelTask(r, c, req.Params))
 	default:
 		s.reply(w, response{JSONRPC: "2.0", ID: req.ID, Error: &rpcError{
 			Code: codeMethodNotFound, Message: "no method " + req.Method}})
@@ -214,6 +271,17 @@ func (c Caller) Via() string {
 		return "agent"
 	}
 	return "mcp"
+}
+
+// answer replies with a method's result or its error.
+func (s *Server) answer(w http.ResponseWriter, id json.RawMessage) func(any, *rpcError) {
+	return func(result any, rpcErr *rpcError) {
+		if rpcErr != nil {
+			s.reply(w, response{JSONRPC: "2.0", ID: id, Error: rpcErr})
+			return
+		}
+		s.reply(w, response{JSONRPC: "2.0", ID: id, Result: result})
+	}
 }
 
 func (s *Server) reply(w http.ResponseWriter, resp response) {

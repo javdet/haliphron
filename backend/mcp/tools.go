@@ -29,14 +29,29 @@ type tool struct {
 	Title       string         `json:"title,omitempty"`
 	Description string         `json:"description"`
 	InputSchema map[string]any `json:"inputSchema"`
+	// Execution is only ever set for a client that negotiated tasks: a field
+	// an older client has no definition for is one it may refuse the list over.
+	Execution *toolExecution `json:"execution,omitempty"`
 }
 
-func toolDefinitions(c Caller) []tool {
+type toolExecution struct {
+	TaskSupport string `json:"taskSupport"`
+}
+
+func toolDefinitions(c Caller, tasks bool) []tool {
+	var runAgentExecution *toolExecution
+	if tasks {
+		// Optional rather than required: run_agent with async and
+		// get_run_result is still the whole interface, and a host that does
+		// not poll tasks keeps using it.
+		runAgentExecution = &toolExecution{TaskSupport: "optional"}
+	}
 	tools := []tool{
 		{
 			Name:        "run_agent",
 			Title:       "Run an agent",
 			Description: "Start one agent run. Returns its run_id immediately, or waits for the result when async is false.",
+			Execution:   runAgentExecution,
 			InputSchema: map[string]any{
 				"type": "object",
 				"properties": map[string]any{
@@ -122,6 +137,9 @@ func toolDefinitions(c Caller) []tool {
 type callParams struct {
 	Name      string          `json:"name"`
 	Arguments json.RawMessage `json:"arguments,omitempty"`
+	// Task is the task augmentation, {"ttl": ...}. Its presence is what makes
+	// a call a task; its ttl is a request the server answers with its own.
+	Task json.RawMessage `json:"task,omitempty"`
 }
 
 // toolResult is what a tool returns. The structured content is the answer;
@@ -132,6 +150,7 @@ type toolResult struct {
 	Content           []contentBlock `json:"content"`
 	StructuredContent any            `json:"structuredContent,omitempty"`
 	IsError           bool           `json:"isError,omitempty"`
+	Meta              map[string]any `json:"_meta,omitempty"`
 }
 
 type contentBlock struct {
@@ -147,6 +166,18 @@ func (s *Server) call(r *http.Request, c Caller, raw json.RawMessage) (any, *rpc
 	args := params.Arguments
 	if len(args) == 0 {
 		args = json.RawMessage("{}")
+	}
+
+	// A task augmentation from a client that did not negotiate tasks is
+	// ignored, as the specification requires of a server that has not
+	// declared them to it: the call is served as the plain call it would have
+	// been before tasks existed.
+	if speaksTasks(r) && len(params.Task) > 0 && string(params.Task) != "null" {
+		if params.Name != "run_agent" {
+			return nil, &rpcError{Code: codeMethodNotFound,
+				Message: "tool " + params.Name + " cannot be called as a task"}
+		}
+		return s.runAgentTask(r, c, args)
 	}
 
 	switch params.Name {
@@ -195,12 +226,52 @@ type runAgentArgs struct {
 }
 
 func (s *Server) runAgent(r *http.Request, c Caller, raw json.RawMessage) (any, *rpcError) {
+	args, opts, submitted, err := s.admit(r, c, raw)
+	if err != nil {
+		var rpcErr *rpcError
+		if errorsAs(err, &rpcErr) {
+			return nil, rpcErr
+		}
+		var no refusal
+		if errorsAs(err, &no) {
+			return failed(string(no)), nil
+		}
+		return toolError(err), nil
+	}
+
+	result := submitted.Run
+	if args.Async != nil && !*args.Async {
+		waited, err := s.app.WaitForResult(r.Context(), result.ID,
+			time.Duration(args.WaitSeconds)*time.Second)
+		if err != nil {
+			return toolError(err), nil
+		}
+		result = waited
+	}
+
+	view := restapi.RunView(result)
+	s.recordSubmission(r, opts, submitted, view)
+	return ok(fmt.Sprintf("run %s is %s", result.ID, result.ReportedStatus()), view), nil
+}
+
+// refusal is a run_agent call that admitted nothing, for a reason the caller
+// can act on.
+type refusal string
+
+func (e refusal) Error() string { return string(e) }
+
+// admit is run_agent's admission, shared by the plain call and the task so
+// that the two cannot admit a run by different rules. What it refuses with is
+// an *rpcError, a refusal, or an error from the use case; each caller renders
+// them the way its own answer has room for.
+func (s *Server) admit(r *http.Request, c Caller, raw json.RawMessage) (runAgentArgs, app.SubmitOptions, app.Submitted, error) {
 	var args runAgentArgs
 	if err := json.Unmarshal(raw, &args); err != nil {
-		return nil, &rpcError{Code: codeInvalidParams, Message: "arguments could not be read"}
+		return args, app.SubmitOptions{}, app.Submitted{},
+			&rpcError{Code: codeInvalidParams, Message: "arguments could not be read"}
 	}
 	if !c.Token.Allows(store.ScopeRunsWrite) {
-		return failed("this token cannot start runs"), nil
+		return args, app.SubmitOptions{}, app.Submitted{}, refusal("this token cannot start runs")
 	}
 
 	submit := run.SubmitRequest{
@@ -242,29 +313,24 @@ func (s *Server) runAgent(r *http.Request, c Caller, raw json.RawMessage) (any, 
 
 	submitted, err := s.app.Submit(r.Context(), submit, opts)
 	if err != nil {
-		return toolError(err), nil
+		return args, opts, app.Submitted{}, err
 	}
+	return args, opts, submitted, nil
+}
 
-	result := submitted.Run
-	if args.Async != nil && !*args.Async {
-		waited, err := s.app.WaitForResult(r.Context(), result.ID,
-			time.Duration(args.WaitSeconds)*time.Second)
-		if err != nil {
-			return toolError(err), nil
-		}
-		result = waited
+// recordSubmission records what a first admission answered, so that a retry
+// under the same idempotency key is given the same run.
+func (s *Server) recordSubmission(r *http.Request, opts app.SubmitOptions, submitted app.Submitted, view any) {
+	if submitted.Replayed {
+		return
 	}
-
-	view := restapi.RunView(result)
-	if !submitted.Replayed {
-		body, err := json.Marshal(view)
-		if err == nil {
-			if err := s.app.CompleteSubmission(r.Context(), opts, result.ID, 200, body); err != nil {
-				s.log.Error("could not record an idempotent answer", "run", result.ID, "error", err)
-			}
-		}
+	body, err := json.Marshal(view)
+	if err != nil {
+		return
 	}
-	return ok(fmt.Sprintf("run %s is %s", result.ID, result.ReportedStatus()), view), nil
+	if err := s.app.CompleteSubmission(r.Context(), opts, submitted.Run.ID, 200, body); err != nil {
+		s.log.Error("could not record an idempotent answer", "run", submitted.Run.ID, "error", err)
+	}
 }
 
 type runIDArgs struct {
@@ -302,7 +368,12 @@ func (s *Server) getRunResult(r *http.Request, c Caller, raw json.RawMessage) (a
 		item = waited
 	}
 
-	view := restapi.RunView(item)
+	return ok(runText(item), restapi.RunView(item)), nil
+}
+
+// runText is a run rendered for a model: its status, and its summary and pull
+// request when it has them.
+func runText(item store.Run) string {
 	text := fmt.Sprintf("run %s is %s", item.ID, item.ReportedStatus())
 	if item.ResultSummary != "" {
 		text += "\n\n" + item.ResultSummary
@@ -310,7 +381,7 @@ func (s *Server) getRunResult(r *http.Request, c Caller, raw json.RawMessage) (a
 	if item.PRURL != "" {
 		text += "\n\npull request: " + item.PRURL
 	}
-	return ok(text, view), nil
+	return text
 }
 
 func (s *Server) cancelRun(r *http.Request, c Caller, raw json.RawMessage) (any, *rpcError) {

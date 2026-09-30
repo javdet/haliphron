@@ -190,7 +190,7 @@ func run() error {
 		serve("public", cfg.PublicAddr, restapi.New(service, log).Handler())
 	}
 	if cfg.Mode.Serves(config.ModeMCP) {
-		serve("mcp", cfg.MCPAddr, mcp.New(service, log).Handler())
+		serve("mcp", cfg.MCPAddr, mcp.New(service, log).WithRunRetention(cfg.RunRetention).Handler())
 	}
 	if cfg.Mode.Serves(config.ModeCluster) {
 		serve("cluster-api", cfg.ClusterAddr, clusterapi.New(service, log).Handler())
@@ -203,9 +203,11 @@ func run() error {
 	// would be harmless, since both statements are idempotent, but doubles the
 	// scan for nothing.
 	if cfg.Mode.Serves(config.ModeCluster) {
-		wg.Add(3)
+		wg.Add(4)
 		go func() { defer wg.Done(); service.RunSweeper(ctx, cfg.SweepInterval) }()
 		go func() { defer wg.Done(); service.RunReaper(ctx, cfg.ReapInterval) }()
+		// Retention for runs. A no-op unless HALIPHRON_RUN_RETENTION is set.
+		go func() { defer wg.Done(); service.ReapRuns(ctx, cfg.ReapInterval, cfg.RunRetention) }()
 		// Retention for the artifact volume. A no-op in object-store mode,
 		// where the chart generated lifecycle rules and the store applies them
 		// itself.

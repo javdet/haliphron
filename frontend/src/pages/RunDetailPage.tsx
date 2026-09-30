@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from 'react'
-import { Link, useParams } from 'react-router-dom'
+import { Link, useNavigate, useParams } from 'react-router-dom'
 import {
   isLive,
   useAttempts,
@@ -9,6 +9,7 @@ import {
   useRetryRun,
   useRun,
 } from '../api/hooks'
+import { DeleteRunDialog } from '../components/DeleteRunDialog'
 import { FailureBadge, StatusBadge } from '../components/StatusBadge'
 import {
   Card,
@@ -325,12 +326,14 @@ function CancelDialog({ id, onClose }: { id: string; onClose: () => void }) {
 
 export function RunDetailPage() {
   const { id = '' } = useParams()
+  const navigate = useNavigate()
   const run = useRun(id)
   const live = isLive(run.data)
   const attempts = useAttempts(id, live)
   const retry = useRetryRun(id)
   const [tab, setTab] = useState<Tab>('result')
   const [cancelling, setCancelling] = useState(false)
+  const [deleting, setDeleting] = useState(false)
 
   if (run.isLoading) {
     return (
@@ -376,6 +379,11 @@ export function RunDetailPage() {
               {retry.isPending ? 'Retrying…' : 'Retry'}
             </button>
           )}
+          {!live && (
+            <button className="danger" onClick={() => setDeleting(true)}>
+              Delete
+            </button>
+          )}
         </div>
       </header>
 
@@ -402,6 +410,13 @@ export function RunDetailPage() {
       </div>
 
       {cancelling && <CancelDialog id={id} onClose={() => setCancelling(false)} />}
+      {deleting && (
+        <DeleteRunDialog
+          runId={id}
+          onClose={() => setDeleting(false)}
+          onDeleted={() => navigate('/runs', { replace: true })}
+        />
+      )}
     </>
   )
 }

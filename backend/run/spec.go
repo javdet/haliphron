@@ -244,10 +244,10 @@ func Render(id runv1.ULID, req SubmitRequest, role *Role, def Defaults) (runv1.R
 	if req.MaxCostUSD != "" {
 		spec.Budget = &runv1.BudgetSpec{MaxCostUSD: req.MaxCostUSD}
 	}
-	if def.MaxInfraRetries > 0 {
-		retries := def.MaxInfraRetries
-		spec.Retry = &runv1.RetrySpec{MaxInfraRetries: &retries}
-	}
+	// Always rendered, zero included: an absent field is the CRD's default of
+	// three, so "no retries" left out would quietly become three of them.
+	retries := def.MaxInfraRetries
+	spec.Retry = &runv1.RetrySpec{MaxInfraRetries: &retries}
 	if def.OTLPEndpoint != "" || def.LogChunkIntervalSeconds > 0 {
 		obs := &runv1.ObservabilitySpec{OTLPEndpoint: def.OTLPEndpoint}
 		if def.LogChunkIntervalSeconds > 0 {

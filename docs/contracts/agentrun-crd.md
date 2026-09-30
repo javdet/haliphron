@@ -336,8 +336,9 @@ change). The budget is `spec.retry.maxInfraRetries`, 3 by default, stored in
 `status.retry.infraRetries`: after a controller restart, a failing run must not
 receive a fresh set of attempts.
 
-Between attempts there is an exponential pause with jitter,
-`status.retry.nextAttemptAt`. Without it an `ImagePullBackOff` on a broken node
+Between attempts there is an exponential pause, `status.retry.nextAttemptAt`:
+30 s before the first retry, doubling for each one after (60 s, 120 s, ...) up
+to 5 minutes, plus up to a tenth of jitter that is only ever added. Without it an `ImagePullBackOff` on a broken node
 turns into a tight create/fail loop against the API server.
 
 The repeat is idempotent thanks to `status.completedPhases`, handed to the next

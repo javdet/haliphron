@@ -34,39 +34,59 @@ type rpcResponse struct {
 	} `json:"error"`
 }
 
-// rpc sends one JSON-RPC request to the MCP endpoint.
+// rpc sends one JSON-RPC request to the MCP endpoint, as a client that sends
+// no MCP-Protocol-Version header.
 func (h *harness) rpc(t *testing.T, token, method string, params any) rpcResponse {
 	t.Helper()
+	return h.rpcAt(t, "", token, method, params)
+}
 
+// rpcAt is rpc from a client that negotiated version, which it repeats in the
+// MCP-Protocol-Version header as the transport has it do. Empty sends none.
+func (h *harness) rpcAt(t *testing.T, version, token, method string, params any) rpcResponse {
+	t.Helper()
+	resp, err := h.sendRPC(version, token, method, params)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return resp
+}
+
+// sendRPC is rpcAt returning its failure instead of failing the test, for a
+// call made from a goroutine other than the test's.
+func (h *harness) sendRPC(version, token, method string, params any) (rpcResponse, error) {
 	body := map[string]any{"jsonrpc": "2.0", "id": 1, "method": method}
 	if params != nil {
 		body["params"] = params
 	}
 	raw, err := json.Marshal(body)
 	if err != nil {
-		t.Fatalf("encode request: %v", err)
+		return rpcResponse{}, fmt.Errorf("encode request: %w", err)
 	}
 
 	req, err := http.NewRequest(http.MethodPost, h.MCP.URL+"/mcp", bytes.NewReader(raw))
 	if err != nil {
-		t.Fatalf("build request: %v", err)
+		return rpcResponse{}, fmt.Errorf("build request: %w", err)
 	}
 	req.Header.Set("Content-Type", "application/json")
+	if version != "" {
+		req.Header.Set("MCP-Protocol-Version", version)
+	}
 	if token != "" {
 		req.Header.Set("Authorization", "Bearer "+token)
 	}
 
 	resp, err := h.MCP.Client().Do(req)
 	if err != nil {
-		t.Fatalf("send request: %v", err)
+		return rpcResponse{}, fmt.Errorf("send request: %w", err)
 	}
 	defer resp.Body.Close()
 
 	var decoded rpcResponse
 	if err := json.NewDecoder(resp.Body).Decode(&decoded); err != nil {
-		t.Fatalf("decode response: %v", err)
+		return rpcResponse{}, fmt.Errorf("decode response: %w", err)
 	}
-	return decoded
+	return decoded, nil
 }
 
 // callTool calls a tool and returns its structured content.

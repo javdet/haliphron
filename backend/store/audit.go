@@ -35,6 +35,7 @@ const (
 	AuditRunCancelled = "run.cancelled"
 	AuditRunRetried   = "run.retried"
 	AuditRunUnknown   = "run.marked_unknown"
+	AuditRunDeleted   = "run.deleted"
 
 	AuditClusterRegistered = "cluster.registered"
 	AuditClusterRevoked    = "cluster.revoked"

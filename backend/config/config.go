@@ -72,6 +72,12 @@ type Config struct {
 	SweepInterval time.Duration
 	ReapInterval  time.Duration
 
+	// RunRetention deletes a run this long after it finished, together with
+	// its attempts and its stored objects. Zero keeps runs forever and is the
+	// default: history is deleted because somebody chose a number, not because
+	// a value was left unset.
+	RunRetention time.Duration
+
 	LogLevel  string
 	LogFormat string
 
@@ -219,6 +225,7 @@ func Load() (Config, error) {
 
 		SweepInterval: durationEnv("HALIPHRON_SWEEP_INTERVAL", 5*time.Second),
 		ReapInterval:  durationEnv("HALIPHRON_REAP_INTERVAL", time.Hour),
+		RunRetention:  durationEnv("HALIPHRON_RUN_RETENTION", 0),
 
 		LogLevel:  env("HALIPHRON_LOG_LEVEL", "info"),
 		LogFormat: env("HALIPHRON_LOG_FORMAT", "json"),
@@ -375,6 +382,11 @@ func (c Config) validate() error {
 			return fmt.Errorf("config: HALIPHRON_AGENT_TOLERATIONS has effect %q; it is NoSchedule, "+
 				"PreferNoSchedule or NoExecute", t.Effect)
 		}
+	}
+	if r := c.Defaults.MaxInfraRetries; r < 0 || r > 10 {
+		// The CRD's own bounds. Past them every lease fails to materialise in
+		// the cluster, which is a long way from the variable that caused it.
+		return fmt.Errorf("config: HALIPHRON_MAX_INFRA_RETRIES is %d; it is between 0 and 10", r)
 	}
 	if c.Timings.MaxWaitSeconds > 30 {
 		// The ingress's proxy_read_timeout must be greater than this, and 30

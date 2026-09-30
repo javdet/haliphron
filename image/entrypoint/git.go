@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"os"
+	"path/filepath"
 	"strconv"
 	"strings"
 
@@ -134,17 +135,24 @@ func phaseClone(ctx context.Context, r *Run) error {
 		return skip("this run has no repository")
 	}
 
-	args := []string{"clone"}
+	// git refuses to clone into a directory that is not empty, and the
+	// workspace never is by now: phaseInit has already created DirRunIO inside
+	// it. So the repository goes straight to the workspace's .git, the work
+	// tree git insists on creating is a throwaway under RunPrivate, and the
+	// checkout is done in place afterwards. Everything else — depth, branch,
+	// origin/HEAD — comes out exactly as a plain clone would leave it.
+	scratch := filepath.Join(r.layout.RunPrivate, "clone")
+	_ = os.RemoveAll(scratch)
+
+	args := []string{"clone", "--no-checkout",
+		"--separate-git-dir", filepath.Join(r.layout.Workspace, ".git")}
 	if r.cfg.CloneDepth > 0 {
 		args = append(args, "--depth", strconv.Itoa(r.cfg.CloneDepth))
 	}
 	if r.cfg.BaseBranch != "" {
 		args = append(args, "--branch", r.cfg.BaseBranch)
 	}
-	if r.cfg.Submodules {
-		args = append(args, "--recurse-submodules")
-	}
-	args = append(args, r.cfg.RepoURL, ".")
+	args = append(args, r.cfg.RepoURL, scratch)
 
 	out, code, err := r.git(ctx, args...)
 	if err != nil {
@@ -152,6 +160,24 @@ func phaseClone(ctx context.Context, r *Run) error {
 	}
 	if code != 0 {
 		return gitFailure("CloneFailed", out, "cloning %s", r.cfg.RepoURL)
+	}
+	// All the scratch tree holds is a .git file pointing back at the workspace.
+	if err := os.RemoveAll(scratch); err != nil {
+		r.logf("could not remove %s: %v", scratch, err)
+	}
+
+	// Untracked files are left alone, which is what keeps DirRunIO intact.
+	if out, code, err := r.git(ctx, "reset", "--hard", "--quiet"); err != nil {
+		return failWrap(runv1.ExitGit, "CheckoutFailed", err, "running git reset")
+	} else if code != 0 {
+		return gitFailure("CheckoutFailed", out, "checking out %s", r.cfg.RepoURL)
+	}
+	if r.cfg.Submodules {
+		if out, code, err := r.git(ctx, "submodule", "update", "--init", "--recursive"); err != nil {
+			return failWrap(runv1.ExitGit, "SubmodulesFailed", err, "running git submodule update")
+		} else if code != 0 {
+			return gitFailure("SubmodulesFailed", out, "cloning the submodules of %s", r.cfg.RepoURL)
+		}
 	}
 
 	// The clone is the first moment .git exists, and the agent must not start

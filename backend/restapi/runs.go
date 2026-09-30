@@ -409,6 +409,16 @@ func (s *Server) cancelRun(w http.ResponseWriter, r *http.Request, c caller) {
 	s.write(w, http.StatusAccepted, RunView(item))
 }
 
+// deleteRun removes a run that has ended, with its attempts and its stored
+// objects. The audit log keeps a record of it.
+func (s *Server) deleteRun(w http.ResponseWriter, r *http.Request, c caller) {
+	if err := s.app.Delete(r.Context(), runv1.ULID(r.PathValue("id")), c.Name()); err != nil {
+		s.failFor(w, r, err)
+		return
+	}
+	w.WriteHeader(http.StatusNoContent)
+}
+
 func (s *Server) retryRun(w http.ResponseWriter, r *http.Request, c caller) {
 	item, err := s.app.Retry(r.Context(), runv1.ULID(r.PathValue("id")), c.Name())
 	if err != nil {

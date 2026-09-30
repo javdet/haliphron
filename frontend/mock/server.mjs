@@ -168,20 +168,30 @@ return { runs, attempts, LOG, roles, clusters }
 // because that is the state a fresh installation is in.
 let modelCredential = { secret_name: 'llm-api-key', configured: false }
 
+// Runs deleted since the mock started, so a deletion is seen to take. The
+// fixture is rebuilt on every request, so it is filtered rather than edited.
+const deletedRuns = new Set()
+
 const routes = [
   ['GET', /^\/api\/v1\/runs$/, (_m, url, { runs }) => {
     const wanted = url.searchParams.getAll('status')
     const role = url.searchParams.get('role')
     const agent = url.searchParams.get('agent')
     const q = (url.searchParams.get('q') ?? '').toLowerCase()
-    let out = runs
+    let out = runs.filter((r) => !deletedRuns.has(r.run_id))
     if (wanted.length) out = out.filter((r) => wanted.includes(r.status))
     if (role) out = out.filter((r) => r.role === role)
     if (agent) out = out.filter((r) => r.agent === agent)
     if (q) out = out.filter((r) => JSON.stringify(r).toLowerCase().includes(q))
     return { runs: out }
   }],
-  ['GET', /^\/api\/v1\/runs\/([^/]+)$/, (m, _u, { runs }) => runs.find((r) => r.run_id === m[1]) ?? 404],
+  ['GET', /^\/api\/v1\/runs\/([^/]+)$/, (m, _u, { runs }) =>
+    (!deletedRuns.has(m[1]) && runs.find((r) => r.run_id === m[1])) || 404],
+  ['DELETE', /^\/api\/v1\/runs\/([^/]+)$/, (m, _u, { runs }) => {
+    if (deletedRuns.has(m[1]) || !runs.some((r) => r.run_id === m[1])) return 404
+    deletedRuns.add(m[1])
+    return {}
+  }],
   ['GET', /^\/api\/v1\/runs\/([^/]+)\/attempts$/, (m, _u, { attempts }) => ({ attempts: attempts[m[1]] ?? [] })],
   ['GET', /^\/api\/v1\/runs\/([^/]+)\/logs$/, (m, _u, { LOG }) => ({
     chunks: [{ key: '000001.log', size_bytes: LOG.length, at: iso(60000), url: `/api/v1/runs/${m[1]}/logs/000001.log` }],

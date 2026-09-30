@@ -37,7 +37,7 @@ the other two.
 |---|---|
 | Read runs, roles and clusters | `runs:read` |
 | Create, cancel and retry runs | `runs:write` |
-| Everything, including roles, secrets, tokens and clusters | `admin` |
+| Everything, including deleting runs, roles, secrets, tokens and clusters | `admin` |
 
 Tokens have three kinds: `user`, `service` and `run-mcp`. A `run-mcp` token is
 issued to an agent pod for the life of one run; requests made with it record
@@ -66,6 +66,7 @@ Every failure returns this envelope:
 | 403 | `forbidden` | the token does not carry the required scope |
 | 404 | `not_found` | no such object |
 | 409 | `run_terminal` | the run has already ended |
+| 409 | `run_live` | the run has not ended, so it cannot be deleted |
 | 409 | `token_live` | the token has not been revoked and has not expired, so it cannot be removed |
 | 409 | `bootstrap_token` | the bootstrap token's row is never removed |
 | 409 | `in_flight` | a request with this `Idempotency-Key` is still being processed; `Retry-After: 1` is set |
@@ -215,6 +216,27 @@ on its next heartbeat. See [the pull model](../explanation/the-pull-model.md).
 ### `POST /api/v1/runs/{id}/retry`
 
 Scope: `runs:write`. No body. Returns `202` and a [run object](#the-run-object).
+
+### `DELETE /api/v1/runs/{id}`
+
+Scope: `admin`. Deletes a run that has ended. Returns `204`. No request body.
+
+What is deleted: the run, its attempt ledger, its per-run token, and every
+object under `runs/{id}/` in artifact storage (logs, result, artifacts). Runs
+it started are kept, with `parent_run_id` cleared. The audit log keeps a
+`run.deleted` record holding the run's final status, who created it and what
+it cost.
+
+A run that has not ended is refused with `409 run_live`. Cancel it first.
+
+The scope is `admin` and not `runs:write` because every agent pod holds a
+per-run token carrying `runs:write`.
+
+A controller that reports on the run after it has been deleted gets the
+`RunNotFound` code and the `abandon` action, and drops its copy.
+
+Runs can also be deleted automatically, some time after they finish. See
+`HALIPHRON_RUN_RETENTION` in [configuration](configuration.md#background-work-and-logging).
 
 ---
 

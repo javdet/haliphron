@@ -198,6 +198,10 @@ encryption key is not even that: it is a file, because a variable is visible in
   value: {{ .Values.backend.sweepInterval | quote }}
 - name: HALIPHRON_REAP_INTERVAL
   value: {{ .Values.backend.reapInterval | quote }}
+{{- with .Values.backend.runRetention }}
+- name: HALIPHRON_RUN_RETENTION
+  value: {{ . | quote }}
+{{- end }}
 - name: HALIPHRON_LOG_LEVEL
   value: {{ .Values.backend.logLevel | quote }}
 - name: HALIPHRON_LOG_FORMAT

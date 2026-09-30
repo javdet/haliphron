@@ -180,6 +180,19 @@ export function useRetryRun(id: string) {
   })
 }
 
+/**
+ * Deletes a run that has ended. Only the list is invalidated: the run's own
+ * query may still be mounted on the page that asked, and refetching it now
+ * would draw a 404 in the moment before that page navigates away.
+ */
+export function useDeleteRun() {
+  const qc = useQueryClient()
+  return useMutation({
+    mutationFn: (id: string) => request<void>(`/runs/${encodeURIComponent(id)}`, { method: 'DELETE' }),
+    onSuccess: () => void qc.invalidateQueries({ queryKey: ['runs'] }),
+  })
+}
+
 // ---------------------------------------------------------------------------
 // roles
 // ---------------------------------------------------------------------------

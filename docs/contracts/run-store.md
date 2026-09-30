@@ -321,6 +321,19 @@ ingest against a heartbeat carrying the same observation.
 retention is a real operation with a boundary set by the chart, and an audit
 record that can be edited in place is not an audit record.
 
+**Deleting a run** is done only by
+[backend/store/deletion.go](../../backend/store/deletion.go), and only for a
+run whose `status` is terminal. The condition is part of the `DELETE`
+statement, so a retry that has already requeued the run wins. Everything keyed
+by the run cascades: `run_attempts`, `run_cluster_exclusions`, the per-run
+`api_tokens` row and the `idempotency_keys` row. A child run's `parent_run_id`
+is set to NULL. `runs_guard` allows that because the parent link is not part of
+the admission group. `audit_log` has no foreign key, so it keeps the run's
+history. The same transaction appends a `run.deleted` record with the final
+status and cost. Retention selects on `finished_at`, oldest first, in batches
+with `SKIP LOCKED`, so a run held under `lock_run.sql` is skipped until the
+next pass. The run's objects are removed after the row is gone, never before.
+
 ---
 
 ## 9. The contract queries

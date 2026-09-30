@@ -121,6 +121,76 @@ func (s *Service) reapOnce(ctx context.Context, keep Retention) (int, error) {
 	return deleted, nil
 }
 
+// Retention for runs.
+//
+// Separate from the three artifact ages and applied in both artifact modes,
+// because it removes a different thing: the row, and with it the run's place in
+// the list, its ledger and its per-run token. The run's objects go with it, so
+// a run past retention does not survive as bytes the UI can no longer reach.
+// The audit log keeps a record of each deletion and is not subject to it.
+
+// runRetentionBatch bounds one DELETE. A first pass after retention is turned
+// on can find months of runs, and one statement over all of them holds row
+// locks the report path is waiting on for as long as it takes.
+const runRetentionBatch = 500
+
+// ReapRuns deletes finished runs older than keep, on an interval, until the
+// context ends.
+//
+// Zero means keep forever and is the default, for the same reason the artifact
+// ages default to keeping: deleting a customer's run history because a value
+// was left unset is not a failure mode worth having.
+func (s *Service) ReapRuns(ctx context.Context, interval, keep time.Duration) {
+	if keep <= 0 {
+		return
+	}
+	if interval <= 0 {
+		interval = time.Hour
+	}
+	ticker := time.NewTicker(interval)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			deleted, err := s.ExpireRuns(ctx, keep)
+			if err != nil && !ctxDone(ctx) {
+				s.log.Error("run retention failed", "error", err)
+			}
+			if deleted > 0 {
+				s.log.Info("expired runs deleted", "runs", deleted, "retention", keep)
+			}
+		}
+	}
+}
+
+// ExpireRuns is one retention pass: it deletes every run that finished more
+// than keep ago, batch by batch, and returns how many went. A zero keep
+// deletes nothing.
+func (s *Service) ExpireRuns(ctx context.Context, keep time.Duration) (int, error) {
+	if keep <= 0 {
+		return 0, nil
+	}
+	cutoff := s.now().Add(-keep)
+
+	var total int
+	for {
+		ids, err := s.store.DeleteFinishedRuns(ctx, cutoff, runRetentionBatch)
+		if err != nil {
+			return total, err
+		}
+		for _, id := range ids {
+			s.deleteRunObjects(ctx, id)
+		}
+		total += len(ids)
+		if len(ids) < runRetentionBatch || ctxDone(ctx) {
+			return total, nil
+		}
+	}
+}
+
 // artifactStoreRef is Ref over this service's store, for the callers that build
 // a result_ref without reaching for the port.
 func (s *Service) artifactStoreRef(key string) string { return artifacts.Ref(s.artifacts, key) }

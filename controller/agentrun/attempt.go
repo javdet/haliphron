@@ -26,11 +26,14 @@ import (
 // the case where the field was pruned or the object predates the default.
 const DefaultMaxInfraRetries int32 = 3
 
-// retryBase is the first pause between attempts. It doubles with jitter: an
-// ImagePullBackOff on a broken node would otherwise become a tight
-// create-and-fail loop against the API server, which is how one bad node takes
-// out the cluster's control plane rather than one run.
-const retryBase = 15 * time.Second
+// retryBase is the first pause between attempts, and it doubles for each one
+// after: 30 s, 60 s, 120 s. An ImagePullBackOff on a broken node would
+// otherwise become a tight create-and-fail loop against the API server, which
+// is how one bad node takes out the cluster's control plane rather than one run.
+const retryBase = 30 * time.Second
+
+// retryCeiling bounds the doubling.
+const retryCeiling = 5 * time.Minute
 
 // ensureJob creates the Job for the current attempt if it is not there yet.
 //
@@ -270,17 +273,18 @@ func (r *Reconciler) startNextAttempt(ctx context.Context, cr *agentrunv1alpha1.
 	return ctrl.Result{Requeue: true}, nil
 }
 
-// retryDelay is exponential with half-range jitter, capped. The cap matters as
-// much as the growth: a run whose retries spread over ten minutes has a lease
-// the heartbeat is still renewing, and one whose retries spread over an hour
-// does not.
-func retryDelay(attempt int32) time.Duration {
-	d := retryBase << min(attempt-1, 5)
-	if d > 5*time.Minute {
-		d = 5 * time.Minute
+// retryDelay is exponential and capped, with up to a tenth of jitter on top.
+// The jitter is only ever added: the schedule is a floor, and half-range jitter
+// below it is what let a fast-failing pod produce three Jobs in half a minute.
+// The cap matters as much as the growth: a run whose retries spread over ten
+// minutes has a lease the heartbeat is still renewing, and one whose retries
+// spread over an hour does not.
+func retryDelay(retry int32) time.Duration {
+	d := retryBase << min(retry-1, 5)
+	if d > retryCeiling {
+		d = retryCeiling
 	}
-	half := d / 2
-	return half + time.Duration(rand.Int64N(int64(half)+1))
+	return d + time.Duration(rand.Int64N(int64(d/10)+1))
 }
 
 // failValidation records a spec the controller admitted and then could not

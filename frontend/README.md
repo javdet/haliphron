@@ -28,8 +28,8 @@ is the one component that has to change when that arrives.
 
 | Page | What it does |
 |---|---|
-| Runs | Filter by status, role, agent and text; submit a run; page with the `before` cursor |
-| Run | Status, accounting, source; result, logs and the attempt ledger |
+| Runs | Filter by status, role, agent and text; submit a run; delete a finished run; page with the `before` cursor |
+| Run | Status, accounting, source; result, logs and the attempt ledger; cancel, retry, delete |
 | Clusters | Registered clusters with heartbeat and slots; revoke; mint bootstrap tokens |
 | Roles | Create, edit and soft-delete role specs |
 | Secrets | List, add and rotate; values are never shown because the API never returns them |

@@ -66,6 +66,12 @@ backend:
   sweepInterval: 5s
   reapInterval: 1h
 
+  # Delete a run this long after it finished — its row, its attempt ledger and
+  # its stored logs, results and artifacts — checked every reapInterval. A Go
+  # duration: 720h is 30 days. Empty keeps runs forever. The audit log keeps a
+  # record of every deleted run either way.
+  runRetention: ""
+
   terminationGracePeriodSeconds: 60
 
   extraEnv: []
@@ -301,6 +307,8 @@ agent:
 
   timeoutSeconds: 3600    # how long a single run may take
   ttlSeconds: 86400       # how long a finished run is kept
+  # Extra attempts the controller starts on its own after an infra or git
+  # failure, 0 to 10. The pause before each doubles from 30 s: 30, 60, 120...
   maxInfraRetries: 3
   maxRunDepth: 4
   # How many child runs one run may start, over its whole lifetime. Depth

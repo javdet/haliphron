@@ -1,7 +1,8 @@
 import { useMemo, useState } from 'react'
 import { useNavigate, useSearchParams } from 'react-router-dom'
 import { useCreateRun, useRoles, useRuns, type RunFilter } from '../api/hooks'
-import { AGENT_TYPES, RUN_STATUSES, type CreateRunRequest, type Run } from '../api/types'
+import { AGENT_TYPES, RUN_STATUSES, TERMINAL_STATUSES, type CreateRunRequest, type Run } from '../api/types'
+import { DeleteRunDialog } from '../components/DeleteRunDialog'
 import { StatusBadge } from '../components/StatusBadge'
 import { Card, Dialog, Empty, ErrorBanner, Field, Spinner, Time, elapsed, money } from '../components/ui'
 
@@ -215,6 +216,7 @@ export function RunsPage() {
   const navigate = useNavigate()
   const [filter, update] = useFilter()
   const [creating, setCreating] = useState(false)
+  const [deleting, setDeleting] = useState<string | null>(null)
   const roles = useRoles()
   const runs = useRuns(filter)
 
@@ -252,6 +254,7 @@ export function RunsPage() {
                   <th className="num">Cost</th>
                   <th className="num">Elapsed</th>
                   <th>Created</th>
+                  <th />
                 </tr>
               </thead>
               <tbody>
@@ -279,6 +282,20 @@ export function RunsPage() {
                       <Time at={run.created_at} />
                       <div className="faint trunc trunc-sm">{run.created_by}</div>
                     </td>
+                    <td className="nowrap">
+                      {TERMINAL_STATUSES.has(run.status) && (
+                        <button
+                          className="sm ghost"
+                          onClick={(e) => {
+                            // The row itself opens the run.
+                            e.stopPropagation()
+                            setDeleting(run.run_id)
+                          }}
+                        >
+                          Delete
+                        </button>
+                      )}
+                    </td>
                   </tr>
                 ))}
               </tbody>
@@ -302,6 +319,7 @@ export function RunsPage() {
       </div>
 
       {creating && <NewRunDialog onClose={() => setCreating(false)} roles={roleNames} />}
+      {deleting && <DeleteRunDialog runId={deleting} onClose={() => setDeleting(null)} />}
     </>
   )
 }

@@ -52,6 +52,41 @@ func (s *Service) Retry(ctx context.Context, id runv1.ULID, by string) (store.Ru
 	return r, nil
 }
 
+// Delete removes a run that has ended, and then its objects.
+//
+// The row goes first. Deleting the objects first would leave, on a failure
+// between the two, a run whose result the UI still links to and can no longer
+// serve; the other order leaves bytes nothing points at, which is the thing
+// the artifact reaper and the bucket's lifecycle rules already clean up.
+//
+// A report that arrives afterwards from the controller still holding the CR is
+// answered with RunNotFound and the abandon action, which is what the contract
+// already prescribes for an unknown run: the controller drops its copy.
+func (s *Service) Delete(ctx context.Context, id runv1.ULID, by string) error {
+	if err := s.store.DeleteRun(ctx, id, by); err != nil {
+		return err
+	}
+	s.deleteRunObjects(ctx, id)
+	s.log.Info("run deleted", "run", id, "by", by)
+	return nil
+}
+
+// deleteRunObjects removes everything under a run's prefix. Failures are
+// logged rather than returned: the run is already gone, and an object left
+// behind is still found by retention.
+func (s *Service) deleteRunObjects(ctx context.Context, id runv1.ULID) {
+	objects, err := s.artifacts.List(ctx, artifacts.RunPrefix(id))
+	if err != nil {
+		s.log.Warn("could not list the objects of a deleted run", "run", id, "error", err)
+		return
+	}
+	for _, obj := range objects {
+		if err := s.artifacts.Delete(ctx, obj.Key); err != nil {
+			s.log.Warn("could not delete an object of a deleted run", "run", id, "key", obj.Key, "error", err)
+		}
+	}
+}
+
 // Run reads one run.
 func (s *Service) Run(ctx context.Context, id runv1.ULID) (store.Run, error) {
 	return s.store.RunByID(ctx, id)
@@ -305,6 +340,60 @@ func (s *Service) WaitForResult(ctx context.Context, id runv1.ULID, timeout time
 		case <-ticker.C:
 		case <-deadline.C:
 			return r, nil
+		case <-ctx.Done():
+			return r, ctx.Err()
+		}
+	}
+}
+
+// resultCollectionGrace is how long after a run ends a caller with no deadline
+// of its own keeps waiting for the report before taking the run as it stands.
+// The report is usually seconds behind the terminal status — the sweeper reads
+// it back out of storage — but a result that was never written would otherwise
+// hold that caller for ever.
+const resultCollectionGrace = 5 * time.Minute
+
+// ResultSettled reports whether a run has ended with everything it is going to
+// have: its report collected, an ending that never produces one, or a report
+// that is past the grace to arrive.
+//
+// It is WaitForResult's condition plus the grace, for the callers that have no
+// deadline to fall back on — an MCP task blocks until the end by definition.
+// WaitForResult itself does not use the grace: its caller chose a deadline.
+func (s *Service) ResultSettled(r store.Run) bool {
+	if r.ObservedPhase.IsTerminal() && r.CompletionReceivedAt != nil {
+		return true
+	}
+	if isFinishedWithoutResult(r) {
+		return true
+	}
+	if !r.ObservedPhase.IsTerminal() {
+		return false
+	}
+	ended := r.UpdatedAt
+	if r.FinishedAt != nil {
+		ended = *r.FinishedAt
+	}
+	return s.now().Sub(ended) >= resultCollectionGrace
+}
+
+// WaitUntil polls a run once a second until done accepts it or the context
+// ends. It is WaitForResult without a deadline of its own: the caller's context
+// is the deadline, which for a blocked HTTP request is the client going away.
+func (s *Service) WaitUntil(ctx context.Context, id runv1.ULID, done func(store.Run) bool) (store.Run, error) {
+	ticker := time.NewTicker(time.Second)
+	defer ticker.Stop()
+
+	for {
+		r, err := s.store.RunByID(ctx, id)
+		if err != nil {
+			return store.Run{}, err
+		}
+		if done(r) {
+			return r, nil
+		}
+		select {
+		case <-ticker.C:
 		case <-ctx.Done():
 			return r, ctx.Err()
 		}

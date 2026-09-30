@@ -63,6 +63,10 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET "+BasePath+"/runs/{id}/attempts", s.scoped(store.ScopeRunsRead, s.runAttempts))
 	mux.HandleFunc("POST "+BasePath+"/runs/{id}/cancel", s.scoped(store.ScopeRunsWrite, s.cancelRun))
 	mux.HandleFunc("POST "+BasePath+"/runs/{id}/retry", s.scoped(store.ScopeRunsWrite, s.retryRun))
+	// admin, not runs:write. Every agent pod holds a per-run token carrying
+	// runs:write, and the pod runs whatever a repository's prompt injection
+	// tells it to: erasing the record of runs is not a thing it gets to do.
+	mux.HandleFunc("DELETE "+BasePath+"/runs/{id}", s.scoped(store.ScopeAdmin, s.deleteRun))
 
 	mux.HandleFunc("GET "+BasePath+"/roles", s.scoped(store.ScopeRunsRead, s.listRoles))
 	mux.HandleFunc("PUT "+BasePath+"/roles/{name}", s.scoped(store.ScopeAdmin, s.putRole))
@@ -193,6 +197,9 @@ func (s *Server) failFor(w http.ResponseWriter, r *http.Request, err error) {
 			"no key encryption key is configured, so a secret value cannot be stored", "value")
 	case errors.Is(err, store.ErrRunTerminal):
 		s.fail(w, http.StatusConflict, "run_terminal", "this run has already ended", "")
+	case errors.Is(err, store.ErrRunLive):
+		s.fail(w, http.StatusConflict, "run_live",
+			"this run has not ended; cancel it before deleting it", "")
 	case errors.Is(err, store.ErrTokenLive):
 		s.fail(w, http.StatusConflict, "token_live",
 			"this token still works; revoke it before removing it", "")

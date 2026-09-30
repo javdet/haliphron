@@ -42,7 +42,8 @@ An empty `image.registry` means Docker Hub, which is where CI publishes.
 | `backend.logLevel` | `info` | `debug`, `info`, `warn`, `error` |
 | `backend.logFormat` | `json` | `json` or `text` |
 | `backend.sweepInterval` | `5s` | lease and ack expiry scan |
-| `backend.reapInterval` | `1h` | artifact retention scan |
+| `backend.reapInterval` | `1h` | artifact retention scan and run retention scan |
+| `backend.runRetention` | `""` | delete a run this long after it finished, e.g. `720h` for 30 days; empty keeps runs forever |
 | `backend.terminationGracePeriodSeconds` | `60` | |
 | `backend.extraEnv`, `backend.extraEnvFrom` | `[]` | |
 | `backend.extraVolumes`, `backend.extraVolumeMounts` | `[]` | |
@@ -142,7 +143,7 @@ not reinstated on the next start.
 | `agent.defaultAgentType` | `claude-code` |
 | `agent.timeoutSeconds` | `3600` |
 | `agent.ttlSeconds` | `86400` |
-| `agent.maxInfraRetries` | `3` |
+| `agent.maxInfraRetries` | `3` — 0 to 10; the pause before each retry doubles from 30 s |
 | `agent.maxRunDepth` | `4` |
 | `agent.maxRunChildren` | `10` |
 | `agent.maxPromptBytes` | `0` — keeps the backend's own limit |

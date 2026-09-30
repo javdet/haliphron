@@ -95,6 +95,34 @@ Or make the submission itself block:
 Both hold a connection open. For anything long, submit asynchronously and call
 `get_run_result` on a loop.
 
+## Let the host do the polling: tasks
+
+If the client supports MCP tasks (revision `2025-11-25`), it can start
+`run_agent` as a task. The call returns immediately, and the client itself
+polls `tasks/get` and collects the result with `tasks/result`. The model does
+not have to remember to call `get_run_result`.
+
+Nothing needs to be configured. A client that sends `2025-11-25` in
+`initialize` is offered tasks, and every other client is served as before. To
+see the flow from the command line:
+
+```sh
+curl -sX POST https://mcp.haliphron.example.com/mcp \
+  -H "Authorization: Bearer $TOKEN" -H 'Content-Type: application/json' \
+  -H 'MCP-Protocol-Version: 2025-11-25' \
+  -d '{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{
+        "name":"run_agent","arguments":{"prompt":"..."},"task":{}}}'
+
+curl -sX POST https://mcp.haliphron.example.com/mcp \
+  -H "Authorization: Bearer $TOKEN" -H 'Content-Type: application/json' \
+  -H 'MCP-Protocol-Version: 2025-11-25' \
+  -d '{"jsonrpc":"2.0","id":4,"method":"tasks/get","params":{"taskId":"01J..."}}'
+```
+
+The task ID is the run ID, so the run is also visible in `list_runs`, the UI
+and the REST API. The status mapping and the errors are in the [MCP tools
+reference](../reference/mcp-tools.md#tasks).
+
 ## Let agents start their own runs
 
 An agent pod is issued a per-run MCP token for the life of its run, so an
