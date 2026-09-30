@@ -66,6 +66,8 @@ Every failure returns this envelope:
 | 403 | `forbidden` | the token does not carry the required scope |
 | 404 | `not_found` | no such object |
 | 409 | `run_terminal` | the run has already ended |
+| 409 | `token_live` | the token has not been revoked and has not expired, so it cannot be removed |
+| 409 | `bootstrap_token` | the bootstrap token's row is never removed |
 | 409 | `in_flight` | a request with this `Idempotency-Key` is still being processed; `Retry-After: 1` is set |
 | 413 | `too_large` | the request body exceeds 8 MiB, or the prompt exceeds 512 KiB |
 | 422 | `invalid_request` | the request is well formed and refused |
@@ -376,7 +378,23 @@ Scope: `admin`. Returns `token_id`, `name`, `kind`, `scopes`, `subject`,
 
 ### `DELETE /api/v1/tokens/{id}`
 
-Scope: `admin`. Returns `204`.
+Scope: `admin`. Revokes the token. Returns `204`.
+
+The row stays, with `revoked_at` set.
+
+### `POST /api/v1/tokens/{id}/remove`
+
+Scope: `admin`. Deletes the row of a token that has been revoked or has expired.
+Returns `204`. No request body.
+
+A token that still works is refused with `409 token_live`. Revoke it first.
+
+The bootstrap token's row is refused with `409 bootstrap_token`, whether or
+not it has been revoked. That row stops the next start from installing the
+value still in the chart's Secret again.
+
+Every removal writes a `token.removed` audit record naming the token and the
+caller.
 
 ---
 

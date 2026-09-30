@@ -33,7 +33,7 @@ is the one component that has to change when that arrives.
 | Clusters | Registered clusters with heartbeat and slots; revoke; mint bootstrap tokens |
 | Roles | Create, edit and soft-delete role specs |
 | Secrets | List, add and rotate; values are never shown because the API never returns them |
-| Tokens | List, mint and revoke API tokens |
+| Tokens | List, mint and revoke API tokens; remove revoked or expired ones |
 
 Not covered, because the backend has none of it: workflows, statistics and
 audit. Logs are polled rather than streamed — the API pages over chunks and

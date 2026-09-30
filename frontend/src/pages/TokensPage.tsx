@@ -1,5 +1,5 @@
 import { useState } from 'react'
-import { useCreateToken, useRevokeToken, useTokens } from '../api/hooks'
+import { useCreateToken, useRemoveToken, useRevokeToken, useTokens } from '../api/hooks'
 import { Card, CopyButton, Dialog, Empty, ErrorBanner, Field, Spinner, Time } from '../components/ui'
 import { SCOPES, type ApiToken, type ApiTokenSecret } from '../api/types'
 
@@ -128,10 +128,48 @@ function RevokeDialog({ token, onClose }: { token: ApiToken; onClose: () => void
   )
 }
 
+function RemoveDialog({ token, onClose }: { token: ApiToken; onClose: () => void }) {
+  const remove = useRemoveToken()
+  return (
+    <Dialog
+      title={`Remove ${token.name}`}
+      onClose={onClose}
+      footer={
+        <>
+          <button className="ghost" onClick={onClose}>
+            Keep it
+          </button>
+          <button
+            className="danger"
+            disabled={remove.isPending}
+            onClick={() => remove.mutate(token.token_id, { onSuccess: onClose })}
+          >
+            {remove.isPending ? 'Removing…' : 'Remove token'}
+          </button>
+        </>
+      }
+    >
+      <ErrorBanner error={remove.error} what="remove the token" />
+      <p className="small muted" style={{ margin: 0 }}>
+        The token has already stopped working. Removing it deletes it from this list for good;
+        the audit log keeps a record that it was removed.
+      </p>
+    </Dialog>
+  )
+}
+
+// The bootstrap row stays after it is revoked: it is what stops the next start
+// from installing the value still in the chart's Secret as a fresh admin token.
+const isBootstrap = (token: ApiToken) => token.kind === 'user' && token.name === 'bootstrap'
+
+const hasExpired = (token: ApiToken) =>
+  token.expires_at !== undefined && Date.parse(token.expires_at) <= Date.now()
+
 export function TokensPage() {
   const tokens = useTokens()
   const [creating, setCreating] = useState(false)
   const [revoking, setRevoking] = useState<ApiToken | null>(null)
+  const [removing, setRemoving] = useState<ApiToken | null>(null)
 
   return (
     <>
@@ -190,8 +228,15 @@ export function TokensPage() {
                       <Time at={token.created_at} />
                     </td>
                     <td className="nowrap">
-                      {token.revoked_at ? (
-                        <span className="badge bad">revoked</span>
+                      {token.revoked_at || hasExpired(token) ? (
+                        <div className="inline">
+                          <span className="badge bad">{token.revoked_at ? 'revoked' : 'expired'}</span>
+                          {!isBootstrap(token) && (
+                            <button className="sm ghost" onClick={() => setRemoving(token)}>
+                              Remove
+                            </button>
+                          )}
+                        </div>
                       ) : (
                         <button className="sm danger" onClick={() => setRevoking(token)}>
                           Revoke
@@ -209,6 +254,7 @@ export function TokensPage() {
 
       {creating && <NewTokenDialog onClose={() => setCreating(false)} />}
       {revoking && <RevokeDialog token={revoking} onClose={() => setRevoking(null)} />}
+      {removing && <RemoveDialog token={removing} onClose={() => setRemoving(null)} />}
     </>
   )
 }

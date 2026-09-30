@@ -80,6 +80,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("POST "+BasePath+"/tokens", s.scoped(store.ScopeAdmin, s.createToken))
 	mux.HandleFunc("GET "+BasePath+"/tokens", s.scoped(store.ScopeAdmin, s.listTokens))
 	mux.HandleFunc("DELETE "+BasePath+"/tokens/{id}", s.scoped(store.ScopeAdmin, s.revokeToken))
+	mux.HandleFunc("POST "+BasePath+"/tokens/{id}/remove", s.scoped(store.ScopeAdmin, s.removeToken))
 
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		r.Body = http.MaxBytesReader(w, r.Body, maxRequestBytes)
@@ -183,6 +184,12 @@ func (s *Server) failFor(w http.ResponseWriter, r *http.Request, err error) {
 		s.fail(w, http.StatusNotFound, "not_found", "no such object", "")
 	case errors.Is(err, store.ErrRunTerminal):
 		s.fail(w, http.StatusConflict, "run_terminal", "this run has already ended", "")
+	case errors.Is(err, store.ErrTokenLive):
+		s.fail(w, http.StatusConflict, "token_live",
+			"this token still works; revoke it before removing it", "")
+	case errors.Is(err, store.ErrBootstrapTokenPinned):
+		s.fail(w, http.StatusConflict, "bootstrap_token",
+			"the bootstrap token's row is what keeps it revoked, and is never removed", "")
 	case errors.Is(err, store.ErrIdempotencyConflict):
 		// The same key with a different body. Answering with the first run
 		// would hand back the result of work nobody ordered.

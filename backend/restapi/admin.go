@@ -356,3 +356,14 @@ func (s *Server) revokeToken(w http.ResponseWriter, r *http.Request, _ caller) {
 	}
 	w.WriteHeader(http.StatusNoContent)
 }
+
+// removeToken deletes the row of a token that has already ended. DELETE on the
+// token itself stays what it has always been, revocation: a client written
+// against that meaning must not start erasing rows.
+func (s *Server) removeToken(w http.ResponseWriter, r *http.Request, c caller) {
+	if err := s.app.Store().DeleteToken(r.Context(), runv1.ULID(r.PathValue("id")), c.Name()); err != nil {
+		s.failFor(w, r, err)
+		return
+	}
+	w.WriteHeader(http.StatusNoContent)
+}

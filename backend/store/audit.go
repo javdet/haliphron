@@ -39,6 +39,8 @@ const (
 	AuditClusterRegistered = "cluster.registered"
 	AuditClusterRevoked    = "cluster.revoked"
 	AuditClusterStale      = "cluster.unreachable"
+
+	AuditTokenRemoved = "token.removed"
 )
 
 // AuditEntry is one record. Actor and ActorKind are who did it — a token, a

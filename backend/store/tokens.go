@@ -190,6 +190,68 @@ func (s *Store) RevokeToken(ctx context.Context, id runv1.ULID) error {
 	return nil
 }
 
+// ErrTokenLive is a removal asked of a credential that still works. Removing
+// one is revoke first, then remove: a live token that vanishes from the list
+// leaves no row saying it was ever ended, only that it is gone.
+var ErrTokenLive = errors.New("store: token is still live; revoke it before removing it")
+
+// ErrBootstrapTokenPinned is a removal asked of the bootstrap row. That row is
+// the only thing that keeps a revoked bootstrap credential revoked: without
+// it, the next start finds no digest for the value still in the Secret and
+// installs it again as a fresh admin token.
+var ErrBootstrapTokenPinned = errors.New("store: the bootstrap token's row keeps it revoked and cannot be removed")
+
+// DeleteToken removes the row of a credential that has already ended, revoked
+// or expired, and records the removal in the same transaction: once the row is
+// gone the audit log is the only place left that says it existed.
+//
+// The conditions are in the DELETE itself rather than checked beforehand.
+// Revocation and expiry only ever move one way, so a row that qualifies cannot
+// stop qualifying, but a row that does not yet can start to, and the statement
+// is what decides.
+func (s *Store) DeleteToken(ctx context.Context, id runv1.ULID, actor string) error {
+	return s.inTx(ctx, func(tx *sql.Tx) error {
+		var name, kind string
+		err := tx.QueryRowContext(ctx, `
+			DELETE FROM api_tokens
+			WHERE id = $1
+			  AND (revoked_at IS NOT NULL OR expires_at <= now())
+			  AND NOT (kind = $2 AND name = $3)
+			RETURNING name, kind`, id, TokenKindUser, BootstrapTokenName).Scan(&name, &kind)
+		if errors.Is(err, sql.ErrNoRows) {
+			return whyTokenNotDeleted(ctx, tx, id)
+		}
+		if err != nil {
+			return fmt.Errorf("store: delete token %s: %w", id, err)
+		}
+		return appendAudit(ctx, tx, AuditEntry{
+			Actor: actor, ActorKind: "user", Action: AuditTokenRemoved,
+			SubjectKind: "token", SubjectID: string(id),
+			Payload: map[string]any{"name": name, "kind": kind},
+		})
+	})
+}
+
+// whyTokenNotDeleted tells a missing row from one the DELETE declined.
+//
+// Anything else the DELETE declined was live when it looked, including a row
+// revoked by a concurrent request after it: the answer describes the token the
+// caller asked about, and asking again will find it ended.
+func whyTokenNotDeleted(ctx context.Context, tx *sql.Tx, id runv1.ULID) error {
+	var kind, name string
+	err := tx.QueryRowContext(ctx,
+		`SELECT kind, name FROM api_tokens WHERE id = $1`, id).Scan(&kind, &name)
+	switch {
+	case errors.Is(err, sql.ErrNoRows):
+		return ErrNotFound
+	case err != nil:
+		return fmt.Errorf("store: look up token %s: %w", id, err)
+	case kind == TokenKindUser && name == BootstrapTokenName:
+		return ErrBootstrapTokenPinned
+	}
+	return ErrTokenLive
+}
+
 // RevokeRunTokens ends every per-run token of a run. Called when the run ends:
 // a token that outlives its run is a token that can start work charged to a
 // budget nobody is watching any more.

@@ -209,6 +209,8 @@ const routes = [
         scopes: ['runs:read'], created_at: iso(200 * 86400000), revoked_at: iso(20 * 86400000) },
     ],
   })],
+  ['DELETE', /^\/api\/v1\/tokens\/([^/]+)$/, () => ({})],
+  ['POST', /^\/api\/v1\/tokens\/([^/]+)\/remove$/, () => ({})],
   ['GET', /^\/api\/v1\/secrets$/, () => ({
     secrets: [
       { name: 'anthropic-api-key', kind: 'managed', updated_at: iso(60 * 86400000), rotated_at: iso(9 * 86400000) },

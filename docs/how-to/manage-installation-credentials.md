@@ -50,6 +50,10 @@ curl -sX DELETE https://haliphron.example.com/api/v1/tokens/$BOOTSTRAP_TOKEN_ID 
 bootstrap row on the next start. If you revoke it and have no other admin
 token, nothing can call the endpoint that issues one.
 
+**Leave the revoked row in place.** `POST /api/v1/tokens/{id}/remove` deletes
+other revoked or expired tokens, but it refuses the bootstrap row. The row is
+what tells the next start that the value in the Secret has been spent.
+
 ## Issue narrower tokens
 
 Give each caller the least it needs. `admin` implies the other two scopes.

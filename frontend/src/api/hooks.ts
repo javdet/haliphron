@@ -283,6 +283,16 @@ export function useRevokeToken() {
   })
 }
 
+/** Deletes the row of a token that has already been revoked or has expired. */
+export function useRemoveToken() {
+  const qc = useQueryClient()
+  return useMutation({
+    mutationFn: (id: string) =>
+      request<void>(`/tokens/${encodeURIComponent(id)}/remove`, { method: 'POST' }),
+    onSuccess: () => void qc.invalidateQueries({ queryKey: keys.tokens() }),
+  })
+}
+
 export function useSecrets() {
   return useQuery({
     queryKey: keys.secrets(),
