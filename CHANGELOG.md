@@ -3,6 +3,25 @@
 All notable changes to Haliphron are recorded here. The version is the content
 of `VERSION`, and it is the tag of the published images.
 
+## Unreleased
+
+### Added
+
+- **Git token.** `GET` and `PUT /api/v1/git-credential` report and set the
+  token runs clone and push with, under the fallback name (`git-token`) or a
+  forge's own (`git-token-github`, `git-token-gitlab`). The `GET` needs only
+  `runs:read`. The UI asks for one on every page until one is stored, and a
+  browser that does not need one can dismiss the prompt. The Secrets page has
+  a Git token card, and the New run dialog warns when the repository it names
+  would be handed no token. Before this, a missing token was only found when a
+  run failed at `clone` or `push`.
+- **Deleting a cluster.** `DELETE /api/v1/clusters/{id}` (`admin`) removes a
+  revoked cluster's row, and the Clusters page has a Delete button on revoked
+  clusters. A cluster that any run records as where it ran is kept until those
+  runs are deleted, and the refusal links to them. The deletion is audited as
+  `cluster.deleted`. A controller that is still installed is told to register
+  again, so uninstall it first.
+
 ## 0.3.0 — 2026-09-30
 
 ### Fixed

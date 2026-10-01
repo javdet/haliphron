@@ -290,6 +290,7 @@ td.nowrap { white-space: nowrap; }
   color: var(--text);
 }
 .banner.info { border-color: color-mix(in srgb, var(--accent) 35%, transparent); background: color-mix(in srgb, var(--accent) 10%, transparent); }
+.banner.warn { border-color: color-mix(in srgb, var(--warn) 35%, transparent); background: color-mix(in srgb, var(--warn) 10%, transparent); }
 .banner.good { border-color: color-mix(in srgb, var(--ok) 35%, transparent); background: color-mix(in srgb, var(--ok) 10%, transparent); }
 .banner-title { font-weight: 650; }
 

@@ -192,6 +192,7 @@ func newHarness(t *testing.T) *harness {
 		},
 		Limits: app.Limits{
 			LLMAPIKeySecret: "llm-api-key",
+			GitTokenSecret:  "git-token",
 			MCPEndpoint:     "http://haliphron-backend.haliphron.svc:8081/mcp",
 		},
 	})

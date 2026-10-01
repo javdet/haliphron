@@ -40,6 +40,7 @@ const (
 	AuditClusterRegistered = "cluster.registered"
 	AuditClusterRevoked    = "cluster.revoked"
 	AuditClusterStale      = "cluster.unreachable"
+	AuditClusterDeleted    = "cluster.deleted"
 
 	AuditTokenRemoved = "token.removed"
 )

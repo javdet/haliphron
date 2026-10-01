@@ -168,20 +168,38 @@ return { runs, attempts, LOG, roles, clusters }
 // because that is the state a fresh installation is in.
 let modelCredential = { secret_name: 'llm-api-key', configured: false }
 
+// Starts empty, so the prompt to set one is what the mock shows first.
+const gitTokens = [
+  { secret_name: 'git-token', configured: false },
+  { provider: 'github', secret_name: 'git-token-github', configured: false },
+  { provider: 'gitlab', secret_name: 'git-token-gitlab', configured: false },
+]
+const gitCredential = () => ({
+  secret_name: 'git-token',
+  configured: gitTokens.some((t) => t.configured),
+  tokens: gitTokens,
+})
+
 // Runs deleted since the mock started, so a deletion is seen to take. The
 // fixture is rebuilt on every request, so it is filtered rather than edited.
 const deletedRuns = new Set()
+const deletedClusters = new Set()
+
+// A refusal the real backend answers with, in its error envelope.
+const conflict = (code, message) => ({ status: 409, error: { code, message } })
 
 const routes = [
   ['GET', /^\/api\/v1\/runs$/, (_m, url, { runs }) => {
     const wanted = url.searchParams.getAll('status')
     const role = url.searchParams.get('role')
     const agent = url.searchParams.get('agent')
+    const cluster = url.searchParams.get('cluster_id')
     const q = (url.searchParams.get('q') ?? '').toLowerCase()
     let out = runs.filter((r) => !deletedRuns.has(r.run_id))
     if (wanted.length) out = out.filter((r) => wanted.includes(r.status))
     if (role) out = out.filter((r) => r.role === role)
     if (agent) out = out.filter((r) => r.agent === agent)
+    if (cluster) out = out.filter((r) => r.cluster_id === cluster)
     if (q) out = out.filter((r) => JSON.stringify(r).toLowerCase().includes(q))
     return { runs: out }
   }],
@@ -204,7 +222,23 @@ const routes = [
   ['POST', /^\/api\/v1\/runs\/([^/]+)\/(cancel|retry)$/, (m, _u, { runs }) => runs.find((r) => r.run_id === m[1]) ?? 404],
   ['POST', /^\/api\/v1\/runs$/, (_m, _u, { runs }) => runs[0]],
   ['GET', /^\/api\/v1\/roles$/, (_m, _u, { roles }) => ({ roles })],
-  ['GET', /^\/api\/v1\/clusters$/, (_m, _u, { clusters }) => ({ clusters })],
+  ['GET', /^\/api\/v1\/clusters$/, (_m, _u, { clusters }) => ({
+    clusters: clusters.filter((c) => !deletedClusters.has(c.cluster_id)),
+  })],
+  ['DELETE', /^\/api\/v1\/clusters\/([^/]+)$/, (m, _u, { runs, clusters }) => {
+    const cluster = clusters.find((c) => c.cluster_id === m[1])
+    if (!cluster || deletedClusters.has(m[1])) return 404
+    if (cluster.status !== 'Revoked') {
+      return conflict('cluster_live', 'this cluster has not been revoked; revoke it before deleting it')
+    }
+    const n = runs.filter((r) => !deletedRuns.has(r.run_id) && r.cluster_id === m[1]).length
+    if (n > 0) {
+      return conflict('cluster_in_use',
+        `${n} run${n === 1 ? ' still records' : 's still record'} this cluster as where ${n === 1 ? 'it' : 'they'} ran; delete them first, or let run retention remove them`)
+    }
+    deletedClusters.add(m[1])
+    return {}
+  }],
   ['GET', /^\/api\/v1\/clusters\/bootstrap-tokens$/, () => ({
     bootstrap_tokens: [
       { token_id: '01JD7B0000BOOTSTRAP00001', name: 'prod-eu-west-1', expires_at: iso(-2 * 86400000),
@@ -236,11 +270,20 @@ const routes = [
     }
     return modelCredential
   }],
+  ['GET', /^\/api\/v1\/git-credential$/, () => gitCredential()],
+  ['PUT', /^\/api\/v1\/git-credential$/, (_m, _url, _fx, payload) => {
+    const token = gitTokens.find((t) => t.provider === payload?.provider)
+    if (token) Object.assign(token, { configured: true, kind: 'managed', updated_at: iso(0) })
+    return gitCredential()
+  }],
   ['GET', /^\/api\/v1\/secrets$/, () => ({
     secrets: [
       ...(modelCredential.configured
         ? [{ name: 'llm-api-key', kind: 'managed', updated_at: modelCredential.updated_at }]
         : []),
+      ...gitTokens
+        .filter((t) => t.configured)
+        .map((t) => ({ name: t.secret_name, kind: 'managed', updated_at: t.updated_at })),
       { name: 'anthropic-api-key', kind: 'managed', updated_at: iso(60 * 86400000), rotated_at: iso(9 * 86400000) },
       { name: 'github-app-key', kind: 'managed', updated_at: iso(88 * 86400000) },
       { name: 'openai-api-key', kind: 'referenced', ref: 'vault://kv/data/agents#openai', updated_at: iso(12 * 86400000) },
@@ -259,13 +302,27 @@ createServer(async (req, res) => {
       res.writeHead(401, { 'content-type': 'application/json' })
       return res.end(JSON.stringify({ error: { code: 'unauthenticated', message: 'a bearer token is required' } }))
     }
+    let payload
+    if (req.method === 'PUT' || req.method === 'POST') {
+      let raw = ''
+      for await (const chunk of req) raw += chunk
+      try {
+        payload = raw ? JSON.parse(raw) : undefined
+      } catch {
+        payload = undefined
+      }
+    }
     for (const [method, pattern, handle] of routes) {
       const m = url.pathname.match(pattern)
       if (!m || req.method !== method) continue
-      const body = handle(m, url, snapshot())
+      const body = handle(m, url, snapshot(), payload)
       if (body === 404) {
         res.writeHead(404, { 'content-type': 'application/json' })
         return res.end(JSON.stringify({ error: { code: 'not_found', message: 'no such object' } }))
+      }
+      if (body?.error) {
+        res.writeHead(body.status, { 'content-type': 'application/json' })
+        return res.end(JSON.stringify({ error: body.error }))
       }
       if (body?.text !== undefined) {
         res.writeHead(200, { 'content-type': 'text/plain; charset=utf-8' })

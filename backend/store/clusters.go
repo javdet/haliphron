@@ -311,6 +311,103 @@ func (s *Store) RevokeCluster(ctx context.Context, id runv1.ULID, reason string)
 	return nil
 }
 
+// ErrClusterLive is a deletion asked of a cluster that has not been revoked.
+// Deleting one is revoke first, then delete: a cluster that vanishes while its
+// controller can still act leaves no row saying it was ever ended.
+var ErrClusterLive = errors.New("store: cluster is not revoked; revoke it before deleting it")
+
+// ClusterInUseError is a deletion asked of a cluster that runs still record as
+// where they ran. The foreign keys from runs and run_attempts are RESTRICT so
+// that the record of where a run ran is never lost with one DELETE; the way to
+// delete such a cluster is to delete its runs first, or let retention do it.
+type ClusterInUseError struct {
+	// Runs is how many runs point at the cluster, through runs.cluster_id or
+	// through an attempt. Zero when a concurrent write was what refused it.
+	Runs int
+}
+
+func (e *ClusterInUseError) Error() string {
+	return fmt.Sprintf("store: %d runs still reference the cluster", e.Runs)
+}
+
+// DeleteCluster removes the row of a revoked cluster that no run points at, and
+// records the removal in the same transaction: once the row is gone the audit
+// log is the only place left that says the cluster existed.
+//
+// The conditions are in the DELETE itself rather than checked beforehand, as
+// in DeleteToken. The foreign keys still stand behind them: a report that
+// authenticated just before the revocation and writes an attempt concurrently
+// is refused by one, and that refusal is answered the same way.
+//
+// The bootstrap token that admitted the cluster is kept. It is the registration
+// record of every other cluster it admitted, and whether it can admit more is
+// its own state, not this cluster's.
+func (s *Store) DeleteCluster(ctx context.Context, id runv1.ULID, actor string) error {
+	return s.inTx(ctx, func(tx *sql.Tx) error {
+		var (
+			name, tokenID string
+			reason        sql.NullString
+			registeredAt  time.Time
+		)
+		err := tx.QueryRowContext(ctx, `
+			DELETE FROM clusters c
+			WHERE c.id = $1
+			  AND c.status = 'Revoked'
+			  AND NOT EXISTS (SELECT 1 FROM runs WHERE cluster_id = c.id)
+			  AND NOT EXISTS (SELECT 1 FROM run_attempts WHERE cluster_id = c.id)
+			RETURNING name, revoked_reason, bootstrap_token_id, registered_at`, id).
+			Scan(&name, &reason, &tokenID, &registeredAt)
+		if errors.Is(err, sql.ErrNoRows) {
+			return whyClusterNotDeleted(ctx, tx, id)
+		}
+		if isForeignKeyViolation(err) {
+			return &ClusterInUseError{}
+		}
+		if err != nil {
+			return fmt.Errorf("store: delete cluster %s: %w", id, err)
+		}
+		payload := map[string]any{
+			"name":             name,
+			"bootstrapTokenId": tokenID,
+			"registeredAt":     registeredAt.UTC().Format(time.RFC3339),
+		}
+		if reason.Valid {
+			payload["revokedReason"] = reason.String
+		}
+		return appendAudit(ctx, tx, AuditEntry{
+			Actor: actor, ActorKind: "user", Action: AuditClusterDeleted,
+			SubjectKind: "cluster", SubjectID: string(id), ClusterID: id,
+			Payload: payload,
+		})
+	})
+}
+
+// whyClusterNotDeleted tells a missing row from one the DELETE declined, and a
+// cluster that is still live from one that runs still point at.
+func whyClusterNotDeleted(ctx context.Context, tx *sql.Tx, id runv1.ULID) error {
+	var status string
+	err := tx.QueryRowContext(ctx, `SELECT status FROM clusters WHERE id = $1`, id).Scan(&status)
+	switch {
+	case errors.Is(err, sql.ErrNoRows):
+		return ErrNotFound
+	case err != nil:
+		return fmt.Errorf("store: look up cluster %s: %w", id, err)
+	case status != "Revoked":
+		return ErrClusterLive
+	}
+
+	var runs int
+	if err := tx.QueryRowContext(ctx, `
+		SELECT count(*) FROM (
+			SELECT id FROM runs WHERE cluster_id = $1
+			UNION
+			SELECT run_id FROM run_attempts WHERE cluster_id = $1
+		) AS referencing`, id).Scan(&runs); err != nil {
+		return fmt.Errorf("store: count runs of cluster %s: %w", id, err)
+	}
+	return &ClusterInUseError{Runs: runs}
+}
+
 // BootstrapToken is a one-time credential for registering a cluster.
 type BootstrapToken struct {
 	ID        runv1.ULID

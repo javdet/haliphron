@@ -334,6 +334,18 @@ status and cost. Retention selects on `finished_at`, oldest first, in batches
 with `SKIP LOCKED`, so a run held under `lock_run.sql` is skipped until the
 next pass. The run's objects are removed after the row is gone, never before.
 
+**Deleting a cluster** is done only by `DeleteCluster` in
+[backend/store/clusters.go](../../backend/store/clusters.go), and only for a
+cluster whose `status` is `Revoked` and that no `runs` row and no
+`run_attempts` row references. The conditions are part of the `DELETE`
+statement. The `RESTRICT` foreign keys from `runs` and `run_attempts` still
+stand behind them: an attempt written concurrently fails the statement, and
+that failure gets the same answer. `run_cluster_exclusions` cascades. The
+`cluster_bootstrap_tokens` row is kept, because it is the registration record
+of every cluster it admitted. The same transaction appends a
+`cluster.deleted` record with the name, the revocation reason and the
+bootstrap token.
+
 ---
 
 ## 9. The contract queries

@@ -1,6 +1,7 @@
 import { useMemo, useState } from 'react'
-import { useNavigate, useSearchParams } from 'react-router-dom'
-import { useCreateRun, useRoles, useRuns, type RunFilter } from '../api/hooks'
+import { Link, useNavigate, useSearchParams } from 'react-router-dom'
+import { useCreateRun, useGitCredential, useRoles, useRuns, type RunFilter } from '../api/hooks'
+import { FORGE_LABEL, hasUsableToken, providerFor } from '../api/gitToken'
 import { AGENT_TYPES, RUN_STATUSES, TERMINAL_STATUSES, type CreateRunRequest, type Run } from '../api/types'
 import { DeleteRunDialog } from '../components/DeleteRunDialog'
 import { StatusBadge } from '../components/StatusBadge'
@@ -105,6 +106,11 @@ function NewRunDialog({ onClose, roles }: { onClose: () => void; roles: string[]
   const navigate = useNavigate()
   const create = useCreateRun()
   const [form, setForm] = useState<CreateRunRequest>({ prompt: '', agent: 'claude-code' })
+  const git = useGitCredential().data
+  const repo = form.repo?.trim() ?? ''
+  // Only once the answer is in: a warning that flashes while it loads is noise.
+  const noToken = !!repo && !!git && !hasUsableToken(git, repo)
+  const forge = providerFor(repo)
 
   const set = <K extends keyof CreateRunRequest>(key: K, value: CreateRunRequest[K]) =>
     setForm((f) => ({ ...f, [key]: value }))
@@ -173,6 +179,22 @@ function NewRunDialog({ onClose, roles }: { onClose: () => void; roles: string[]
           <input value={form.target_branch ?? ''} onChange={(e) => set('target_branch', e.target.value)} />
         </Field>
       </div>
+
+      {noToken && (
+        <div className="banner warn" role="status">
+          <div>
+            <div className="banner-title">
+              No git token{forge ? ` for ${FORGE_LABEL[forge]}` : ''} will be handed to this run
+            </div>
+            <div className="small muted">
+              {form.create_pr
+                ? 'It cannot push its branch or open the pull request, and a private repository fails at clone.'
+                : 'A public repository still works; a private one fails at clone.'}{' '}
+              <Link to="/secrets">Set a git token</Link>
+            </div>
+          </div>
+        </div>
+      )}
 
       <label className={form.create_pr ? 'check on' : 'check'} style={{ alignSelf: 'flex-start' }}>
         <input

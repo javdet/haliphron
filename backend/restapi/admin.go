@@ -217,6 +217,18 @@ func (s *Server) revokeCluster(w http.ResponseWriter, r *http.Request, c caller)
 	w.WriteHeader(http.StatusNoContent)
 }
 
+// deleteCluster removes the row of a cluster that has been revoked and that no
+// run records as having run on it. Revoke first, then delete, the order tokens
+// follow; and a cluster with runs is kept for as long as they are, because it
+// is where they ran.
+func (s *Server) deleteCluster(w http.ResponseWriter, r *http.Request, c caller) {
+	if err := s.app.Store().DeleteCluster(r.Context(), runv1.ULID(r.PathValue("id")), c.Name()); err != nil {
+		s.failFor(w, r, err)
+		return
+	}
+	w.WriteHeader(http.StatusNoContent)
+}
+
 // ---------------------------------------------------------------------------
 // secrets
 // ---------------------------------------------------------------------------
@@ -324,6 +336,63 @@ func modelCredentialBody(cred app.ModelCredential) map[string]any {
 	}
 	if cred.UpdatedAt != nil {
 		body["updated_at"] = cred.UpdatedAt
+	}
+	return body
+}
+
+type gitCredentialRequest struct {
+	Provider string `json:"provider,omitempty"`
+	Value    string `json:"value,omitempty"`
+	Ref      string `json:"ref,omitempty"`
+}
+
+func (s *Server) getGitCredential(w http.ResponseWriter, r *http.Request, _ caller) {
+	cred, err := s.app.GitCredential(r.Context())
+	if err != nil {
+		s.failFor(w, r, err)
+		return
+	}
+	s.write(w, http.StatusOK, gitCredentialBody(cred))
+}
+
+func (s *Server) putGitCredential(w http.ResponseWriter, r *http.Request, c caller) {
+	var req gitCredentialRequest
+	if _, ok := s.decode(w, r, &req); !ok {
+		return
+	}
+	cred, err := s.app.PutGitCredential(r.Context(), app.GitCredentialRequest{
+		Provider: req.Provider, Value: req.Value, Ref: req.Ref,
+	}, c.Name())
+	if err != nil {
+		s.failFor(w, r, err)
+		return
+	}
+	s.write(w, http.StatusOK, gitCredentialBody(cred))
+}
+
+func gitCredentialBody(cred app.GitCredential) map[string]any {
+	tokens := make([]map[string]any, 0, len(cred.Tokens))
+	for _, token := range cred.Tokens {
+		item := map[string]any{"secret_name": token.SecretName, "configured": token.Configured}
+		for k, v := range map[string]string{
+			"provider": string(token.Provider), "kind": token.Kind, "problem": token.Problem,
+		} {
+			if v != "" {
+				item[k] = v
+			}
+		}
+		if token.UpdatedAt != nil {
+			item["updated_at"] = token.UpdatedAt
+		}
+		tokens = append(tokens, item)
+	}
+	body := map[string]any{
+		"secret_name": cred.SecretName,
+		"configured":  cred.Configured(),
+		"tokens":      tokens,
+	}
+	if cred.Problem != "" {
+		body["problem"] = cred.Problem
 	}
 	return body
 }

@@ -77,6 +77,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("POST "+BasePath+"/clusters/bootstrap-tokens", s.scoped(store.ScopeAdmin, s.createBootstrapToken))
 	mux.HandleFunc("GET "+BasePath+"/clusters/bootstrap-tokens", s.scoped(store.ScopeAdmin, s.listBootstrapTokens))
 	mux.HandleFunc("POST "+BasePath+"/clusters/{id}/revoke", s.scoped(store.ScopeAdmin, s.revokeCluster))
+	mux.HandleFunc("DELETE "+BasePath+"/clusters/{id}", s.scoped(store.ScopeAdmin, s.deleteCluster))
 
 	mux.HandleFunc("GET "+BasePath+"/secrets", s.scoped(store.ScopeAdmin, s.listSecrets))
 	mux.HandleFunc("PUT "+BasePath+"/secrets/{name}", s.scoped(store.ScopeAdmin, s.putSecret))
@@ -84,6 +85,8 @@ func (s *Server) Handler() http.Handler {
 	// will all fail, and the answer carries no value.
 	mux.HandleFunc("GET "+BasePath+"/model-credential", s.scoped(store.ScopeRunsRead, s.getModelCredential))
 	mux.HandleFunc("PUT "+BasePath+"/model-credential", s.scoped(store.ScopeAdmin, s.putModelCredential))
+	mux.HandleFunc("GET "+BasePath+"/git-credential", s.scoped(store.ScopeRunsRead, s.getGitCredential))
+	mux.HandleFunc("PUT "+BasePath+"/git-credential", s.scoped(store.ScopeAdmin, s.putGitCredential))
 
 	mux.HandleFunc("POST "+BasePath+"/tokens", s.scoped(store.ScopeAdmin, s.createToken))
 	mux.HandleFunc("GET "+BasePath+"/tokens", s.scoped(store.ScopeAdmin, s.listTokens))
@@ -184,7 +187,10 @@ func (s *Server) fail(w http.ResponseWriter, status int, code, message, field st
 // failFor maps the errors the layers below produce onto the public API's
 // answers, in one place rather than per handler.
 func (s *Server) failFor(w http.ResponseWriter, r *http.Request, err error) {
-	var invalid *run.InvalidRequestError
+	var (
+		invalid *run.InvalidRequestError
+		inUse   *store.ClusterInUseError
+	)
 	switch {
 	case errors.As(err, &invalid):
 		s.fail(w, http.StatusUnprocessableEntity, "invalid_request", invalid.Detail, invalid.Field)
@@ -203,6 +209,11 @@ func (s *Server) failFor(w http.ResponseWriter, r *http.Request, err error) {
 	case errors.Is(err, store.ErrTokenLive):
 		s.fail(w, http.StatusConflict, "token_live",
 			"this token still works; revoke it before removing it", "")
+	case errors.Is(err, store.ErrClusterLive):
+		s.fail(w, http.StatusConflict, "cluster_live",
+			"this cluster has not been revoked; revoke it before deleting it", "")
+	case errors.As(err, &inUse):
+		s.fail(w, http.StatusConflict, "cluster_in_use", clusterInUseDetail(inUse.Runs), "")
 	case errors.Is(err, store.ErrBootstrapTokenPinned):
 		s.fail(w, http.StatusConflict, "bootstrap_token",
 			"the bootstrap token's row is what keeps it revoked, and is never removed", "")
@@ -218,6 +229,18 @@ func (s *Server) failFor(w http.ResponseWriter, r *http.Request, err error) {
 	default:
 		s.internal(w, r, err)
 	}
+}
+
+// clusterInUseDetail says what keeps a cluster, and what would release it.
+func clusterInUseDetail(runs int) string {
+	what := "runs still record this cluster as where they ran"
+	switch {
+	case runs == 1:
+		what = "1 run still records this cluster as where it ran"
+	case runs > 1:
+		what = strconv.Itoa(runs) + " runs still record this cluster as where they ran"
+	}
+	return what + "; delete them first, or let run retention remove them"
 }
 
 func (s *Server) internal(w http.ResponseWriter, r *http.Request, err error) {

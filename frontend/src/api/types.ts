@@ -334,6 +334,31 @@ export interface ModelCredential {
   problem?: string
 }
 
+/** A forge with a git token of its own; the fallback has none. */
+export type GitTokenProvider = 'github' | 'gitlab'
+
+/** One of the names a lease tries for a run's git token, without its value. */
+export interface GitToken {
+  /** Absent for the fallback, which every forge uses when it has no token of its own. */
+  provider?: GitTokenProvider
+  secret_name: string
+  configured: boolean
+  kind?: 'managed' | 'referenced'
+  updated_at?: string
+  /** Why a stored token will not reach a pod. */
+  problem?: string
+}
+
+/** The installation's git tokens: the fallback first, then one per forge. */
+export interface GitCredential {
+  /** The fallback name, `git-token` by default. */
+  secret_name: string
+  /** Whether any token is stored, usable or not. */
+  configured: boolean
+  tokens: GitToken[]
+  problem?: string
+}
+
 /** The error envelope every non-2xx answer carries. */
 export interface ErrorBody {
   error: { code: string; message: string; field?: string }

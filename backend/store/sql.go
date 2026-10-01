@@ -192,6 +192,13 @@ func isUniqueViolation(err error, constraint string) bool {
 	return pg.Code == "23505" && (constraint == "" || pg.ConstraintName == constraint)
 }
 
+// isForeignKeyViolation reports whether a RESTRICT foreign key refused the
+// write: something still points at the row being removed.
+func isForeignKeyViolation(err error) bool {
+	var pg *pgconn.PgError
+	return errors.As(err, &pg) && pg.Code == "23503"
+}
+
 // isGuardViolation reports whether the runs_guard trigger refused the write.
 //
 // It is worth telling apart because it means something specific: the ordering

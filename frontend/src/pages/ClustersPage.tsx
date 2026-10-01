@@ -1,8 +1,11 @@
 import { useState } from 'react'
+import { Link } from 'react-router-dom'
+import { ApiError } from '../api/client'
 import {
   useBootstrapTokens,
   useClusters,
   useCreateBootstrapToken,
+  useDeleteCluster,
   useRevokeCluster,
 } from '../api/hooks'
 import { ClusterBadge } from '../components/StatusBadge'
@@ -53,6 +56,49 @@ function RevokeDialog({ cluster, onClose }: { cluster: Cluster; onClose: () => v
       <Field label="Reason" hint="Recorded in the audit log.">
         <input value={reason} onChange={(e) => setReason(e.target.value)} />
       </Field>
+    </Dialog>
+  )
+}
+
+function DeleteDialog({ cluster, onClose }: { cluster: Cluster; onClose: () => void }) {
+  const remove = useDeleteCluster()
+  // Runs keep the cluster they ran on; the way through is to show which ones.
+  const inUse = remove.error instanceof ApiError && remove.error.code === 'cluster_in_use'
+  return (
+    <Dialog
+      title={`Delete ${cluster.name}`}
+      onClose={onClose}
+      footer={
+        <>
+          <button className="ghost" onClick={onClose}>
+            Keep it
+          </button>
+          <button
+            className="danger"
+            disabled={remove.isPending}
+            onClick={() => remove.mutate(cluster.cluster_id, { onSuccess: onClose })}
+          >
+            {remove.isPending ? 'Deleting…' : 'Delete cluster'}
+          </button>
+        </>
+      }
+    >
+      <ErrorBanner error={remove.error} what="delete the cluster" />
+      {inUse && (
+        <Link className="small" to={`/runs?cluster_id=${encodeURIComponent(cluster.cluster_id)}`}>
+          Show the runs on this cluster
+        </Link>
+      )}
+      <p className="small muted" style={{ margin: 0 }}>
+        The cluster has already been revoked. Deleting it removes it from this list for good; the
+        audit log keeps a record that it was deleted. A cluster that runs still record as where
+        they ran is kept until those runs are deleted.
+      </p>
+      <p className="small muted" style={{ margin: 0 }}>
+        Uninstall its controller first. Once the cluster is gone, a controller that is still running
+        is told to register again, and it will come back as a new cluster if its bootstrap token has
+        uses left.
+      </p>
     </Dialog>
   )
 }
@@ -139,6 +185,7 @@ export function ClustersPage() {
   const clusters = useClusters()
   const bootstrap = useBootstrapTokens()
   const [revoking, setRevoking] = useState<Cluster | null>(null)
+  const [deleting, setDeleting] = useState<Cluster | null>(null)
   const [minting, setMinting] = useState(false)
 
   return (
@@ -200,7 +247,11 @@ export function ClustersPage() {
                       <Time at={cluster.last_heartbeat_at} />
                     </td>
                     <td className="nowrap">
-                      {cluster.status !== 'Revoked' && (
+                      {cluster.status === 'Revoked' ? (
+                        <button className="sm ghost" onClick={() => setDeleting(cluster)}>
+                          Delete
+                        </button>
+                      ) : (
                         <button className="sm danger" onClick={() => setRevoking(cluster)}>
                           Revoke
                         </button>
@@ -262,6 +313,7 @@ export function ClustersPage() {
       </div>
 
       {revoking && <RevokeDialog cluster={revoking} onClose={() => setRevoking(null)} />}
+      {deleting && <DeleteDialog cluster={deleting} onClose={() => setDeleting(null)} />}
       {minting && <NewBootstrapTokenDialog onClose={() => setMinting(false)} />}
     </>
   )

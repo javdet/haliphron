@@ -52,14 +52,26 @@ relying on it for more than trying Haliphron out.
 
 ## Store the git token
 
-The backend looks for it under a fixed name — `git-token` by default.
+Most runs need one: a private repository cannot be cloned without it, and no
+pull request can be pushed. Until one is stored, every page of the UI asks for
+it, and the New run dialog warns when the repository it names would get none.
+Set it under **Secrets → Git token**, or through its own endpoint:
 
 ```sh
-curl -sX PUT https://haliphron.example.com/api/v1/secrets/git-token \
+curl -sX PUT https://haliphron.example.com/api/v1/git-credential \
   -H "Authorization: Bearer $ADMIN_TOKEN" \
   -H 'Content-Type: application/json' \
-  -d '{"value":"ghp_..."}'
+  -d '{"value":"github_pat_..."}'
 ```
+
+It is stored as the secret `git-token` (see [Use different
+names](#use-different-names)), and a plain `PUT /api/v1/secrets/git-token`
+does the same thing. The dedicated endpoint also refuses a pasted value with
+whitespace in it, and a reference, which a lease would fail on.
+
+If an installation only ever runs against public repositories without pull
+requests, it needs no token: choose **Not needed** on the prompt, and this
+browser stops showing it.
 
 A stored value is encrypted under a data key of its own, wrapped by the
 installation's key encryption key. The API never returns it again — listing
@@ -75,13 +87,16 @@ credentials](manage-installation-credentials.md#supply-your-own-key-encryption-k
 curl -s https://haliphron.example.com/api/v1/model-credential \
   -H "Authorization: Bearer $TOKEN"
 
-curl -s https://haliphron.example.com/api/v1/secrets \
-  -H "Authorization: Bearer $ADMIN_TOKEN"
+curl -s https://haliphron.example.com/api/v1/git-credential \
+  -H "Authorization: Bearer $TOKEN"
 ```
 
 The first answers `configured`, `type`, and a `problem` when a stored
 credential cannot reach a pod — a missing key encryption key, or a reference
-the backend does not resolve.
+the backend does not resolve. The second lists `git-token`,
+`git-token-github` and `git-token-gitlab`, each with `configured` and, when it
+cannot reach a pod, a `problem`. A git token that is a reference is worse than
+none: a lease fails on it, and the run stays queued.
 
 ## Rotate one
 
@@ -119,16 +134,20 @@ share one credential between them. A per-provider name is tried first, and the
 plain name is the fallback:
 
 ```sh
-curl -sX PUT https://haliphron.example.com/api/v1/secrets/git-token-github \
+curl -sX PUT https://haliphron.example.com/api/v1/git-credential \
   -H "Authorization: Bearer $ADMIN_TOKEN" \
   -H 'Content-Type: application/json' \
-  -d '{"value":"ghp_..."}'
+  -d '{"provider":"github","value":"github_pat_..."}'
 
-curl -sX PUT https://haliphron.example.com/api/v1/secrets/git-token-gitlab \
+curl -sX PUT https://haliphron.example.com/api/v1/git-credential \
   -H "Authorization: Bearer $ADMIN_TOKEN" \
   -H 'Content-Type: application/json' \
-  -d '{"value":"glpat-..."}'
+  -d '{"provider":"gitlab","value":"glpat-..."}'
 ```
+
+These are stored as `git-token-github` and `git-token-gitlab`. In the UI,
+choose **GitHub only** or **GitLab only** in the Git token dialog. A token
+whose prefix names the other forge is refused.
 
 The provider is derived from the run's `repo` URL. With only `git-token`
 stored, both forges use it.

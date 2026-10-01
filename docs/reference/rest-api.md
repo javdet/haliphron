@@ -350,6 +350,21 @@ Scope: `admin`. Body: `{"reason": "..."}` — optional. Returns `204`.
 
 The cluster's runs are left alone.
 
+### `DELETE /api/v1/clusters/{id}`
+
+Scope: `admin`. Removes a cluster's row. Returns `204`.
+
+Revoke first, then delete: a cluster that has not been revoked is refused
+with `409` `cluster_live`. A cluster that any run records as where it ran,
+as its current cluster or as the cluster of one of its attempts, is refused
+with `409` `cluster_in_use`, and the message says how many runs. Delete those
+runs first, or let run retention remove them. An unknown cluster is `404`.
+
+The bootstrap token that admitted the cluster is kept. With the row gone, the
+controller's key is unknown, and a controller that is still installed is told
+to `reregister`. If its bootstrap token still has uses left and has not
+expired, it comes back as a new cluster. Uninstall the controller first.
+
 ---
 
 ## Secrets
@@ -408,6 +423,47 @@ Scope: `admin`. Stores the credential under `secret_name`.
 Exactly one of `value` and `ref`. A `value` whose shape contradicts `type` is
 refused with `422`: an `oauth_token` starts with `sk-ant-oat`, and an
 `api_key` does not. Returns `200` with the same body as the `GET`.
+
+### `GET /api/v1/git-credential`
+
+Scope: `runs:read`. Every name a lease tries for a run's git token, without
+any value.
+
+| Field | Type | Meaning |
+|---|---|---|
+| `secret_name` | string | the fallback name: `HALIPHRON_GIT_SECRET`, `git-token` by default |
+| `configured` | boolean | whether any of the names below is stored, usable or not |
+| `tokens` | array | the fallback first, then `github` and `gitlab` |
+| `problem` | string | set when the deployment names no git secret |
+
+Each entry of `tokens`:
+
+| Field | Type | Meaning |
+|---|---|---|
+| `provider` | string | `github` or `gitlab`; absent for the fallback, which a forge uses when it has no token of its own |
+| `secret_name` | string | `<secret_name>-<provider>`, or `secret_name` for the fallback |
+| `configured` | boolean | whether a secret by that name is stored |
+| `kind` | string | `managed` or `referenced`; absent when not configured |
+| `updated_at` | timestamp | |
+| `problem` | string | why a stored token will not reach a pod; absent when leases will carry it |
+
+A lease uses the forge's own token when one is stored and the fallback
+otherwise. A stored token with a `problem` fails the lease; the fallback is
+not tried.
+
+### `PUT /api/v1/git-credential`
+
+Scope: `admin`. Stores one token.
+
+| Field | Type | Meaning |
+|---|---|---|
+| `provider` | string | `github` or `gitlab`; absent to store the fallback |
+| `value` | string | required: the token, trimmed before it is stored |
+
+A reference is refused with `422`, because a lease fails on one. A value with
+whitespace in it, or with a documented prefix naming the other forge
+(`ghp_`, `github_pat_`, … for GitHub; `glpat-` for GitLab), is refused with
+`422` too. Returns `200` with the same body as the `GET`.
 
 ---
 

@@ -1,5 +1,7 @@
+import { useState } from 'react'
 import { Link, NavLink, Route, Routes, useLocation } from 'react-router-dom'
-import { useModelCredential } from './api/hooks'
+import { useGitCredential, useModelCredential } from './api/hooks'
+import { gitProblems } from './api/gitToken'
 import { RunsPage } from './pages/RunsPage'
 import { RunDetailPage } from './pages/RunDetailPage'
 import { ClustersPage } from './pages/ClustersPage'
@@ -67,12 +69,80 @@ function ModelCredentialWarning() {
   )
 }
 
+const GIT_PROMPT_DISMISSED = 'haliphron.gitTokenPrompt.dismissed'
+
+function readDismissed(): boolean {
+  try {
+    return window.localStorage.getItem(GIT_PROMPT_DISMISSED) === '1'
+  } catch {
+    return false
+  }
+}
+
+/**
+ * Asks for a git token while none is stored. The backend admits a run without
+ * one, because a public repository without a pull request needs none, so
+ * nothing else says it is missing until a run fails at clone or push. Most
+ * installations do need one; the few that do not can dismiss this, in this
+ * browser. A stored token that leases cannot use is not dismissible.
+ */
+function GitCredentialPrompt() {
+  const cred = useGitCredential()
+  const { pathname } = useLocation()
+  const [dismissed, setDismissed] = useState(readDismissed)
+  const c = cred.data
+  if (!c || pathname === '/secrets') return null
+
+  const problems = gitProblems(c)
+  if (problems.length > 0) {
+    return (
+      <div className="content-banner">
+        <div className="banner" role="alert">
+          <div>
+            <div className="banner-title">A stored git token cannot reach runs</div>
+            <div className="small muted">
+              {problems.join(' · ')} <Link to="/secrets">Fix it on the Secrets page</Link>
+            </div>
+          </div>
+        </div>
+      </div>
+    )
+  }
+  if (c.configured || dismissed) return null
+
+  const dismiss = () => {
+    setDismissed(true)
+    try {
+      window.localStorage.setItem(GIT_PROMPT_DISMISSED, '1')
+    } catch {
+      // Not remembered past this tab; that is all.
+    }
+  }
+  return (
+    <div className="content-banner">
+      <div className="banner warn" role="status">
+        <div style={{ flex: 1 }}>
+          <div className="banner-title">Set a git token</div>
+          <div className="small muted">
+            No git token is stored, so runs cannot clone a private repository or open a pull request.{' '}
+            <Link to="/secrets">Add one on the Secrets page</Link>
+          </div>
+        </div>
+        <button className="sm ghost" onClick={dismiss}>
+          Not needed
+        </button>
+      </div>
+    </div>
+  )
+}
+
 export default function App() {
   return (
     <div className="shell">
       <Sidebar />
       <div className="main">
         <ModelCredentialWarning />
+        <GitCredentialPrompt />
         <Routes>
           <Route path="/" element={<RunsPage />} />
           <Route path="/runs" element={<RunsPage />} />

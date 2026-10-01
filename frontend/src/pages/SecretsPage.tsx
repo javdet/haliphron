@@ -1,7 +1,15 @@
 import { useState } from 'react'
-import { useModelCredential, usePutModelCredential, usePutSecret, useSecrets } from '../api/hooks'
+import {
+  useGitCredential,
+  useModelCredential,
+  usePutGitCredential,
+  usePutModelCredential,
+  usePutSecret,
+  useSecrets,
+} from '../api/hooks'
 import { Card, Dialog, Empty, ErrorBanner, Field, Spinner, Time } from '../components/ui'
-import type { ModelCredential, ModelCredentialType, Secret } from '../api/types'
+import type { GitCredential, GitToken, GitTokenProvider, ModelCredential, ModelCredentialType, Secret } from '../api/types'
+import { FORGE_LABEL, forgeOf } from '../api/gitToken'
 
 type Kind = 'managed' | 'referenced'
 
@@ -186,6 +194,207 @@ function ModelCredentialCard() {
   )
 }
 
+function GitTokenDialog({
+  initial,
+  cred,
+  onClose,
+}: {
+  initial?: GitTokenProvider
+  cred: GitCredential
+  onClose: () => void
+}) {
+  const put = usePutGitCredential()
+  const [provider, setProvider] = useState<GitTokenProvider | undefined>(initial)
+  const [value, setValue] = useState('')
+
+  const target = cred.tokens.find((t) => t.provider === provider)
+  const v = value.trim()
+  const forge = forgeOf(v)
+  const wrong = /\s/.test(v)
+    ? 'Paste the token alone — a token has no whitespace in it.'
+    : provider && forge && forge !== provider
+      ? `This looks like a ${FORGE_LABEL[forge]} token, not a ${FORGE_LABEL[provider]} one.`
+      : undefined
+  const ready = v.length > 0 && !wrong
+
+  const save = () => put.mutate({ provider, value: v }, { onSuccess: onClose })
+
+  return (
+    <Dialog
+      title={target?.configured ? `Replace ${target.secret_name}` : 'Set a git token'}
+      onClose={onClose}
+      footer={
+        <>
+          <button className="ghost" onClick={onClose}>
+            Cancel
+          </button>
+          <button className="primary" onClick={save} disabled={!ready || put.isPending}>
+            {put.isPending ? 'Saving…' : 'Save token'}
+          </button>
+        </>
+      }
+    >
+      <ErrorBanner error={put.error} what="save the git token" />
+
+      <Field label="Used for">
+        <div className="checks">
+          {cred.tokens.map((t) => (
+            <label key={t.secret_name} className={provider === t.provider ? 'check on' : 'check'}>
+              <input type="radio" checked={provider === t.provider} onChange={() => setProvider(t.provider)} />
+              {t.provider ? `${FORGE_LABEL[t.provider]} only` : 'Every forge'}
+            </label>
+          ))}
+        </div>
+      </Field>
+      <div className="hint">
+        {provider === 'gitlab' ? (
+          <>
+            A project or group access token (<span className="mono">glpat-…</span>) with{' '}
+            <span className="mono">write_repository</span>, and <span className="mono">api</span> if runs open merge
+            requests.
+          </>
+        ) : provider === 'github' ? (
+          <>
+            A fine-grained personal access token (<span className="mono">github_pat_…</span>) limited to the
+            repositories runs touch, with Contents and Pull requests set to read and write.
+          </>
+        ) : (
+          <>
+            Used for every repository whose forge has no token of its own. Give it the least access that pushes a
+            branch and opens a pull request on the repositories runs touch.
+          </>
+        )}
+      </div>
+
+      <Field
+        label="Token"
+        error={wrong}
+        hint="Encrypted under a key of its own and handed to a pod for one run. No endpoint can read it back."
+      >
+        <input
+          type="password"
+          value={value}
+          autoComplete="off"
+          placeholder={provider === 'gitlab' ? 'glpat-…' : 'github_pat_…'}
+          onChange={(e) => setValue(e.target.value)}
+        />
+      </Field>
+    </Dialog>
+  )
+}
+
+function gitTokenStatus(token: GitToken, fallback?: GitToken): { label: string; className: string } {
+  if (token.configured) return token.problem ? { label: 'unusable', className: 'badge bad' } : { label: 'ready', className: 'badge ok' }
+  if (token.provider && fallback?.configured) return { label: 'uses fallback', className: 'badge idle' }
+  return { label: 'missing', className: token.provider ? 'badge idle' : 'badge warn' }
+}
+
+/**
+ * The secret most runs need and nothing asks for: its absence is allowed at
+ * admission and found at clone or push. Shown on its own so it is set before
+ * the first run rather than after the first failure.
+ */
+function GitCredentialCard() {
+  const cred = useGitCredential()
+  const [editing, setEditing] = useState<{ provider?: GitTokenProvider } | null>(null)
+  const c = cred.data
+  const fallback = c?.tokens.find((t) => !t.provider)
+
+  return (
+    <Card
+      title="Git token"
+      actions={
+        c?.secret_name ? (
+          <button className={c.configured ? 'sm ghost' : 'sm primary'} onClick={() => setEditing({})}>
+            {c.configured ? 'Add or replace' : 'Set token'}
+          </button>
+        ) : undefined
+      }
+    >
+      <ErrorBanner error={cred.error} what="read the git token" />
+      {c && (
+        <div className="stack">
+          {c.problem && (
+            <div className="banner" role="alert">
+              <div>
+                <div className="banner-title">Runs will not receive a git token</div>
+                <div className="small muted">{c.problem}</div>
+              </div>
+            </div>
+          )}
+          {!c.configured && c.secret_name && (
+            <div className="banner warn" role="alert">
+              <div>
+                <div className="banner-title">Not set — most runs with a repository will fail</div>
+                <div className="small muted">
+                  A private repository fails at <span className="mono">clone</span> and a pull request at{' '}
+                  <span className="mono">push</span>, both with exit code 20. Only public repositories without a pull
+                  request work without one.
+                </div>
+              </div>
+            </div>
+          )}
+          {c.tokens.map(
+            (t) =>
+              t.problem && (
+                <div key={t.secret_name} className="banner" role="alert">
+                  <div>
+                    <div className="banner-title">
+                      {t.secret_name} is stored, but runs{t.provider ? ` on ${FORGE_LABEL[t.provider]}` : ''} will not
+                      receive it
+                    </div>
+                    <div className="small muted">{t.problem}</div>
+                  </div>
+                </div>
+              ),
+          )}
+          {c.tokens.length > 0 && (
+            <div className="table-wrap">
+              <table>
+                <thead>
+                  <tr>
+                    <th>Used for</th>
+                    <th>Stored as</th>
+                    <th>Status</th>
+                    <th>Updated</th>
+                    <th />
+                  </tr>
+                </thead>
+                <tbody>
+                  {c.tokens.map((t) => {
+                    const status = gitTokenStatus(t, fallback)
+                    return (
+                      <tr key={t.secret_name}>
+                        <td className="small">{t.provider ? FORGE_LABEL[t.provider] : 'Every forge (fallback)'}</td>
+                        <td className="small">
+                          <span className="mono">{t.secret_name}</span>
+                          {t.kind && <span className="muted"> · {t.kind}</span>}
+                        </td>
+                        <td>
+                          <span className={status.className}>{status.label}</span>
+                        </td>
+                        <td className="small muted">
+                          <Time at={t.updated_at} />
+                        </td>
+                        <td className="nowrap">
+                          <button className="sm ghost" onClick={() => setEditing({ provider: t.provider })}>
+                            {t.configured ? 'Replace' : 'Set'}
+                          </button>
+                        </td>
+                      </tr>
+                    )
+                  })}
+                </tbody>
+              </table>
+            </div>
+          )}
+        </div>
+      )}
+      {editing && c && <GitTokenDialog initial={editing.provider} cred={c} onClose={() => setEditing(null)} />}
+    </Card>
+  )
+}
+
 function SecretDialog({ existing, onClose }: { existing: Secret | null; onClose: () => void }) {
   const put = usePutSecret()
   const [name, setName] = useState(existing?.name ?? '')
@@ -253,6 +462,7 @@ function SecretDialog({ existing, onClose }: { existing: Secret | null; onClose:
 export function SecretsPage() {
   const secrets = useSecrets()
   const modelSecret = useModelCredential().data?.secret_name
+  const gitSecrets = new Set(useGitCredential().data?.tokens.map((t) => t.secret_name))
   const [editing, setEditing] = useState<Secret | null>(null)
   const [creating, setCreating] = useState(false)
 
@@ -273,6 +483,7 @@ export function SecretsPage() {
       <div className="content">
         <ErrorBanner error={secrets.error} what="load the secrets" />
         <ModelCredentialCard />
+        <GitCredentialCard />
         <div className="banner info">
           <div>
             <div className="banner-title">Values are never shown</div>
@@ -304,6 +515,12 @@ export function SecretsPage() {
                         <>
                           {' '}
                           <span className="badge idle">model credential</span>
+                        </>
+                      )}
+                      {gitSecrets.has(secret.name) && (
+                        <>
+                          {' '}
+                          <span className="badge idle">git token</span>
                         </>
                       )}
                     </td>

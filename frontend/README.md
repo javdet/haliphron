@@ -30,9 +30,9 @@ is the one component that has to change when that arrives.
 |---|---|
 | Runs | Filter by status, role, agent and text; submit a run; delete a finished run; page with the `before` cursor |
 | Run | Status, accounting, source; result, logs and the attempt ledger; cancel, retry, delete |
-| Clusters | Registered clusters with heartbeat and slots; revoke; mint bootstrap tokens |
+| Clusters | Registered clusters with heartbeat and slots; revoke; delete a revoked one no run ran on; mint bootstrap tokens |
 | Roles | Create, edit and soft-delete role specs |
-| Secrets | List, add and rotate; values are never shown because the API never returns them |
+| Secrets | The model credential and the git token, each with its own card; list, add and rotate the rest. Values are never shown because the API never returns them |
 | Tokens | List, mint and revoke API tokens; remove revoked or expired ones |
 
 Not covered, because the backend has none of it: workflows, statistics and

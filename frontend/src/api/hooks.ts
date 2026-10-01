@@ -18,6 +18,8 @@ import {
   type BootstrapTokenSecret,
   type Cluster,
   type CreateRunRequest,
+  type GitCredential,
+  type GitTokenProvider,
   type LogPage,
   type ModelCredential,
   type ModelCredentialType,
@@ -49,6 +51,7 @@ export const keys = {
   tokens: () => ['tokens'] as const,
   secrets: () => ['secrets'] as const,
   modelCredential: () => ['model-credential'] as const,
+  gitCredential: () => ['git-credential'] as const,
 }
 
 /** How often a run that has not finished is re-read. */
@@ -250,6 +253,15 @@ export function useRevokeCluster() {
   })
 }
 
+export function useDeleteCluster() {
+  const qc = useQueryClient()
+  return useMutation({
+    mutationFn: (id: string) =>
+      request<void>(`/clusters/${encodeURIComponent(id)}`, { method: 'DELETE' }),
+    onSuccess: () => void qc.invalidateQueries({ queryKey: keys.clusters() }),
+  })
+}
+
 export function useBootstrapTokens() {
   return useQuery({
     queryKey: keys.bootstrapTokens(),
@@ -327,8 +339,9 @@ export function usePutSecret() {
       }),
     onSuccess: () => {
       void qc.invalidateQueries({ queryKey: keys.secrets() })
-      // The generic dialog can write the model credential's row too.
+      // The generic dialog can write the model credential's or a git token's row too.
       void qc.invalidateQueries({ queryKey: keys.modelCredential() })
+      void qc.invalidateQueries({ queryKey: keys.gitCredential() })
     },
   })
 }
@@ -355,6 +368,29 @@ export function usePutModelCredential() {
       }),
     onSuccess: (cred) => {
       qc.setQueryData(keys.modelCredential(), cred)
+      void qc.invalidateQueries({ queryKey: keys.secrets() })
+    },
+  })
+}
+
+export function useGitCredential() {
+  return useQuery({
+    queryKey: keys.gitCredential(),
+    queryFn: ({ signal }) => request<GitCredential>('/git-credential', { signal }),
+    staleTime: 60_000,
+  })
+}
+
+export function usePutGitCredential() {
+  const qc = useQueryClient()
+  return useMutation({
+    mutationFn: ({ provider, value }: { provider?: GitTokenProvider; value: string }) =>
+      request<GitCredential>('/git-credential', {
+        method: 'PUT',
+        body: provider ? { provider, value } : { value },
+      }),
+    onSuccess: (cred) => {
+      qc.setQueryData(keys.gitCredential(), cred)
       void qc.invalidateQueries({ queryKey: keys.secrets() })
     },
   })
