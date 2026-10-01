@@ -76,8 +76,9 @@ finish, then upgrade and put the capacity back.
 
 ## Upgrade the agent image
 
-The image decides what every run executes, so the control plane does not
-choose one for you.
+The image decides what every run executes. Left unset, `agent.image` is the
+release the chart was cut with (`javdet/haliphron-agent:{{ .Chart.AppVersion }}`),
+so a chart upgrade moves the agent with it. To pin it instead:
 
 ```sh
 helm upgrade haliphron deploy/charts/haliphron -n haliphron --reuse-values \

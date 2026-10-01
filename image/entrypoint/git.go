@@ -118,6 +118,7 @@ func (r *Run) gitEnv() []string {
 		"GIT_TERMINAL_PROMPT=0",
 		"GIT_CONFIG_NOSYSTEM=1",
 	}
+	env = append(env, r.safeDirectoryEnv()...)
 	if r.secrets.GitToken == "" {
 		return env
 	}
@@ -126,6 +127,27 @@ func (r *Run) gitEnv() []string {
 		return append(env, "GL_TOKEN="+r.secrets.GitToken, "GITLAB_TOKEN="+r.secrets.GitToken)
 	default:
 		return append(env, "GH_TOKEN="+r.secrets.GitToken, "GITHUB_TOKEN="+r.secrets.GitToken)
+	}
+}
+
+// safeDirectoryEnv marks the workspace as a repository git may work in.
+//
+// The root of an emptyDir belongs to root: fsGroup changes its group and never
+// its owner, and a pod with every capability dropped cannot chown it. git
+// refuses a work tree owned by anyone but the caller ("detected dubious
+// ownership"), so without this the clone succeeds — git created .git itself —
+// and the checkout that follows fails on every attempt.
+//
+// Set through GIT_CONFIG_COUNT rather than -c because the same environment
+// reaches gh, glab and the agent, all of which run git in the workspace too.
+// It is command scope, which git honours for safe.directory where it ignores
+// the repository's own configuration, and it names the workspace alone rather
+// than "*".
+func (r *Run) safeDirectoryEnv() []string {
+	return []string{
+		"GIT_CONFIG_COUNT=1",
+		"GIT_CONFIG_KEY_0=safe.directory",
+		"GIT_CONFIG_VALUE_0=" + r.layout.Workspace,
 	}
 }
 

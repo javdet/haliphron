@@ -108,7 +108,7 @@ encryption key is not even that: it is a file, because a variable is visible in
 {{- end }}
 
 - name: HALIPHRON_AGENT_IMAGE
-  value: {{ .Values.agent.image | quote }}
+  value: {{ tpl .Values.agent.image . | quote }}
 - name: HALIPHRON_AGENT_IMAGE_PULL_POLICY
   value: {{ .Values.agent.imagePullPolicy | quote }}
 {{/*

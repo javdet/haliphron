@@ -135,7 +135,7 @@ not reinstated on the next start.
 
 | Value | Default |
 |---|---|
-| `agent.image` | `javdet/haliphron-agent:latest` |
+| `agent.image` | `javdet/haliphron-agent:{{ .Chart.AppVersion }}`, rendered with `tpl` |
 | `agent.imagePullPolicy` | `IfNotPresent` |
 | `agent.nodeSelector` | `{}` |
 | `agent.tolerations` | `[]` |

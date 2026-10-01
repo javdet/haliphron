@@ -11,7 +11,9 @@ You need:
   (`--set postgresql.enabled=true`) for an evaluation. Do not use that for an
   installation that has to survive a year: the subchart pins no image tag safe
   to run unattended, and the database holds the system of record.
-- **An agent image, pinned by digest.** The chart will not choose one.
+- **An agent image, pinned by digest.** The chart defaults to the tag of its
+  own release, `javdet/haliphron-agent:<appVersion>`; a digest is what makes
+  it reproducible.
 - **`helm dependency build`**, run before install whether or not you enable a
   subchart:
 

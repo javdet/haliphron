@@ -28,7 +28,7 @@ import (
 // silently until the day the pod has a read-only root.
 func baseEnv(r *Run) []string {
 	home := r.layout.Home
-	return []string{
+	return append([]string{
 		"HOME=" + home,
 		"PATH=" + orDefault(os.Getenv("PATH"), "/usr/local/bin:/usr/bin:/bin"),
 		"XDG_CACHE_HOME=" + filepath.Join(home, ".cache"),
@@ -50,7 +50,7 @@ func baseEnv(r *Run) []string {
 		runv1.EnvAttempt + "=" + strconv.Itoa(int(r.cfg.Attempt)),
 		"HALIPHRON_OUTPUT_FILE=" + r.layout.Output,
 		"HALIPHRON_ARTIFACTS_DIR=" + r.layout.Artifacts,
-	}
+	}, r.safeDirectoryEnv()...)
 }
 
 func orDefault(v, fallback string) string {

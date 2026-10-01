@@ -116,3 +116,67 @@ func writeFile(t *testing.T, path, body string) {
 		t.Fatalf("writing %s: %v", path, err)
 	}
 }
+
+// In the pod the workspace is the root of an emptyDir, which belongs to root
+// while the entrypoint runs as 1000: fsGroup changes the group, never the owner.
+// git refuses a work tree owned by anyone else, so the clone succeeded and the
+// checkout after it failed with "detected dubious ownership" on every run. The
+// suites run as root, so the test reproduces the same mismatch from the other
+// side by handing the workspace to somebody else.
+func TestTheCheckoutSucceedsInAWorkspaceOwnedBySomebodyElse(t *testing.T) {
+	t.Parallel()
+	if _, err := exec.LookPath("git"); err != nil {
+		t.Fatalf("this test needs a real git on PATH: %v", err)
+	}
+	if os.Geteuid() != 0 {
+		t.Skip("handing the workspace to another owner needs root, which the Makefile's container has")
+	}
+
+	upstream := filepath.Join(t.TempDir(), "upstream")
+	gitIn(t, "", "init", "--quiet", "--initial-branch=main", upstream)
+	writeFile(t, filepath.Join(upstream, "README.md"), "hello\n")
+	gitIn(t, upstream, "add", "-A")
+	gitIn(t, upstream, "commit", "--quiet", "-m", "initial")
+
+	const repoURL = "https://forge.invalid/org/repo.git"
+	h := newHarness(t, controlplane.RunRequest{
+		Prompt: "change something", RepoURL: repoURL,
+		GitProvider: runv1.GitProviderGitHub, BaseBranch: "main",
+		TargetBranch: "haliphron/abc-change",
+	})
+	writeFile(t, filepath.Join(h.layout.Home, ".gitconfig"),
+		"[url \"file://"+upstream+"\"]\n\tinsteadOf = "+repoURL+"\n")
+	if err := os.MkdirAll(h.layout.Workspace, 0o777); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chown(h.layout.Workspace, 65534, 65534); err != nil {
+		t.Fatalf("handing the workspace to another owner: %v", err)
+	}
+	t.Cleanup(func() { _ = os.Chown(h.layout.Workspace, 0, 0) })
+
+	var agentEnv []string
+	agent := agentScript(h, "done", `{"ok":true}`)
+	h.commander.handle = func(c entrypoint.Command) (entrypoint.CommandResult, error) {
+		if c.Path == "git" {
+			return entrypoint.ExecCommander{}.Run(context.Background(), c)
+		}
+		if c.Path == "claude" && len(c.Args) > 0 && c.Args[0] == "-p" {
+			agentEnv = c.Env
+		}
+		return agent(c)
+	}
+
+	run, _ := h.executeRun()
+	if got := h.phase(run, runv1.RuntimePhaseClone); got != runv1.PhaseOutcomeOK {
+		t.Fatalf("the clone phase is %s, want ok (%v)", got, run.Failure())
+	}
+
+	// The agent runs git in the same work tree, and is refused the same way
+	// unless its environment carries the same exception.
+	cmd := exec.Command("git", "status", "--porcelain")
+	cmd.Dir = h.layout.Workspace
+	cmd.Env = agentEnv
+	if out, err := cmd.CombinedOutput(); err != nil {
+		t.Errorf("git in the agent's environment is refused the workspace: %v\n%s", err, out)
+	}
+}

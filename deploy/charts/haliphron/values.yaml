@@ -279,10 +279,13 @@ bootstrapToken:
 # What the runs default to
 # -----------------------------------------------------------------------------
 agent:
-  # The image decides what every run executes. `latest` moves under you, so
-  # a production install should override this with a digest:
+  # The image decides what every run executes. The default is the release
+  # the chart was cut with, so upgrading the chart upgrades the agent too.
+  # Never `latest`: under IfNotPresent a node keeps the `latest` it pulled
+  # first and runs it forever. The value is rendered with `tpl`, and a
+  # production install should still pin it by digest:
   #   --set agent.image=javdet/haliphron-agent@sha256:...
-  image: javdet/haliphron-agent:latest
+  image: "javdet/haliphron-agent:{{ .Chart.AppVersion }}"
   imagePullPolicy: IfNotPresent
 
   # Where the agent pods land, for every run that does not come from a role

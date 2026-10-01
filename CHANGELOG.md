@@ -22,6 +22,15 @@ of `VERSION`, and it is the tag of the published images.
   `cluster.deleted`. A controller that is still installed is told to register
   again, so uninstall it first.
 
+### Fixed
+
+- **Chart: the agent image followed `latest`.** `agent.image` defaulted to
+  `javdet/haliphron-agent:latest` with `IfNotPresent`, so a node that had
+  pulled an older `latest` kept running it after an upgrade — which is how
+  the 0.3.0 `clone` fix never reached installations that had not pinned the
+  image. The default is now `javdet/haliphron-agent:{{ .Chart.AppVersion }}`,
+  rendered with `tpl`, so upgrading the chart upgrades the agent.
+
 ## 0.3.0 — 2026-09-30
 
 ### Fixed
