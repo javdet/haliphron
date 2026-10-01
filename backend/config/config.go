@@ -15,6 +15,8 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"log/slog"
+	"net/url"
 	"os"
 	"regexp"
 	"strconv"
@@ -85,6 +87,43 @@ type Config struct {
 	// replica calling it is safe — the advisory lock makes it so — and an
 	// operator who wants to apply migrations by hand can say so.
 	Migrate bool
+
+	// Mattermost is the chat bot. Off unless a server is named.
+	Mattermost MattermostConfig
+}
+
+// MattermostConfig is the installation's Mattermost bot: one bot account,
+// whose mentions become runs under one role.
+type MattermostConfig struct {
+	// URL is the server, as a browser opens it. Setting it is what turns the
+	// bot on.
+	URL string
+	// Token is the bot account's access token. Read from a file in a
+	// deployment, for the reason the bootstrap token is.
+	Token string
+	// Role is the role every run from the bot is admitted under. Anyone who
+	// can reach the bot can use it, so it is the access boundary.
+	Role       string
+	RepoURL    string
+	BaseBranch string
+	// RunURL links a reply to the run in the UI, with {id} for the run.
+	RunURL string
+
+	MaxPostRunes   int
+	MaxThreadBytes int
+}
+
+// Enabled reports whether the bot is configured.
+func (m MattermostConfig) Enabled() bool { return m.URL != "" }
+
+// LogValue keeps the token out of any log line the configuration ends up in.
+func (m MattermostConfig) LogValue() slog.Value {
+	return slog.GroupValue(
+		slog.String("url", m.URL),
+		slog.String("role", m.Role),
+		slog.String("repo", m.RepoURL),
+		slog.Bool("token_set", m.Token != ""),
+	)
 }
 
 // ArtifactConfig is which half of the ArtifactStore port runs and what it
@@ -230,6 +269,16 @@ func Load() (Config, error) {
 		LogLevel:  env("HALIPHRON_LOG_LEVEL", "info"),
 		LogFormat: env("HALIPHRON_LOG_FORMAT", "json"),
 		Migrate:   boolEnv("HALIPHRON_MIGRATE", true),
+
+		Mattermost: MattermostConfig{
+			URL:            strings.TrimSpace(os.Getenv("HALIPHRON_MATTERMOST_URL")),
+			Role:           os.Getenv("HALIPHRON_MATTERMOST_ROLE"),
+			RepoURL:        os.Getenv("HALIPHRON_MATTERMOST_REPO"),
+			BaseBranch:     os.Getenv("HALIPHRON_MATTERMOST_BASE_BRANCH"),
+			RunURL:         os.Getenv("HALIPHRON_MATTERMOST_RUN_URL"),
+			MaxPostRunes:   intEnv("HALIPHRON_MATTERMOST_MAX_POST_RUNES", app.DefaultChatPostRunes),
+			MaxThreadBytes: intEnv("HALIPHRON_MATTERMOST_MAX_THREAD_BYTES", app.DefaultChatThreadBytes),
+		},
 	}
 
 	if raw := os.Getenv("HALIPHRON_TOOL_DENY"); raw != "" {
@@ -257,21 +306,30 @@ func Load() (Config, error) {
 	}
 	cfg.KEK = kek
 
-	bootstrap, err := loadBootstrapToken()
+	bootstrap, err := loadSecret("HALIPHRON_BOOTSTRAP_TOKEN")
 	if err != nil {
 		return Config{}, err
 	}
 	cfg.BootstrapToken = bootstrap
 
+	if cfg.Mattermost.Enabled() {
+		token, err := loadSecret("HALIPHRON_MATTERMOST_TOKEN")
+		if err != nil {
+			return Config{}, err
+		}
+		cfg.Mattermost.Token = token
+	}
+
 	return cfg, cfg.validate()
 }
 
-// loadBootstrapToken reads the first admin credential, from a file or a
-// variable, for the same reason and in the same order as the key encryption
-// key: a variable is visible in `kubectl describe pod` and in every crash
-// dump, and this one is an admin credential reachable over the network.
-func loadBootstrapToken() (string, error) {
-	if path := os.Getenv("HALIPHRON_BOOTSTRAP_TOKEN_FILE"); path != "" {
+// loadSecret reads a credential from name+"_FILE" or, failing that, from name,
+// for the same reason and in the same order as the key encryption key: a
+// variable is visible in `kubectl describe pod` and in every crash dump. The
+// bootstrap token is an admin credential reachable over the network, and the
+// Mattermost token speaks as the bot to everyone it can reach.
+func loadSecret(name string) (string, error) {
+	if path := os.Getenv(name + "_FILE"); path != "" {
 		raw, err := os.ReadFile(path)
 		if err != nil {
 			return "", fmt.Errorf("config: read %s: %w", path, err)
@@ -282,7 +340,7 @@ func loadBootstrapToken() (string, error) {
 		// afternoon.
 		return strings.TrimSpace(string(raw)), nil
 	}
-	return strings.TrimSpace(os.Getenv("HALIPHRON_BOOTSTRAP_TOKEN")), nil
+	return strings.TrimSpace(os.Getenv(name)), nil
 }
 
 // loadKEK reads the key encryption key from a variable or a file.
@@ -388,12 +446,48 @@ func (c Config) validate() error {
 		// the cluster, which is a long way from the variable that caused it.
 		return fmt.Errorf("config: HALIPHRON_MAX_INFRA_RETRIES is %d; it is between 0 and 10", r)
 	}
+	if err := c.Mattermost.validate(); err != nil {
+		return err
+	}
 	if c.Timings.MaxWaitSeconds > 30 {
 		// The ingress's proxy_read_timeout must be greater than this, and 30
 		// is what the contract states. A longer wait turns expired polls into
 		// dropped connections, which reads as network instability.
 		return fmt.Errorf("config: max wait is %ds, the contract's ceiling is 30s",
 			c.Timings.MaxWaitSeconds)
+	}
+	return nil
+}
+
+func (m MattermostConfig) validate() error {
+	if !m.Enabled() {
+		return nil
+	}
+	u, err := url.Parse(m.URL)
+	if err != nil || (u.Scheme != "https" && u.Scheme != "http") || u.Host == "" {
+		return fmt.Errorf("config: HALIPHRON_MATTERMOST_URL is %q; it is the server's http(s) address", m.URL)
+	}
+	if m.Token == "" {
+		return fmt.Errorf("config: the Mattermost bot needs HALIPHRON_MATTERMOST_TOKEN_FILE " +
+			"or HALIPHRON_MATTERMOST_TOKEN")
+	}
+	if m.Role == "" {
+		// Required rather than defaulted: the role is what anyone who can
+		// reach the bot may do, and that is a decision, not a fallback.
+		return fmt.Errorf("config: the Mattermost bot needs HALIPHRON_MATTERMOST_ROLE")
+	}
+	if m.BaseBranch != "" && m.RepoURL == "" {
+		return fmt.Errorf("config: HALIPHRON_MATTERMOST_BASE_BRANCH is set without HALIPHRON_MATTERMOST_REPO")
+	}
+	if m.RunURL != "" && !strings.Contains(m.RunURL, "{id}") {
+		return fmt.Errorf("config: HALIPHRON_MATTERMOST_RUN_URL has no {id} for the run identifier")
+	}
+	if m.MaxPostRunes < 1000 || m.MaxPostRunes > 65535 {
+		return fmt.Errorf("config: HALIPHRON_MATTERMOST_MAX_POST_RUNES is %d; it is between 1000 and 65535",
+			m.MaxPostRunes)
+	}
+	if m.MaxThreadBytes < 0 {
+		return fmt.Errorf("config: HALIPHRON_MATTERMOST_MAX_THREAD_BYTES cannot be negative")
 	}
 	return nil
 }

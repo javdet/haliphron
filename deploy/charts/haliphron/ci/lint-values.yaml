@@ -39,3 +39,12 @@ networkPolicy:
   enabled: true
 autoscaling:
   enabled: true
+# The Mattermost bot, through an existing Secret, so its env, volume and mount
+# render. lint-values-generated.yaml covers the literal token in secret.yaml.
+mattermost:
+  enabled: true
+  url: https://chat.example.com
+  role: oncall
+  repo: https://github.com/example/infra
+  runURL: https://haliphron.example.com/runs/{id}
+  existingSecret: haliphron-mattermost

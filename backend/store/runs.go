@@ -61,6 +61,11 @@ type NewRun struct {
 	// counting and inserting without a gap between them is something only a
 	// transaction can do. Ignored when ParentRunID is empty.
 	MaxChildren int32
+
+	// ChatTrigger is the chat message this run answers, claimed beforehand by
+	// ClaimChatTrigger. It is linked in the same transaction as the insert: a
+	// run that commits without its link is a run nobody will reply about.
+	ChatTrigger *ChatTriggerKey
 }
 
 // ErrTooManyChildren is a child run refused because its parent has already
@@ -75,6 +80,10 @@ var ErrTooManyChildren = errors.New("store: the parent run has started its full 
 // concurrent run_agent calls have every one of them read the same count and
 // pass. The parent row is locked first, which serialises its siblings against
 // each other and against nothing else.
+//
+// A run admitted from a chat message links that message in the same
+// transaction, and is rolled back with ErrChatTriggerSettled if the message
+// was answered in the meantime.
 func (s *Store) InsertRun(ctx context.Context, r NewRun) error {
 	return s.inTx(ctx, func(tx *sql.Tx) error {
 		if r.ParentRunID != "" && r.MaxChildren > 0 {
@@ -82,7 +91,13 @@ func (s *Store) InsertRun(ctx context.Context, r NewRun) error {
 				return err
 			}
 		}
-		return insertRun(ctx, tx, r)
+		if err := insertRun(ctx, tx, r); err != nil {
+			return err
+		}
+		if r.ChatTrigger != nil {
+			return linkChatTrigger(ctx, tx, *r.ChatTrigger, r.ID)
+		}
+		return nil
 	})
 }
 

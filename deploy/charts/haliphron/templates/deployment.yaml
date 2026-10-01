@@ -130,6 +130,11 @@ spec:
               mountPath: /haliphron/bootstrap
               readOnly: true
             {{- end }}
+            {{- if (include "haliphron.mattermostEnabled" .) }}
+            - name: mattermost
+              mountPath: /haliphron/mattermost
+              readOnly: true
+            {{- end }}
             {{- if not (include "haliphron.objectStore" .) }}
             # The artifact volume. readOnlyRootFilesystem is on, so this is one
             # of exactly two writable paths the process has — and the one that
@@ -174,6 +179,15 @@ spec:
             items:
               - key: {{ include "haliphron.bootstrapSecretKey" . }}
                 path: {{ include "haliphron.bootstrapSecretKey" . }}
+        {{- end }}
+        {{- if (include "haliphron.mattermostEnabled" .) }}
+        - name: mattermost
+          secret:
+            secretName: {{ include "haliphron.mattermostSecretName" . }}
+            defaultMode: 0400
+            items:
+              - key: {{ include "haliphron.mattermostSecretKey" . }}
+                path: {{ include "haliphron.mattermostSecretKey" . }}
         {{- end }}
         {{- with .Values.backend.extraVolumes }}
         {{- toYaml . | nindent 8 }}

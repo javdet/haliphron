@@ -7,6 +7,22 @@ of `VERSION`, and it is the tag of the published images.
 
 ### Added
 
+- **Mattermost bot.** When `mattermost.enabled` is set, the backend connects to
+  a Mattermost server as a bot account. A message that mentions the bot, or
+  any direct message to it, starts a run under the role in `mattermost.role`.
+  The message, without the mention, is the prompt. Inside a thread, the
+  thread's earlier messages are quoted ahead of it as context. The bot reacts
+  with :eyes:, replies with the run's identifier, and replies again in the same
+  thread when the run ends. A run that succeeded is reported as "the agent
+  exited with code 0", not as solved. The connection is outbound, over a
+  WebSocket, so the chat server needs no route to the control plane.
+  Every API replica connects, and each message still starts one run. Replies
+  survive a restart of the backend. Runs from the bot are recorded with
+  `created_via` `mattermost` and `created_by` `mattermost:<username>`. Anyone
+  who can reach the bot can use its role. See
+  [connect a Mattermost bot](docs/how-to/connect-a-mattermost-bot.md). The
+  schema gains migration 0007 (`chat_triggers`) and the backend gains one
+  dependency, `github.com/coder/websocket`.
 - **Git token.** `GET` and `PUT /api/v1/git-credential` report and set the
   token runs clone and push with, under the fallback name (`git-token`) or a
   forge's own (`git-token-github`, `git-token-gitlab`). The `GET` needs only

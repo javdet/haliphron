@@ -36,6 +36,8 @@ What callers do, whether that caller is a person, a script or another agent.
   settings stop travelling with every request.
 - [Give runs a git token and a model key](provide-run-credentials.md) — the
   two credentials every real run needs, and how to keep them out of prompts.
+- [Connect a Mattermost bot](connect-a-mattermost-bot.md) — mentions of a bot
+  account become runs under one role, answered in the thread.
 
 ## When something has gone wrong
 

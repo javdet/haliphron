@@ -117,6 +117,21 @@ a complete instruction rather than half of one.
 {{- end -}}
 
 {{/*
+The Mattermost bot's token: an existing Secret when one is named, otherwise the
+literal written into the credentials Secret. Either way it reaches the pod as a
+file, never as a variable.
+*/}}
+{{- define "haliphron.mattermostEnabled" -}}
+{{- if and .Values.mattermost.enabled (include "haliphron.servesAPI" .) -}}true{{- end -}}
+{{- end -}}
+{{- define "haliphron.mattermostSecretName" -}}
+{{- default (include "haliphron.secretName" .) .Values.mattermost.existingSecret -}}
+{{- end -}}
+{{- define "haliphron.mattermostSecretKey" -}}
+{{- if .Values.mattermost.existingSecret -}}{{ .Values.mattermost.existingSecretKey }}{{- else -}}mattermostToken{{- end -}}
+{{- end -}}
+
+{{/*
 Which half of the ArtifactStore port is in force. Empty means relay, which is
 what an installation gets without configuration.
 */}}
@@ -427,6 +442,35 @@ where the message names the value.
 */}}
 {{- if and .Values.encryption.key (lt (len .Values.encryption.key) 16) -}}
 {{- fail (printf "encryption.key is %d characters; the backend refuses anything under 16. Leave it empty to have 32 random bytes generated, or supply `openssl rand -base64 32`." (len .Values.encryption.key)) -}}
+{{- end -}}
+
+{{/*
+The Mattermost bot. Everything the backend would refuse at startup is refused
+here instead, where the message names the value rather than an environment
+variable.
+*/}}
+{{- if .Values.mattermost.enabled -}}
+{{- if not (include "haliphron.servesAPI" .) -}}
+{{- fail (printf "mattermost.enabled needs the public API listener, and backend.mode is %q: the bot runs beside it. Set backend.mode to all or api, or enable the bot in the release that serves the API" .Values.backend.mode) -}}
+{{- end -}}
+{{- if not (regexMatch "^https?://[^/]+" .Values.mattermost.url) -}}
+{{- fail (printf "mattermost.url is %q; it is the server's http(s) address, as a browser opens it" .Values.mattermost.url) -}}
+{{- end -}}
+{{- if not .Values.mattermost.role -}}
+{{- fail "mattermost.role is empty: every run the bot starts is admitted under it, and anyone who can reach the bot can use it. Name a role, and make it a least-privilege one" -}}
+{{- end -}}
+{{- if and .Values.mattermost.token .Values.mattermost.existingSecret -}}
+{{- fail "mattermost.token and mattermost.existingSecret are both set; the pods read the existing Secret, so the token would be written and never used. Keep one." -}}
+{{- end -}}
+{{- if not (or .Values.mattermost.token .Values.mattermost.existingSecret) -}}
+{{- fail "mattermost.enabled needs the bot's access token: set mattermost.existingSecret (preferred) or mattermost.token" -}}
+{{- end -}}
+{{- if and .Values.mattermost.baseBranch (not .Values.mattermost.repo) -}}
+{{- fail "mattermost.baseBranch is set without mattermost.repo" -}}
+{{- end -}}
+{{- if and .Values.mattermost.runURL (not (contains "{id}" .Values.mattermost.runURL)) -}}
+{{- fail (printf "mattermost.runURL is %q and has no {id} for the run identifier" .Values.mattermost.runURL) -}}
+{{- end -}}
 {{- end -}}
 
 {{- if and (not .Values.database.dsn) (not .Values.database.existingSecret) (not .Values.postgresql.enabled) -}}

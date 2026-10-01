@@ -84,7 +84,7 @@ NetworkPolicy.
 | Module | What |
 |---|---|
 | `api/` | the four wire contracts as Go types + OpenAPI/JSON Schema. Depends on nothing internal |
-| `backend/` | control plane: `restapi` `mcp` `clusterapi` listeners → `app` use cases → `store` (pgx) |
+| `backend/` | control plane: `restapi` `mcp` `clusterapi` listeners and the `mattermost` bot adapter → `app` use cases → `store` (pgx) |
 | `controller/` | the in-cluster controller: `lease` → `materialize` → `agentrun` reconciler → `launcher` (Job) |
 | `image/` | the agent image entrypoint: nineteen phases, `entrypoint/runner.go` is the spine |
 | `db/` | migrations and the contract queries (`lease.sql`, `expire_*.sql`, `lock_run.sql`) |
@@ -95,7 +95,10 @@ Backend layering is hexagonal and enforced by convention: listeners are transpor
 holds every rule, `store` is SQL. The reason is stated in the package comment of
 `backend/app/service.go` — the REST path and the MCP path must not admit runs by different
 rules, and the ingest path and the heartbeat path must not apply reports by different ones.
-Put a new rule in `app`, not in a handler.
+Put a new rule in `app`, not in a handler. The Mattermost bot follows the same split:
+`backend/mattermost` decodes WebSocket events and makes REST calls, and `app/chat.go` decides
+what is a request, builds the prompt and renders replies. Every API replica holds its own
+socket, so the `chat_triggers` claim (keyed by post id) is what makes one run per message.
 
 The HTTP stack is stdlib `net/http`, not gin, despite what `docs/architecture.md` says.
 

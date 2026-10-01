@@ -380,6 +380,65 @@ limits:
   maxAckExpiries: 0
 
 # -----------------------------------------------------------------------------
+# The Mattermost bot
+# -----------------------------------------------------------------------------
+#
+# A bot account whose mentions become runs. "@devops_duty why is CI red?" in a
+# channel the bot is a member of — or any message in a direct conversation
+# with it — starts a run under `role` below, with the message as the prompt
+# and, inside a thread, the thread's earlier messages as context. The bot
+# reacts with :eyes:, replies with the run's identifier, and replies again in
+# the same thread when the run ends.
+#
+# The backend dials the Mattermost server and holds a WebSocket open as the
+# bot: nothing needs to reach the backend, but the backend needs to reach the
+# server. With networkPolicy.enabled, add the server to networkPolicy.egressTo.
+#
+# Anyone who can reach the bot can use the role. Mattermost channel membership
+# is the access boundary, so make the role a least-privilege one.
+#
+# The bot runs beside the public API (backend.mode all or api). Every replica
+# connects; each message still starts one run.
+#
+# See docs/how-to/connect-a-mattermost-bot.md.
+mattermost:
+  enabled: false
+
+  # The server, as a browser opens it: https://chat.example.com
+  url: ""
+
+  # The role every run from the bot is admitted under. Required. It must exist
+  # (PUT /api/v1/roles/NAME); until it does, every mention is refused.
+  role: ""
+
+  # The repository runs are pointed at, and its base branch. Empty runs
+  # without a repository, which suits a role that works against clusters or
+  # APIs rather than code.
+  repo: ""
+  baseBranch: ""
+
+  # A link to a run in the UI, with {id} where the run identifier goes, e.g.
+  # https://haliphron.example.com/runs/{id}. Empty means replies carry none.
+  runURL: ""
+
+  # The bot account's access token. existingSecret is the better answer: a
+  # literal here ends up in the release's own storage, which `helm get values`
+  # can read.
+  #
+  # The token is read once at startup. A literal changed here rolls the pods by
+  # itself; a token rotated inside an existing Secret needs a
+  # `kubectl rollout restart`.
+  token: ""
+  existingSecret: ""
+  existingSecretKey: token
+
+  # The server's post length limit (MaxPostSize). A longer result is cut, with
+  # a note saying where the rest is.
+  maxPostRunes: 16383
+  # How much of a thread is quoted into the prompt as context.
+  maxThreadBytes: 65536
+
+# -----------------------------------------------------------------------------
 # The UI
 # -----------------------------------------------------------------------------
 #

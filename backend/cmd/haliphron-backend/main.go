@@ -14,6 +14,7 @@ import (
 	"fmt"
 	"log/slog"
 	"net/http"
+	"net/url"
 	"os"
 	"os/signal"
 	"sync"
@@ -25,6 +26,7 @@ import (
 	"github.com/automagicops/haliphron/backend/artifacts"
 	"github.com/automagicops/haliphron/backend/clusterapi"
 	"github.com/automagicops/haliphron/backend/config"
+	"github.com/automagicops/haliphron/backend/mattermost"
 	"github.com/automagicops/haliphron/backend/mcp"
 	"github.com/automagicops/haliphron/backend/restapi"
 	"github.com/automagicops/haliphron/backend/store"
@@ -221,10 +223,60 @@ func run() error {
 		}()
 	}
 
+	// The chat bot runs beside the public API: it is another way in for a
+	// person, and it belongs with the listener a person reaches rather than
+	// with the Cluster API, which may face remote clusters and has no reason
+	// to reach a chat server. Every API replica connects; the claim in the
+	// store makes that one run per message.
+	if cfg.Mattermost.Enabled() {
+		if cfg.Mode.Serves(config.ModeAPI) {
+			startMattermost(ctx, &wg, cfg, service, log)
+		} else {
+			log.Warn("the Mattermost bot is configured but this process does not serve the public API; "+
+				"it is not started here", "mode", cfg.Mode)
+		}
+	}
+
 	<-ctx.Done()
 	log.Info("shutting down")
 	wg.Wait()
 	return nil
+}
+
+// startMattermost connects the bot and starts the loop that posts its replies.
+func startMattermost(ctx context.Context, wg *sync.WaitGroup, cfg config.Config,
+	service *app.Service, log *slog.Logger) {
+
+	base, err := url.Parse(cfg.Mattermost.URL)
+	if err != nil {
+		// validate has already parsed it; this is unreachable short of a bug.
+		log.Error("the Mattermost URL could not be parsed", "error", err)
+		return
+	}
+	client := mattermost.NewClient(mattermost.Config{
+		BaseURL:      base,
+		Token:        cfg.Mattermost.Token,
+		MaxPostRunes: cfg.Mattermost.MaxPostRunes,
+	})
+	chat := service.NewChat(client, app.ChatConfig{
+		Role:           cfg.Mattermost.Role,
+		RepoURL:        cfg.Mattermost.RepoURL,
+		BaseBranch:     cfg.Mattermost.BaseBranch,
+		RunURL:         cfg.Mattermost.RunURL,
+		MaxThreadBytes: cfg.Mattermost.MaxThreadBytes,
+	})
+	if err := chat.CheckRole(ctx); errors.Is(err, store.ErrNotFound) {
+		log.Warn("the Mattermost bot's role does not exist; every mention is refused until it is created",
+			"role", cfg.Mattermost.Role)
+	} else if err != nil {
+		log.Warn("could not check the Mattermost bot's role", "role", cfg.Mattermost.Role, "error", err)
+	}
+	log.Info("starting the Mattermost bot", "mattermost", cfg.Mattermost)
+
+	listener := mattermost.NewListener(client, chat, log)
+	wg.Add(2)
+	go func() { defer wg.Done(); listener.Run(ctx) }()
+	go func() { defer wg.Done(); chat.RunReplier(ctx, 5*time.Second) }()
 }
 
 // healthHandler answers the two probes.

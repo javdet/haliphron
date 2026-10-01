@@ -11,3 +11,8 @@ agent:
   image: ghcr.io/automagicops/haliphron-agent@sha256:0000000000000000000000000000000000000000000000000000000000000000
 database:
   dsn: postgres://haliphron:lint@postgres:5432/haliphron?sslmode=disable
+mattermost:
+  enabled: true
+  url: https://chat.example.com
+  role: oncall
+  token: lint-mattermost-token

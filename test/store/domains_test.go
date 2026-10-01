@@ -59,7 +59,7 @@ func TestStoreOwnedEnums(t *testing.T) {
 		"run_status": {"Queued", "Leased", "Dispatched", "Starting", "Running",
 			"Unknown", "Succeeded", "Failed", "TimedOut", "Cancelled"},
 		"cluster_status": {"Registering", "Active", "Unreachable", "Revoked"},
-		"created_via":    {"api", "mcp", "ui", "slack", "schedule", "workflow", "agent"},
+		"created_via":    {"api", "mcp", "ui", "slack", "mattermost", "schedule", "workflow", "agent"},
 		"token_kind":     {"user", "service", "run-mcp"},
 		"secret_kind":    {"managed", "referenced"},
 		"actor_kind":     {"user", "token", "cluster", "system", "agent"},

@@ -1,6 +1,6 @@
 import { useMemo, useState } from 'react'
 import { Link, useNavigate, useSearchParams } from 'react-router-dom'
-import { useCreateRun, useGitCredential, useRoles, useRuns, type RunFilter } from '../api/hooks'
+import { useClusters, useCreateRun, useGitCredential, useRoles, useRuns, type RunFilter } from '../api/hooks'
 import { FORGE_LABEL, hasUsableToken, providerFor } from '../api/gitToken'
 import { AGENT_TYPES, RUN_STATUSES, TERMINAL_STATUSES, type CreateRunRequest, type Run } from '../api/types'
 import { DeleteRunDialog } from '../components/DeleteRunDialog'
@@ -241,9 +241,16 @@ export function RunsPage() {
   const [deleting, setDeleting] = useState<string | null>(null)
   const roles = useRoles()
   const runs = useRuns(filter)
+  const clusters = useClusters()
 
   const rows = runs.data?.pages.flatMap((page) => page.runs) ?? []
   const roleNames = roles.data?.map((r) => r.name) ?? []
+  // A run records the cluster by identifier only. Until the cluster list has
+  // loaded, or if it fails, the identifier is still an answer.
+  const clusterNames = useMemo(
+    () => new Map(clusters.data?.map((c) => [c.cluster_id, c.name]) ?? []),
+    [clusters.data],
+  )
 
   return (
     <>
@@ -272,6 +279,7 @@ export function RunsPage() {
                   <th>Run</th>
                   <th>Role</th>
                   <th>Agent</th>
+                  <th>Cluster</th>
                   <th>Repository</th>
                   <th className="num">Cost</th>
                   <th className="num">Elapsed</th>
@@ -295,6 +303,17 @@ export function RunsPage() {
                     </td>
                     <td className="nowrap">{run.role || <span className="faint">—</span>}</td>
                     <td className="nowrap small muted">{run.agent}</td>
+                    <td className="nowrap small">
+                      {!run.cluster_id ? (
+                        <span className="faint">unassigned</span>
+                      ) : clusterNames.has(run.cluster_id) ? (
+                        <span title={run.cluster_id}>{clusterNames.get(run.cluster_id)}</span>
+                      ) : (
+                        <span className="mono trunc trunc-sm" title={run.cluster_id}>
+                          {run.cluster_id}
+                        </span>
+                      )}
+                    </td>
                     <td className="small muted">
                       <span className="trunc">{run.repo || '—'}</span>
                     </td>

@@ -175,10 +175,10 @@ func (s *Service) RunSweeper(ctx context.Context, interval time.Duration) {
 	}
 }
 
-// RunReaper purges what has expired but is not state: spent idempotency keys.
-// It is separate from the sweep because it is housekeeping on a table nothing
-// waits for, and running it every few seconds would be a delete storm for no
-// reason.
+// RunReaper purges what has expired but is not state: spent idempotency keys,
+// and answered chat messages that started no run. It is separate from the
+// sweep because it is housekeeping on tables nothing waits for, and running it
+// every few seconds would be a delete storm for no reason.
 func (s *Service) RunReaper(ctx context.Context, interval time.Duration) {
 	if interval <= 0 {
 		interval = time.Hour
@@ -198,6 +198,14 @@ func (s *Service) RunReaper(ctx context.Context, interval time.Duration) {
 			}
 			if n > 0 {
 				s.log.Info("expired idempotency keys purged", "rows", n)
+			}
+			n, err = s.store.PurgeChatTriggers(ctx, chatRefusalRetention)
+			if err != nil && !ctxDone(ctx) {
+				s.log.Error("purge failed", "error", err)
+				continue
+			}
+			if n > 0 {
+				s.log.Info("answered chat messages purged", "rows", n)
 			}
 		}
 	}

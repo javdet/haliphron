@@ -263,8 +263,8 @@ Runs can also be deleted automatically, some time after they finish. See
 | `input_tokens`, `output_tokens`, `num_turns` | integer | |
 | `parent_run_id` | ULID | omitted when the run has no parent |
 | `depth` | integer | 0 for a run with no parent |
-| `created_by` | string | the token subject, its name, or `run:<id>` |
-| `created_via` | string | `api` or `agent` |
+| `created_by` | string | the token subject, its name, `run:<id>`, or `mattermost:<username>` |
+| `created_via` | string | `api`, `mcp`, `agent` or `mattermost` |
 | `created_at`, `started_at`, `finished_at` | timestamp | the last two omitted until they exist |
 
 `status` is the reported status, not the stored one. A terminal run whose

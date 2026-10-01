@@ -194,6 +194,36 @@ encryption key is not even that: it is a file, because a variable is visible in
 - name: HALIPHRON_MAX_CONTROLLER_VERSION
   value: {{ .Values.clusterProtocol.maxControllerVersion | quote }}
 
+{{- if (include "haliphron.mattermostEnabled" .) }}
+{{- /*
+  The bot. Its token is a file for the reason the bootstrap token is: it speaks
+  as the bot to everyone the bot can reach, and a variable is visible in
+  `kubectl describe pod`.
+*/}}
+- name: HALIPHRON_MATTERMOST_URL
+  value: {{ .Values.mattermost.url | quote }}
+- name: HALIPHRON_MATTERMOST_TOKEN_FILE
+  value: /haliphron/mattermost/{{ include "haliphron.mattermostSecretKey" . }}
+- name: HALIPHRON_MATTERMOST_ROLE
+  value: {{ .Values.mattermost.role | quote }}
+{{- with .Values.mattermost.repo }}
+- name: HALIPHRON_MATTERMOST_REPO
+  value: {{ . | quote }}
+{{- end }}
+{{- with .Values.mattermost.baseBranch }}
+- name: HALIPHRON_MATTERMOST_BASE_BRANCH
+  value: {{ . | quote }}
+{{- end }}
+{{- with .Values.mattermost.runURL }}
+- name: HALIPHRON_MATTERMOST_RUN_URL
+  value: {{ . | quote }}
+{{- end }}
+- name: HALIPHRON_MATTERMOST_MAX_POST_RUNES
+  value: {{ .Values.mattermost.maxPostRunes | quote }}
+- name: HALIPHRON_MATTERMOST_MAX_THREAD_BYTES
+  value: {{ .Values.mattermost.maxThreadBytes | quote }}
+{{- end }}
+
 - name: HALIPHRON_SWEEP_INTERVAL
   value: {{ .Values.backend.sweepInterval | quote }}
 - name: HALIPHRON_REAP_INTERVAL

@@ -455,6 +455,44 @@ different body is a client defect, and answering with the first `run_id` would
 return the result of work nobody ordered. That is a 422, and it is told apart by
 this column.
 
+**`chat_triggers` is the chat bot's claim and the reply it owes.** Every API
+replica holds its own connection to the chat server as the bot, so every message
+arrives once per replica. The first statement executed about a message is an
+`INSERT … ON CONFLICT DO NOTHING` keyed by `(tenant_id, platform, message_id)`,
+and the replica that loses it does nothing more: no thread fetch, no admission,
+no reply. `idempotency_keys` does not do this job. It expires after a day, a
+failed request releases its key, and it has no reply state.
+
+A claimed row has exactly one of two answers, enforced by a `CHECK`:
+
+- `run_id` — written by `UPDATE … WHERE run_id IS NULL AND refusal IS NULL`
+  inside the transaction that inserts the run. If that update touches no row,
+  the run is rolled back. A run committed without its link would be a run
+  nobody is ever told about.
+- `refusal` — the text to post instead, under the same condition.
+
+A row with neither once `next_attempt_at` has passed is an orphan: its handler
+died between the claim and the answer. The claim sets `next_attempt_at` to five
+minutes ahead, past the handler's own one-minute deadline. The reply loop
+converts the orphan into a refusal, "mention me again", and uses the same
+condition to do it. A slow admission and the loop therefore cannot both answer.
+
+The reply loop leases rows rather than locking them. It moves
+`next_attempt_at` forward under `FOR UPDATE … SKIP LOCKED` and posts outside
+any transaction, so no row lock is held across a call to the chat server.
+It selects only refusals, orphans and runs in a terminal status, which means
+a long run costs the loop nothing per tick. Delivery is at-least-once: a
+crash between a successful post and `replied_at` posts the reply again.
+`replied_at` and `abandoned_at` exclude each other.
+
+`run_id` is unique when set and cascades on delete: a deleted run takes the
+reply it owed with it, retention included. Rows without a run are purged by the
+reaper 30 days after they were claimed, once answered.
+
+`created_via` gains `mattermost`. The domain is widened the way `runtime_phase`
+is in 0006: the constraint is dropped and re-added with the whole list written
+out.
+
 ---
 
 ## 12. There is no table of downward commands
@@ -546,6 +584,10 @@ real PostgreSQL — generated columns, domains, partial indexes,
 - [x] `(run_id, lease_epoch, attempt)` separates the attempts of two owners, and the total cost adds up
 - [x] `audit_log` cannot be edited but can be deleted by retention
 - [x] `idempotency_keys` is separated by scope, and a different body gives a different digest
+- [x] a chat message can be claimed once; a second claim of the same message by another replica loses
+- [x] a chat trigger cannot carry both a run and a refusal, nor be both replied and abandoned; one run answers at most one message
+- [x] deleting a run deletes the chat trigger linked to it
+- [x] `created_via` accepts `mattermost`
 - [x] the migrations apply from scratch, roll back to an empty database and apply again
 - [x] `Migrate` is idempotent (every replica calls it at startup)
 - [x] every contract query `PREPARE`s against the schema it ships with

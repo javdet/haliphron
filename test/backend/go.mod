@@ -7,6 +7,7 @@ require (
 	github.com/automagicops/haliphron/backend v0.0.0
 	github.com/automagicops/haliphron/db v0.0.0
 	github.com/automagicops/haliphron/fake v0.0.0-00010101000000-000000000000
+	github.com/coder/websocket v1.8.15
 	github.com/jackc/pgx/v5 v5.7.6
 )
 

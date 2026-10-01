@@ -180,6 +180,29 @@ have not ended are never deleted. The scan runs where the Cluster API runs
 above still apply on their own terms. A run can outlive its logs, but no
 object outlives its run.
 
+### Mattermost bot
+
+Off unless `HALIPHRON_MATTERMOST_URL` is set. The bot starts only in a process
+that serves the public API (`HALIPHRON_MODE` `all` or `api`); any other mode
+logs a warning and leaves it off.
+
+| Variable | Default | Meaning |
+|---|---|---|
+| `HALIPHRON_MATTERMOST_URL` | — | the server, as a browser opens it; setting it enables the bot |
+| `HALIPHRON_MATTERMOST_TOKEN_FILE` | — | path to the bot account's access token; checked first |
+| `HALIPHRON_MATTERMOST_TOKEN` | — | the token itself |
+| `HALIPHRON_MATTERMOST_ROLE` | — | required; the role every run from the bot is admitted under |
+| `HALIPHRON_MATTERMOST_REPO` | — | the repository runs are pointed at; empty runs without one |
+| `HALIPHRON_MATTERMOST_BASE_BRANCH` | — | needs `HALIPHRON_MATTERMOST_REPO` |
+| `HALIPHRON_MATTERMOST_RUN_URL` | — | a link to a run in the UI, with `{id}` for the run identifier |
+| `HALIPHRON_MATTERMOST_MAX_POST_RUNES` | `16383` | the server's post length limit; between 1000 and 65535 |
+| `HALIPHRON_MATTERMOST_MAX_THREAD_BYTES` | `65536` | how much thread history is quoted into a prompt |
+
+The process refuses to start when the URL is set and the token or the role is
+missing. A role that does not exist yet is only a warning: every mention is
+refused until it is created. See [connect a Mattermost
+bot](../how-to/connect-a-mattermost-bot.md).
+
 ---
 
 ## Controller

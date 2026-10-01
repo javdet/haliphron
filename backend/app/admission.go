@@ -15,8 +15,8 @@ import (
 
 // Admission: the one path into the system.
 //
-// REST, MCP and Slack all arrive here, and that is the point — three callers
-// with three shapes of request and one set of rules about what a run is
+// REST, MCP and the chat bot all arrive here, and that is the point — three
+// callers with three shapes of request and one set of rules about what a run is
 // allowed to be.
 //
 // It used to begin by writing the prompt into object storage and then insert a
@@ -86,7 +86,7 @@ func (s *Service) Submit(ctx context.Context, req run.SubmitRequest, opts Submit
 		}
 	}
 
-	submitted, err := s.submit(ctx, req)
+	submitted, err := s.submit(ctx, req, nil)
 	if err != nil {
 		// The claim is released so the caller's retry is a retry rather than a
 		// permanent replay of a failure.
@@ -105,7 +105,9 @@ func (s *Service) Submit(ctx context.Context, req run.SubmitRequest, opts Submit
 // still being admitted.
 var ErrSubmissionInFlight = errors.New("app: a request with this idempotency key is in flight")
 
-func (s *Service) submit(ctx context.Context, req run.SubmitRequest) (Submitted, error) {
+// submit admits one run. chat, when set, is the claimed chat message the run
+// answers, linked to it in the run's own insert.
+func (s *Service) submit(ctx context.Context, req run.SubmitRequest, chat *store.ChatTriggerKey) (Submitted, error) {
 	var role *run.Role
 	if req.Role != "" {
 		stored, err := s.store.RoleByName(ctx, req.Role)
@@ -169,6 +171,7 @@ func (s *Service) submit(ctx context.Context, req run.SubmitRequest) (Submitted,
 		MaxCostUSD:     req.MaxCostUSD,
 		ClusterID:      cluster,
 		MaxChildren:    s.defaults.ChildLimit(),
+		ChatTrigger:    chat,
 	}); err != nil {
 		if errors.Is(err, store.ErrTooManyChildren) {
 			// Worth a line of its own: a run that hits this is either a
@@ -226,7 +229,7 @@ func actorKindFor(via string) string {
 	switch via {
 	case "agent":
 		return "agent"
-	case "ui", "slack":
+	case "ui", "slack", "mattermost":
 		return "user"
 	default:
 		return "token"

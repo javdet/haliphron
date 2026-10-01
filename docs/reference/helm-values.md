@@ -196,6 +196,28 @@ timeout below it.
 | `limits.idempotencyTTL` | `24h` |
 | `limits.maxAckExpiries` | `0` — contract default 5 |
 
+### Mattermost bot
+
+| Value | Default | Notes |
+|---|---|---|
+| `mattermost.enabled` | `false` | needs `backend.mode` `all` or `api` |
+| `mattermost.url` | `""` | required when enabled |
+| `mattermost.role` | `""` | required when enabled; anyone who can reach the bot can use it |
+| `mattermost.repo` | `""` | empty runs without a repository |
+| `mattermost.baseBranch` | `""` | needs `mattermost.repo` |
+| `mattermost.runURL` | `""` | must contain `{id}` |
+| `mattermost.token` | `""` | written to the credentials Secret |
+| `mattermost.existingSecret` | `""` | preferred over `token` |
+| `mattermost.existingSecretKey` | `token` | |
+| `mattermost.maxPostRunes` | `16383` | |
+| `mattermost.maxThreadBytes` | `65536` | |
+
+Exactly one of `mattermost.token` and `mattermost.existingSecret` must be set.
+The token is mounted as a file at `/haliphron/mattermost/`. It is read once at
+startup, so a token rotated inside an existing Secret needs a rollout restart.
+With `networkPolicy.enabled`, the Mattermost server has to be added to
+`networkPolicy.egressTo`.
+
 ### Frontend
 
 | Value | Default |

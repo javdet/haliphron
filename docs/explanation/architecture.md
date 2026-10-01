@@ -1,7 +1,7 @@
 # About the architecture
 
 Haliphron runs headless coding agents as one-shot Kubernetes Jobs, on request
-from REST, MCP, Slack or a UI. It is delivered on-prem, single-tenant, as two
+from REST, MCP, a Mattermost bot or a UI. It is delivered on-prem, single-tenant, as two
 Helm charts.
 
 That last sentence does more work than it looks. It is why there are two

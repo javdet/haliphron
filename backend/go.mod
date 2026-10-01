@@ -5,6 +5,7 @@ go 1.25.0
 require (
 	github.com/automagicops/haliphron/api v0.0.0
 	github.com/automagicops/haliphron/db v0.0.0
+	github.com/coder/websocket v1.8.15
 	github.com/jackc/pgx/v5 v5.7.6
 )
 

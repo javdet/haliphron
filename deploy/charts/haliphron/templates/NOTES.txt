@@ -86,6 +86,20 @@ Listeners in this mode:
    Delete it by hand once the data under it is gone.
 {{- end }}
 
+{{- if (include "haliphron.mattermostEnabled" .) }}
+
+   The Mattermost bot connects to {{ .Values.mattermost.url }} and starts runs
+   under role "{{ .Values.mattermost.role }}" for anyone who can reach it.
+   Check that it connected:
+
+   kubectl -n {{ .Release.Namespace }} logs deploy/{{ include "haliphron.fullname" . }} | grep -i mattermost
+{{- if and .Values.networkPolicy.enabled (not .Values.networkPolicy.egressTo) }}
+
+   networkPolicy is enabled with no egressTo, so the backend can resolve the
+   Mattermost server and not reach it. Add the server to networkPolicy.egressTo.
+{{- end }}
+{{- end }}
+
 {{- if .Values.ingress.cluster.enabled }}
 
    The Cluster API is exposed by an Ingress at https://{{ .Values.ingress.cluster.host }}.
