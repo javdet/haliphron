@@ -7,10 +7,10 @@ description: |
 type: application
 
 # The chart's own version. It moves when the templates move.
-version: 0.3.0
+version: 0.4.0
 # The backend it is written against. `helm upgrade` does not imply an image
 # bump: image.tag overrides this.
-appVersion: "0.3.0"
+appVersion: "0.4.0"
 
 keywords:
   - agents
