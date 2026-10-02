@@ -146,6 +146,30 @@ Enabling both for one entrypoint is allowed — it is the normal state
 mid-migration — and the install notes say so, because otherwise it is a service
 reachable two ways with two sets of timeouts and two TLS configurations.
 
+## Monitoring
+
+The backend serves Prometheus metrics at `/metrics` on the health port (9090)
+in every mode. `docs/reference/rest-api.md` lists the series. With
+prometheus-operator installed:
+
+```yaml
+metrics:
+  serviceMonitor:
+    enabled: true
+    labels:
+      release: kube-prometheus-stack   # whatever your Prometheus selects on
+  networkPolicy:
+    # Only when networkPolicy.enabled is set and ingressFrom is narrowed.
+    from:
+      - namespaceSelector:
+          matchLabels:
+            kubernetes.io/metadata.name: monitoring
+```
+
+The series are read from the database, so every replica reports the same
+numbers. Aggregate them with `max without(instance, pod)`, not `sum`. The
+runtime chart's own `serviceMonitor` scrapes the controller.
+
 ## Development
 
 ```sh

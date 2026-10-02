@@ -188,6 +188,51 @@ const deletedClusters = new Set()
 // A refusal the real backend answers with, in its error envelope.
 const conflict = (code, message) => ({ status: 409, error: { code, message } })
 
+const ACTIVE = new Set(['Leased', 'Dispatched', 'Starting', 'Running', 'Unknown'])
+const liveRuns = (runs) => runs.filter((r) => !deletedRuns.has(r.run_id))
+
+// The real backend computes this in SQL; here it is the same arithmetic over
+// the in-memory runs, with created_at standing in for queued_at.
+function runStats(url, runs, clusters) {
+  const since = url.searchParams.get('since')
+  if (since && Number.isNaN(Date.parse(since))) {
+    return { status: 400, error: { code: 'invalid_request', message: 'since must be an RFC 3339 timestamp', field: 'since' } }
+  }
+  const quantile = (xs, q) => {
+    if (!xs.length) return null
+    const s = [...xs].sort((a, b) => a - b)
+    const pos = (s.length - 1) * q
+    const lo = Math.floor(pos)
+    return s[lo] + (s[Math.ceil(pos)] - s[lo]) * (pos - lo)
+  }
+  const secs = (from, to) => (Date.parse(to) - Date.parse(from)) / 1000
+  const groups = new Map()
+  for (const r of liveRuns(runs)) {
+    if (since && Date.parse(r.created_at) < Date.parse(since)) continue
+    const id = r.cluster_id ?? null
+    if (!groups.has(id)) groups.set(id, [])
+    groups.get(id).push(r)
+  }
+  return {
+    since: since ?? null,
+    clusters: [...groups].map(([id, rs]) => {
+      const counts = {}
+      for (const r of rs) counts[r.status] = (counts[r.status] ?? 0) + 1
+      const started = rs.filter((r) => r.started_at)
+      const durations = started.filter((r) => r.finished_at).map((r) => secs(r.started_at, r.finished_at))
+      const waits = started.map((r) => secs(r.created_at, r.started_at))
+      return {
+        cluster_id: id,
+        cluster_name: clusters.find((c) => c.cluster_id === id)?.name ?? '',
+        counts,
+        total: rs.length,
+        duration_seconds: { p50: quantile(durations, 0.5), p95: quantile(durations, 0.95) },
+        queue_wait_seconds: { p50: quantile(waits, 0.5), p95: quantile(waits, 0.95) },
+      }
+    }),
+  }
+}
+
 const routes = [
   ['GET', /^\/api\/v1\/runs$/, (_m, url, { runs }) => {
     const wanted = url.searchParams.getAll('status')
@@ -222,9 +267,17 @@ const routes = [
   ['POST', /^\/api\/v1\/runs\/([^/]+)\/(cancel|retry)$/, (m, _u, { runs }) => runs.find((r) => r.run_id === m[1]) ?? 404],
   ['POST', /^\/api\/v1\/runs$/, (_m, _u, { runs }) => runs[0]],
   ['GET', /^\/api\/v1\/roles$/, (_m, _u, { roles }) => ({ roles })],
-  ['GET', /^\/api\/v1\/clusters$/, (_m, _u, { clusters }) => ({
-    clusters: clusters.filter((c) => !deletedClusters.has(c.cluster_id)),
+  ['GET', /^\/api\/v1\/clusters$/, (_m, _u, { runs, clusters }) => ({
+    clusters: clusters
+      .filter((c) => !deletedClusters.has(c.cluster_id))
+      .map((c) => ({
+        ...c,
+        active_runs: liveRuns(runs).filter(
+          (r) => r.cluster_id === c.cluster_id && ACTIVE.has(r.status),
+        ).length,
+      })),
   })],
+  ['GET', /^\/api\/v1\/stats\/runs$/, (_m, url, { runs, clusters }) => runStats(url, runs, clusters)],
   ['DELETE', /^\/api\/v1\/clusters\/([^/]+)$/, (m, _u, { runs, clusters }) => {
     const cluster = clusters.find((c) => c.cluster_id === m[1])
     if (!cluster || deletedClusters.has(m[1])) return 404

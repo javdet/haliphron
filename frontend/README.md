@@ -31,12 +31,12 @@ is the one component that has to change when that arrives.
 | Runs | Filter by status, role, agent and text; submit a run; delete a finished run; page with the `before` cursor |
 | Run | Status, accounting, source; result, logs and the attempt ledger; cancel, retry, delete |
 | Clusters | Registered clusters with heartbeat and slots; revoke; delete a revoked one no run ran on; mint bootstrap tokens |
+| Statistics | Runs per cluster and status over 24 hours, 7 days, 30 days or all time; duration and queue-wait p50/p95; active runs, free slots and heartbeat per cluster |
 | Roles | Create, edit and soft-delete role specs |
 | Secrets | The model credential and the git token, each with its own card; list, add and rotate the rest. Values are never shown because the API never returns them |
 | Tokens | List, mint and revoke API tokens; remove revoked or expired ones |
 
-Not covered, because the backend has none of it: workflows, statistics and
-audit. Logs are polled rather than streamed — the API pages over chunks and
+Not covered, because the backend has none of it: workflows and audit. Logs are polled rather than streamed — the API pages over chunks and
 offers no SSE.
 
 ## Working on it

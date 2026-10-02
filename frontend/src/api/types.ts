@@ -254,10 +254,33 @@ export interface Cluster {
   runtimes?: string[]
   capacity_slots: number
   free_slots: number
+  /** Runs the backend believes are on the cluster now. */
+  active_runs: number
   quota_exhausted: boolean
   registered_at: string
   last_heartbeat_at?: string
   revoked_reason?: string
+}
+
+/** A p50 and a p95, in seconds; null when nothing in the window was measured. */
+export interface Quantiles {
+  p50: number | null
+  p95: number | null
+}
+
+/** One cluster's runs in a window. cluster_id is null for runs no cluster has taken. */
+export interface ClusterRunStats {
+  cluster_id: string | null
+  cluster_name: string
+  counts: Partial<Record<RunStatus, number>>
+  total: number
+  duration_seconds: Quantiles
+  queue_wait_seconds: Quantiles
+}
+
+export interface RunStats {
+  since: string | null
+  clusters: ClusterRunStats[]
 }
 
 export interface BootstrapToken {

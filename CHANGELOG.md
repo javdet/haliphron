@@ -7,6 +7,23 @@ of `VERSION`, and it is the tag of the published images.
 
 ### Added
 
+- **Run statistics.** The UI has a Statistics page. It shows run counts per
+  cluster and status over 24 hours, 7 days, 30 days or all time. It also shows
+  p50 and p95 run duration and queue wait per cluster, and each cluster's
+  active runs, free slots and heartbeat. A count links to the runs behind it.
+  The data comes from `GET /api/v1/stats/runs` (`runs:read`, optional
+  `since`), and `GET /api/v1/clusters` gains `active_runs`.
+- **Prometheus metrics.** The backend serves `/metrics` on the health port.
+  The series are run counts by cluster and status, duration and queue-wait
+  histograms, and cluster capacity, free slots, active runs, heartbeat and
+  status. They are read from the database, so aggregate them with
+  `max without(instance, pod)`.
+  - `metrics.serviceMonitor.enabled` now scrapes a real endpoint. The chart
+    gains `metrics.serviceMonitor.metricRelabelings`, and
+    `metrics.networkPolicy.from` for letting Prometheus through a narrowed
+    `networkPolicy`.
+  - The backend gains one dependency, `github.com/prometheus/client_golang`.
+
 - **Mattermost bot.** When `mattermost.enabled` is set, the backend connects to
   a Mattermost server as a bot account. A message that mentions the bot, or
   any direct message to it, starts a run under the role in `mattermost.role`.

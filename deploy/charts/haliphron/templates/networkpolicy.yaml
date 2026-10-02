@@ -30,6 +30,13 @@ spec:
         - port: {{ .Values.service.ports.api }}
           protocol: TCP
     {{- end }}
+    {{- with .Values.metrics.networkPolicy.from }}
+    # Prometheus, to /metrics on the health port and nothing else.
+    - from: {{- toYaml . | nindent 8 }}
+      ports:
+        - port: {{ $.Values.service.ports.health }}
+          protocol: TCP
+    {{- end }}
   egress:
     # DNS first and unconditionally. A policy that forgets it fails in a way
     # that looks like every dependency being down at once.

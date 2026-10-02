@@ -21,7 +21,7 @@ import type { BootstrapTokenSecret, Cluster } from '../api/types'
 // timings to a browser; if that default moves, this moves with it.
 const STALE_AFTER_MS = 90_000
 
-function isStale(cluster: Cluster): boolean {
+export function isStale(cluster: Cluster): boolean {
   if (!cluster.last_heartbeat_at) return true
   return Date.now() - new Date(cluster.last_heartbeat_at).getTime() > STALE_AFTER_MS
 }

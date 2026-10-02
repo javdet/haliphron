@@ -319,8 +319,12 @@ Scope: `runs:read`.
 
 Each entry carries `cluster_id`, `name`, `labels`, `status`,
 `agent_namespace`, `controller_version`, `k8s_version`, `runtimes`,
-`capacity_slots`, `free_slots`, `quota_exhausted`, `registered_at`,
-`last_heartbeat_at` and `revoked_reason`.
+`capacity_slots`, `free_slots`, `active_runs`, `quota_exhausted`,
+`registered_at`, `last_heartbeat_at` and `revoked_reason`.
+
+`active_runs` is what the backend believes is on the cluster now: runs that
+are `Leased`, `Dispatched`, `Starting`, `Running` or `Unknown`. `free_slots`
+is what the cluster itself last reported. The two can disagree for a moment.
 
 No key material is returned.
 
@@ -366,6 +370,52 @@ to `reregister`. If its bootstrap token still has uses left and has not
 expired, it comes back as a new cluster. Uninstall the controller first.
 
 ---
+
+## Statistics
+
+### `GET /api/v1/stats/runs`
+
+Scope: `runs:read`. Counts runs per cluster and status.
+
+| Query | Meaning |
+|---|---|
+| `since` | optional, RFC 3339. Counts only runs created at or after it. If you leave it out, every run is counted. A malformed value is a `400` with `field: "since"`. |
+
+```json
+{
+  "since": "2026-09-25T00:00:00Z",
+  "clusters": [
+    {
+      "cluster_id": "01JD7A0000CLUSTEREUWEST1",
+      "cluster_name": "prod-eu-west-1",
+      "counts": {"Succeeded": 12, "Failed": 3, "CompletedWithoutResult": 1, "Running": 2},
+      "total": 18,
+      "duration_seconds": {"p50": 412.0, "p95": 1730.5},
+      "queue_wait_seconds": {"p50": 2.1, "p95": 30.0}
+    },
+    {
+      "cluster_id": null,
+      "cluster_name": "",
+      "counts": {"Queued": 1},
+      "total": 1,
+      "duration_seconds": {"p50": null, "p95": null},
+      "queue_wait_seconds": {"p50": null, "p95": null}
+    }
+  ]
+}
+```
+
+- **Status.** `counts` is keyed by reported status, the same value a run
+  object shows. A terminal run whose completion never arrived counts as
+  `CompletedWithoutResult`, not as the phase it ended in. A status with no
+  runs is absent from `counts`.
+- **Unplaced runs.** Runs no cluster has taken yet are grouped under
+  `cluster_id: null`.
+- **`duration_seconds`.** Measured from the first `Running` observation to the
+  end, over runs that finished.
+- **`queue_wait_seconds`.** Measured from being queued, or queued again by a
+  retry, to `Running`, over runs that started.
+- Both are `null` when nothing in the window was measured.
 
 ## Secrets
 
@@ -521,4 +571,39 @@ Served on the health port, outside `/api/v1`, and requiring no token.
 | `GET /readyz` | the process is ready to serve |
 | `GET /version` | the build |
 
-The backend exposes no Prometheus metrics. The controller does.
+| `GET /metrics` | Prometheus metrics, below |
+
+### Prometheus metrics
+
+The run and cluster series are read from PostgreSQL at scrape time, not counted
+in process. Every replica therefore reports the same values, so aggregate them
+with `max without(instance, pod)`, never `sum`. A scrape result is cached for
+15 seconds.
+
+| Metric | Type | Labels | Meaning |
+|---|---|---|---|
+| `haliphron_runs` | gauge | `cluster`, `status` | Runs in the store. `status` is the reported status. `cluster` is `""` for runs not yet placed. It is a gauge because deleting a run lowers it. |
+| `haliphron_run_duration_seconds` | histogram | `cluster` | First `Running` to the end, for finished runs |
+| `haliphron_run_queue_wait_seconds` | histogram | `cluster` | Queued to `Running`, for started runs |
+| `haliphron_cluster_active_runs` | gauge | `cluster` | `Leased` through `Running`, plus `Unknown` |
+| `haliphron_cluster_capacity_slots` | gauge | `cluster` | As last reported by the cluster |
+| `haliphron_cluster_free_slots` | gauge | `cluster` | As last reported by the cluster |
+| `haliphron_cluster_last_heartbeat_timestamp_seconds` | gauge | `cluster` | Unix time of the last heartbeat |
+| `haliphron_cluster_status` | gauge | `cluster`, `status` | `1` for the cluster's status, `0` for the other three |
+| `haliphron_stats_up` | gauge | | `0` when the database could not be read. In that case the series above are absent from that scrape. |
+
+The Go runtime (`go_*`) and process (`process_*`) collectors are included.
+The controller exposes its own metrics, on its own metrics port.
+
+Some queries:
+
+```promql
+# runs finished per hour, by cluster and status
+sum by (cluster, status) (delta(max without(instance, pod) (haliphron_runs{status=~"Succeeded|Failed|TimedOut|Cancelled|CompletedWithoutResult"})[1h:]))
+
+# p95 run duration per cluster over the last day
+histogram_quantile(0.95, sum by (cluster, le) (delta(max without(instance, pod) (haliphron_run_duration_seconds_bucket)[1d:])))
+
+# a cluster that has not heartbeated for five minutes
+time() - max without(instance, pod) (haliphron_cluster_last_heartbeat_timestamp_seconds) > 300
+```

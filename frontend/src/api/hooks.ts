@@ -26,6 +26,7 @@ import {
   type Role,
   type Run,
   type RunList,
+  type RunStats,
   type Secret,
 } from './types'
 
@@ -47,6 +48,7 @@ export const keys = {
   result: (id: string, key?: string) => ['run', id, 'result', key ?? ''] as const,
   roles: () => ['roles'] as const,
   clusters: () => ['clusters'] as const,
+  runStats: (since: string | null) => ['stats', 'runs', since ?? 'all'] as const,
   bootstrapTokens: () => ['bootstrap-tokens'] as const,
   tokens: () => ['tokens'] as const,
   secrets: () => ['secrets'] as const,
@@ -237,6 +239,16 @@ export function useClusters() {
     queryKey: keys.clusters(),
     queryFn: ({ signal }) =>
       request<{ clusters: Cluster[] }>('/clusters', { signal }).then((r) => r.clusters),
+    refetchInterval: 15000,
+  })
+}
+
+/** Run counts per cluster and status, created since a moment (or ever, given null). */
+export function useRunStats(since: string | null) {
+  return useQuery({
+    queryKey: keys.runStats(since),
+    queryFn: ({ signal }) =>
+      request<RunStats>('/stats/runs', { signal, query: since ? { since } : undefined }),
     refetchInterval: 15000,
   })
 }

@@ -28,9 +28,18 @@ httpRoute:
         sectionName: https
 metrics:
   serviceMonitor:
-    # Rendered in lint so the template is exercised. See values.yaml: the
-    # backend has no /metrics endpoint yet, so this stays off in real values.
+    # Rendered in lint so the template is exercised.
     enabled: true
+    metricRelabelings:
+      - action: drop
+        sourceLabels: [__name__]
+        regex: go_gc_.*
+  networkPolicy:
+    # Rendered so the scrape rule in networkpolicy.yaml is exercised.
+    from:
+      - namespaceSelector:
+          matchLabels:
+            kubernetes.io/metadata.name: monitoring
 frontend:
   # Rendered in lint so the UI templates, and the API entrypoint's switch to
   # routing through them, are both exercised.

@@ -678,19 +678,34 @@ priorityClassName: ""
 # -----------------------------------------------------------------------------
 # Observability
 # -----------------------------------------------------------------------------
+#
+# The backend serves Prometheus metrics at /metrics on the health port, in
+# every mode: run counts per cluster and status, run duration and queue-wait
+# histograms, and each cluster's capacity, free slots, active runs, heartbeat
+# and status. They are read from PostgreSQL, so every replica reports the same
+# values — aggregate with max without(instance, pod), never sum. See
+# docs/reference/rest-api.md for the series.
 metrics:
   serviceMonitor:
-    # Off, and it has to be: the backend serves /healthz, /readyz and /version
-    # on the health port and does not serve /metrics yet. Enabling this points
-    # Prometheus at a 404. The template ships so that the day the endpoint
-    # lands, turning it on is a value and not a chart change.
+    # Off by default only because the ServiceMonitor CRD (prometheus-operator)
+    # may not be installed; the install fails on a cluster without it.
     enabled: false
     # Empty installs it beside the release.
     namespace: ""
     interval: 30s
     scrapeTimeout: 10s
+    # Extra labels on the ServiceMonitor, for a Prometheus whose
+    # serviceMonitorSelector matches on one (often release: <prometheus>).
     labels: {}
     relabelings: []
+    metricRelabelings: []
+  networkPolicy:
+    # Who may scrape the health port when networkPolicy.enabled is set and
+    # ingressFrom is narrowed to the ingress controller. Opens that port alone.
+    from: []
+    #  - namespaceSelector:
+    #      matchLabels:
+    #        kubernetes.io/metadata.name: monitoring
 
 # -----------------------------------------------------------------------------
 # Network policy

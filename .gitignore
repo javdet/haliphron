@@ -13,7 +13,7 @@ deploy/compose/config.yaml
 # Compiled backend binaries (built into images, never committed)
 backend/nib
 backend/toolcatalog
-
+.playwright-mcp/
 # Runtime data now lives in a Docker volume, not the working tree.
 # Image defaults are seeded from backend/seed/.
 data/

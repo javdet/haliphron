@@ -68,6 +68,8 @@ func (s *Server) Handler() http.Handler {
 	// tells it to: erasing the record of runs is not a thing it gets to do.
 	mux.HandleFunc("DELETE "+BasePath+"/runs/{id}", s.scoped(store.ScopeAdmin, s.deleteRun))
 
+	mux.HandleFunc("GET "+BasePath+"/stats/runs", s.scoped(store.ScopeRunsRead, s.runStats))
+
 	mux.HandleFunc("GET "+BasePath+"/roles", s.scoped(store.ScopeRunsRead, s.listRoles))
 	mux.HandleFunc("PUT "+BasePath+"/roles/{name}", s.scoped(store.ScopeAdmin, s.putRole))
 	mux.HandleFunc("GET "+BasePath+"/roles/{name}", s.scoped(store.ScopeRunsRead, s.getRole))

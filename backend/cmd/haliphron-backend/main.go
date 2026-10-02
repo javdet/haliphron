@@ -28,6 +28,7 @@ import (
 	"github.com/automagicops/haliphron/backend/config"
 	"github.com/automagicops/haliphron/backend/mattermost"
 	"github.com/automagicops/haliphron/backend/mcp"
+	"github.com/automagicops/haliphron/backend/metrics"
 	"github.com/automagicops/haliphron/backend/restapi"
 	"github.com/automagicops/haliphron/backend/store"
 	"github.com/automagicops/haliphron/backend/version"
@@ -197,7 +198,7 @@ func run() error {
 	if cfg.Mode.Serves(config.ModeCluster) {
 		serve("cluster-api", cfg.ClusterAddr, clusterapi.New(service, log).Handler())
 	}
-	serve("health", cfg.MetricsAddr, healthHandler(db))
+	serve("health", cfg.MetricsAddr, healthHandler(db, metrics.Handler(service, log)))
 
 	// The scanners run wherever the Cluster API does: they are the other half
 	// of the same deadlines. In a split deployment the api and mcp processes do
@@ -279,14 +280,18 @@ func startMattermost(ctx context.Context, wg *sync.WaitGroup, cfg config.Config,
 	go func() { defer wg.Done(); chat.RunReplier(ctx, 5*time.Second) }()
 }
 
-// healthHandler answers the two probes.
+// healthHandler answers the two probes, and serves /metrics beside them.
 //
 // They are deliberately different: liveness says the process is running, and
 // readiness says it can serve, which here means the database answers. A
 // liveness probe that checks the database restarts every replica during a
 // failover, turning a database blip into an outage.
-func healthHandler(db *store.Store) http.Handler {
+//
+// /metrics is here rather than on a listener of its own because this is the one
+// listener every mode runs, and the port the chart's ServiceMonitor scrapes.
+func healthHandler(db *store.Store, metricsHandler http.Handler) http.Handler {
 	mux := http.NewServeMux()
+	mux.Handle("GET /metrics", metricsHandler)
 	mux.HandleFunc("GET /healthz", func(w http.ResponseWriter, _ *http.Request) {
 		w.WriteHeader(http.StatusOK)
 		_, _ = w.Write([]byte("ok\n"))

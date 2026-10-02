@@ -98,21 +98,26 @@ type clusterResponse struct {
 	Runtimes          []string          `json:"runtimes,omitempty"`
 	CapacitySlots     int32             `json:"capacity_slots"`
 	FreeSlots         int32             `json:"free_slots"`
-	QuotaExhausted    bool              `json:"quota_exhausted"`
-	RegisteredAt      time.Time         `json:"registered_at"`
-	LastHeartbeatAt   *time.Time        `json:"last_heartbeat_at,omitempty"`
-	RevokedReason     string            `json:"revoked_reason,omitempty"`
+	// ActiveRuns is what the backend believes is on the cluster now, Leased
+	// through Running and Unknown — beside free_slots, which is what the
+	// cluster itself last said.
+	ActiveRuns      int64      `json:"active_runs"`
+	QuotaExhausted  bool       `json:"quota_exhausted"`
+	RegisteredAt    time.Time  `json:"registered_at"`
+	LastHeartbeatAt *time.Time `json:"last_heartbeat_at,omitempty"`
+	RevokedReason   string     `json:"revoked_reason,omitempty"`
 }
 
 func (s *Server) listClusters(w http.ResponseWriter, r *http.Request, _ caller) {
-	clusters, err := s.app.Store().ListClusters(r.Context())
+	clusters, err := s.app.ClusterHealth(r.Context())
 	if err != nil {
 		s.failFor(w, r, err)
 		return
 	}
 
 	items := make([]clusterResponse, 0, len(clusters))
-	for _, c := range clusters {
+	for _, h := range clusters {
+		c := h.Cluster
 		runtimes := make([]string, 0, len(c.Runtimes))
 		for _, rt := range c.Runtimes {
 			runtimes = append(runtimes, string(rt))
@@ -124,6 +129,7 @@ func (s *Server) listClusters(w http.ResponseWriter, r *http.Request, _ caller) 
 			CapacitySlots: c.CapacitySlots, FreeSlots: c.FreeSlots,
 			QuotaExhausted: c.QuotaExhausted, RegisteredAt: c.RegisteredAt,
 			LastHeartbeatAt: c.LastHeartbeatAt, RevokedReason: c.RevokedReason,
+			ActiveRuns: h.ActiveRuns,
 		})
 	}
 	// No public key here, and no credential of any kind: there is none to

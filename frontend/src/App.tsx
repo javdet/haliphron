@@ -5,6 +5,7 @@ import { gitProblems } from './api/gitToken'
 import { RunsPage } from './pages/RunsPage'
 import { RunDetailPage } from './pages/RunDetailPage'
 import { ClustersPage } from './pages/ClustersPage'
+import { StatsPage } from './pages/StatsPage'
 import { RolesPage } from './pages/RolesPage'
 import { TokensPage } from './pages/TokensPage'
 import { SecretsPage } from './pages/SecretsPage'
@@ -23,6 +24,7 @@ function Sidebar() {
       <nav className="nav">
         <NavLink to="/runs">Runs</NavLink>
         <NavLink to="/clusters">Clusters</NavLink>
+        <NavLink to="/stats">Statistics</NavLink>
         <div className="nav-group">
           <h3>Configuration</h3>
         </div>
@@ -148,6 +150,7 @@ export default function App() {
           <Route path="/runs" element={<RunsPage />} />
           <Route path="/runs/:id" element={<RunDetailPage />} />
           <Route path="/clusters" element={<ClustersPage />} />
+          <Route path="/stats" element={<StatsPage />} />
           <Route path="/roles" element={<RolesPage />} />
           <Route path="/secrets" element={<SecretsPage />} />
           <Route path="/tokens" element={<TokensPage />} />
