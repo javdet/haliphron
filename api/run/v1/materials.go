@@ -18,6 +18,15 @@ const (
 	// It holds either a provider API key or a Claude subscription OAuth
 	// token; IsClaudeOAuthToken tells them apart.
 	SecretKeyLLMAPIKey = "llm-api-key"
+	// SecretKeyLLMBaseURL is the root of the gateway the model key belongs
+	// to, such as https://openrouter.ai/api, and is absent when the CLIs talk
+	// to their own provider. NormalizeModelEndpoint defines the form.
+	//
+	// Not a credential, and in the Secret anyway: it travels beside the key
+	// it belongs to, in the same lease and the same object, so a pod can never
+	// pair a new key with an old endpoint. An Anthropic key sent to a gateway
+	// is a key handed to a third party.
+	SecretKeyLLMBaseURL = "llm-base-url"
 	// SecretKeyMCPConfig holds the rendered MCP configuration including header
 	// values, which is why it is a secret and not a ConfigMap.
 	SecretKeyMCPConfig = "mcp.json"

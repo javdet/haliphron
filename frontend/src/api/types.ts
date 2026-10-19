@@ -352,6 +352,11 @@ export interface ModelCredential {
   /** Absent when the value is not there to classify: a reference, or undecryptable. */
   type?: ModelCredentialType
   ref?: string
+  /**
+   * The root of the gateway the key belongs to, such as https://openrouter.ai/api.
+   * Absent when the CLIs talk to their own providers.
+   */
+  base_url?: string
   updated_at?: string
   /** Why a stored credential will not reach a pod. */
   problem?: string

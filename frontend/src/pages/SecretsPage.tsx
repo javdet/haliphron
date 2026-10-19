@@ -35,19 +35,44 @@ function mismatch(type: ModelCredentialType, value: string): string | undefined 
   return undefined
 }
 
+/** What is wrong with a gateway endpoint, before the backend says the same. Empty is no gateway. */
+function endpointProblem(raw: string): string | undefined {
+  const v = raw.trim()
+  if (!v) return undefined
+  let u: URL
+  try {
+    u = new URL(v)
+  } catch {
+    return 'Not a URL. Start it with https://, for example https://openrouter.ai/api.'
+  }
+  if (u.protocol !== 'https:' && u.protocol !== 'http:') return 'Use an http or https URL.'
+  if (u.username || u.password) return 'No credentials in the URL; the key goes in the field above.'
+  if (u.search || u.hash) return 'No query or fragment.'
+  if (/\/v1\/?$/.test(u.pathname)) return 'The gateway’s root, without /v1 — the CLIs add it themselves.'
+  return undefined
+}
+
 function ModelCredentialDialog({ current, onClose }: { current?: ModelCredential; onClose: () => void }) {
   const put = usePutModelCredential()
   const [type, setType] = useState<ModelCredentialType>(current?.type ?? 'api_key')
   const [kind, setKind] = useState<Kind>(current?.kind === 'referenced' ? 'referenced' : 'managed')
   const [value, setValue] = useState('')
   const [ref, setRef] = useState(current?.ref ?? '')
+  const [baseURL, setBaseURL] = useState(current?.base_url ?? '')
 
   const wrong = kind === 'managed' ? mismatch(type, value) : undefined
-  const ready = (kind === 'managed' ? value.trim().length > 0 && !wrong : ref.trim().length > 0)
+  // A subscription token is good at Anthropic only, so it never has a gateway.
+  const endpoint = type === 'api_key' ? baseURL.trim() : ''
+  const badEndpoint = endpointProblem(endpoint)
+  const ready = (kind === 'managed' ? value.trim().length > 0 && !wrong : ref.trim().length > 0) && !badEndpoint
 
   const save = () =>
     put.mutate(
-      kind === 'managed' ? { type, value: value.trim() } : { type, ref: ref.trim() },
+      {
+        type,
+        ...(kind === 'managed' ? { value: value.trim() } : { ref: ref.trim() }),
+        ...(endpoint ? { base_url: endpoint } : {}),
+      },
       { onSuccess: onClose },
     )
 
@@ -126,6 +151,21 @@ function ModelCredentialDialog({ current, onClose }: { current?: ModelCredential
           <input value={ref} onChange={(e) => setRef(e.target.value)} placeholder="vault://kv/data/agents#llm" />
         </Field>
       )}
+
+      {type === 'api_key' && (
+        <Field
+          label="Gateway endpoint (optional)"
+          error={badEndpoint}
+          hint="Empty for Anthropic or OpenAI directly. For OpenRouter: https://openrouter.ai/api, with models named by their OpenRouter slug (anthropic/claude-opus-5). Saved with the key; replacing the key without it clears it."
+        >
+          <input
+            value={baseURL}
+            autoComplete="off"
+            placeholder="https://openrouter.ai/api"
+            onChange={(e) => setBaseURL(e.target.value)}
+          />
+        </Field>
+      )}
     </Dialog>
   )
 }
@@ -177,6 +217,14 @@ function ModelCredentialCard() {
             </dd>
             <dt>Type</dt>
             <dd>{c.type ? TYPE_LABEL[c.type] : '—'}</dd>
+            <dt>Endpoint</dt>
+            <dd>
+              {c.base_url ? (
+                <span className="mono small">{c.base_url}</span>
+              ) : (
+                <span className="small muted">the provider’s own</span>
+              )}
+            </dd>
             <dt>Stored as</dt>
             <dd>
               <span className="mono small">{c.secret_name || '—'}</span>

@@ -198,6 +198,203 @@ func TestAClaudeOAuthTokenIsRefusedForCodexBeforeTheModel(t *testing.T) {
 	}
 }
 
+// --- model gateway ----------------------------------------------------------
+
+const gateway = "https://openrouter.ai/api"
+
+// A gateway such as OpenRouter authenticates a bearer token at its own root and
+// routes by the qualified model name. claude-code gets the root, the key as the
+// bearer token, ANTHROPIC_API_KEY explicitly empty — set, it would be sent
+// instead — and every model class pinned to the run's model, because the
+// CLI's own background defaults are bare Anthropic names a gateway does not
+// route.
+func TestClaudeReachesAGatewayWithTheBearerTokenAndTheQualifiedModel(t *testing.T) {
+	t.Parallel()
+	const key = "sk-or-v1-an-openrouter-key-for-this-test"
+	h := newHarness(t, controlplane.RunRequest{
+		Prompt: "hello",
+		Agent:  runv1.AgentClaudeCode,
+		Model:  "anthropic/claude-opus-5",
+		Secrets: map[string]string{
+			runv1.SecretKeyLLMAPIKey:  key,
+			runv1.SecretKeyLLMBaseURL: gateway + "/\n",
+		},
+	})
+	h.commander.handle = agentScript(h, "done", "")
+
+	run, code := h.executeRun()
+	if code != runv1.ExitSuccess {
+		t.Fatalf("exit %d (%v)", code, run.Failure())
+	}
+	env := claudeLaunchEnv(t, h)
+	for name, want := range map[string]string{
+		"ANTHROPIC_BASE_URL":             gateway,
+		"ANTHROPIC_AUTH_TOKEN":           key,
+		"ANTHROPIC_API_KEY":              "",
+		"ANTHROPIC_MODEL":                "anthropic/claude-opus-5",
+		"ANTHROPIC_DEFAULT_OPUS_MODEL":   "anthropic/claude-opus-5",
+		"ANTHROPIC_DEFAULT_SONNET_MODEL": "anthropic/claude-opus-5",
+		"ANTHROPIC_DEFAULT_HAIKU_MODEL":  "anthropic/claude-opus-5",
+		"ANTHROPIC_SMALL_FAST_MODEL":     "anthropic/claude-opus-5",
+	} {
+		got, ok := env[name]
+		if !ok || got != want {
+			t.Errorf("%s = %q (set: %v), want %q", name, got, ok, want)
+		}
+	}
+	if args := lastClaudeArgs(t, h); !containsPair(args, "--model", "anthropic/claude-opus-5") {
+		t.Errorf("claude was not launched with the qualified model: %v", args)
+	}
+}
+
+// Without a gateway nothing changes: the provider gets its bare model name and
+// no base URL is set, so the CLI's own default endpoint is used.
+func TestClaudeTalksToItsOwnProviderWhenThereIsNoGateway(t *testing.T) {
+	t.Parallel()
+	h := newHarness(t, controlplane.RunRequest{
+		Prompt: "hello",
+		Agent:  runv1.AgentClaudeCode,
+		Model:  "anthropic/claude-opus-5",
+	})
+	h.commander.handle = agentScript(h, "done", "")
+
+	run, code := h.executeRun()
+	if code != runv1.ExitSuccess {
+		t.Fatalf("exit %d (%v)", code, run.Failure())
+	}
+	env := claudeLaunchEnv(t, h)
+	if v, ok := env["ANTHROPIC_BASE_URL"]; ok {
+		t.Errorf("ANTHROPIC_BASE_URL = %q, want it unset", v)
+	}
+	if env["ANTHROPIC_MODEL"] != "claude-opus-5" {
+		t.Errorf("ANTHROPIC_MODEL = %q, want the bare name", env["ANTHROPIC_MODEL"])
+	}
+}
+
+// codex is told about the gateway on its command line: a provider whose base is
+// the root plus /v1, speaking the Responses API, keyed by the variable Env
+// already sets, and selected.
+func TestCodexReachesAGatewayAsAModelProviderOfItsOwn(t *testing.T) {
+	t.Parallel()
+	h := newHarness(t, controlplane.RunRequest{
+		Prompt: "hello",
+		Agent:  runv1.AgentCodex,
+		Model:  "openai/gpt-5.5",
+		Secrets: map[string]string{
+			runv1.SecretKeyLLMAPIKey:  "sk-or-v1-an-openrouter-key",
+			runv1.SecretKeyLLMBaseURL: gateway,
+		},
+	})
+	h.commander.handle = agentScript(h, "done", "")
+
+	run, code := h.executeRun()
+	if code != runv1.ExitSuccess {
+		t.Fatalf("exit %d (%v)", code, run.Failure())
+	}
+	var exec []string
+	for _, c := range h.commander.invocations("codex") {
+		if len(c.Args) > 0 && c.Args[0] == "exec" {
+			exec = c.Args
+		}
+	}
+	if exec == nil {
+		t.Fatal("codex was never launched")
+	}
+	for _, want := range []string{
+		`model_provider="haliphron-gateway"`,
+		`model_providers.haliphron-gateway.base_url="https://openrouter.ai/api/v1"`,
+		`model_providers.haliphron-gateway.env_key="OPENAI_API_KEY"`,
+		`model_providers.haliphron-gateway.wire_api="responses"`,
+	} {
+		if !containsPair(exec, "-c", want) {
+			t.Errorf("codex was not given -c %s: %v", want, exec)
+		}
+	}
+	if !containsPair(exec, "-m", "openai/gpt-5.5") {
+		t.Errorf("codex was not launched with the qualified model: %v", exec)
+	}
+}
+
+// A subscription token is good at Anthropic only. Paired with a gateway it
+// would be handed to whoever runs the gateway, so the pair is refused before
+// any model call even though the backend refuses to store it.
+func TestAClaudeOAuthTokenIsNeverSentToAGateway(t *testing.T) {
+	t.Parallel()
+	h := newHarness(t, controlplane.RunRequest{
+		Prompt: "hello",
+		Agent:  runv1.AgentClaudeCode,
+		Secrets: map[string]string{
+			runv1.SecretKeyLLMAPIKey:  "sk-ant-oat01-a-subscription-token",
+			runv1.SecretKeyLLMBaseURL: gateway,
+		},
+	})
+	h.commander.handle = agentScript(h, "done", "")
+
+	run, code := h.executeRun()
+	if code != runv1.ExitConfig {
+		t.Fatalf("exit %d, want %d (%v)", code, runv1.ExitConfig, run.Failure())
+	}
+	if f := run.Failure(); f == nil || f.Reason != "CredentialMismatch" {
+		t.Errorf("failure %v, want reason CredentialMismatch", f)
+	}
+	for _, c := range h.commander.invocations("claude") {
+		if len(c.Args) > 0 && c.Args[0] == "-p" {
+			t.Fatal("claude was launched with a token bound for a gateway")
+		}
+	}
+}
+
+func TestAMalformedGatewayEndpointFailsLoadingAndNamesTheKey(t *testing.T) {
+	t.Parallel()
+	for _, endpoint := range []string{
+		"openrouter.ai/api",
+		"https://openrouter.ai/api/v1",
+		"https://user:pass@openrouter.ai/api",
+		"ftp://openrouter.ai/api",
+	} {
+		t.Run(endpoint, func(t *testing.T) {
+			t.Parallel()
+			h := newHarness(t, controlplane.RunRequest{
+				Prompt:  "hello",
+				Secrets: map[string]string{runv1.SecretKeyLLMBaseURL: endpoint},
+			})
+			f := h.loadFails()
+			if f.Code != runv1.ExitConfig {
+				t.Fatalf("exit %d, want %d", f.Code, runv1.ExitConfig)
+			}
+			if !strings.Contains(f.Message(), runv1.SecretKeyLLMBaseURL) {
+				t.Errorf("the message does not name %s: %s", runv1.SecretKeyLLMBaseURL, f.Message())
+			}
+		})
+	}
+}
+
+// lastClaudeArgs is the argument list of the agent launch, not of the MCP or
+// plugin commands claude is also run for.
+func lastClaudeArgs(t *testing.T, h *harness) []string {
+	t.Helper()
+	var args []string
+	for _, c := range h.commander.invocations("claude") {
+		if len(c.Args) > 0 && c.Args[0] == "-p" {
+			args = c.Args
+		}
+	}
+	if args == nil {
+		t.Fatal("claude was never launched")
+	}
+	return args
+}
+
+// containsPair reports whether flag is immediately followed by value.
+func containsPair(args []string, flag, value string) bool {
+	for i := 0; i+1 < len(args); i++ {
+		if args[i] == flag && args[i+1] == value {
+			return true
+		}
+	}
+	return false
+}
+
 // --- prompt and storage -----------------------------------------------------
 
 func TestAPromptDigestMismatchNeverCallsTheModel(t *testing.T) {

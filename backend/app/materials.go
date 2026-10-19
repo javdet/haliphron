@@ -89,10 +89,15 @@ func (s *Service) materials(ctx context.Context, runID runv1.ULID, spec runv1.Re
 	}
 
 	if name := s.limits.LLMAPIKeySecret; name != "" {
-		value, err := s.store.ResolveSecret(ctx, name)
+		// The key and its endpoint come out of one read, so a lease never
+		// pairs a new key with an old endpoint.
+		value, endpoint, err := s.store.ResolveCredential(ctx, name)
 		switch {
 		case err == nil:
 			secrets[runv1.SecretKeyLLMAPIKey] = string(value)
+			if endpoint != "" {
+				secrets[runv1.SecretKeyLLMBaseURL] = endpoint
+			}
 		case errors.Is(err, store.ErrNotFound):
 			// Not a lease failure: the run is leased without the key and the
 			// pod refuses it in its validate phase, with a message that points

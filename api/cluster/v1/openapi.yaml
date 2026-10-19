@@ -964,9 +964,14 @@ components:
             only references. This is checked by the controller's admission
             policy.
 
-            Known keys: `git-token`, `llm-api-key`, `mcp.json`, and
+            Known keys: `git-token`, `llm-api-key`, `llm-base-url` when the
+            model key belongs to a gateway such as OpenRouter, `mcp.json`, and
             `presigned.json` in object-store mode only. Others are passed
             through as they are.
+
+            `llm-base-url` is not a credential, and it is here anyway: it
+            travels in the same message as the key it belongs to, so a pod
+            never pairs a new key with an old endpoint.
 
             The prompt is not in here. It has a field of its own because it is
             not a credential and the two are governed by different rules: every

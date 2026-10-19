@@ -41,8 +41,12 @@ type ModelCredential struct {
 	// Type is ModelCredentialAPIKey or ModelCredentialOAuthToken, derived from
 	// the value. Empty when the value is not here to look at: a reference, or
 	// a managed secret this process cannot decrypt.
-	Type      string
-	Ref       string
+	Type string
+	Ref  string
+	// BaseURL is the gateway the credential belongs to, in the form
+	// runv1.NormalizeModelEndpoint gives it. Empty when the CLIs talk to their
+	// own provider.
+	BaseURL   string
 	UpdatedAt *time.Time
 	// Problem is why a stored credential will not reach a pod, in words an
 	// operator can act on. Empty when leases will carry it.
@@ -50,10 +54,16 @@ type ModelCredential struct {
 }
 
 // ModelCredentialRequest sets the credential. Exactly one of Value and Ref.
+//
+// BaseURL is optional, and it is set together with the key and never on its
+// own: a request that leaves it empty clears the stored one. The endpoint is
+// half of the credential, and a key replaced without restating it must not go
+// to wherever the previous key went.
 type ModelCredentialRequest struct {
-	Type  string
-	Value string
-	Ref   string
+	Type    string
+	Value   string
+	Ref     string
+	BaseURL string
 }
 
 // ModelCredential reports the credential without resolving anything outside
@@ -75,7 +85,7 @@ func (s *Service) ModelCredential(ctx context.Context) (ModelCredential, error) 
 			continue
 		}
 		out.Configured = true
-		out.Kind, out.Ref = secret.Kind, secret.RefURI
+		out.Kind, out.Ref, out.BaseURL = secret.Kind, secret.RefURI, secret.Endpoint
 		out.UpdatedAt = &secret.UpdatedAt
 	}
 	if !out.Configured {
@@ -119,6 +129,19 @@ func (s *Service) PutModelCredential(ctx context.Context, req ModelCredentialReq
 			Detail: "type is " + ModelCredentialAPIKey + " or " + ModelCredentialOAuthToken}
 	}
 
+	baseURL, err := runv1.NormalizeModelEndpoint(req.BaseURL)
+	if err != nil {
+		return ModelCredential{}, &run.InvalidRequestError{Field: "base_url", Detail: err.Error()}
+	}
+	if baseURL != "" && req.Type == ModelCredentialOAuthToken {
+		// A subscription token is good at Anthropic and nowhere else. Sent to
+		// a gateway it is a 401 at best, and at worst the token handed to
+		// whoever runs the gateway.
+		return ModelCredential{}, &run.InvalidRequestError{Field: "base_url",
+			Detail: "a Claude subscription OAuth token authenticates to Anthropic only and cannot be " +
+				"sent to a gateway; leave base_url empty, or store the gateway's API key as " + ModelCredentialAPIKey}
+	}
+
 	value, ref := strings.TrimSpace(req.Value), strings.TrimSpace(req.Ref)
 	switch {
 	case value != "" && ref != "":
@@ -129,13 +152,13 @@ func (s *Service) PutModelCredential(ctx context.Context, req ModelCredentialReq
 			return ModelCredential{}, &run.InvalidRequestError{Field: "value",
 				Detail: mismatchDetail(req.Type)}
 		}
-		if _, err := s.store.PutManagedSecret(ctx, name, []byte(value), by); err != nil {
+		if _, err := s.store.PutManagedSecret(ctx, name, []byte(value), baseURL, by); err != nil {
 			return ModelCredential{}, err
 		}
 	case ref != "":
 		// A reference cannot be checked against its type; the pod classifies
 		// whatever arrives.
-		if _, err := s.store.PutReferencedSecret(ctx, name, ref, by); err != nil {
+		if _, err := s.store.PutReferencedSecret(ctx, name, ref, baseURL, by); err != nil {
 			return ModelCredential{}, err
 		}
 	default:

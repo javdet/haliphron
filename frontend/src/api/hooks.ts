@@ -373,10 +373,22 @@ export function useModelCredential() {
 export function usePutModelCredential() {
   const qc = useQueryClient()
   return useMutation({
-    mutationFn: ({ type, value, ref }: { type: ModelCredentialType; value?: string; ref?: string }) =>
+    mutationFn: ({
+      type,
+      value,
+      ref,
+      base_url,
+    }: {
+      type: ModelCredentialType
+      value?: string
+      ref?: string
+      base_url?: string
+    }) =>
       request<ModelCredential>('/model-credential', {
         method: 'PUT',
-        body: value ? { type, value } : { type, ref },
+        // base_url is sent with the key or not at all: the backend clears a
+        // stored endpoint that a replacement does not restate.
+        body: { type, ...(value ? { value } : { ref }), ...(base_url ? { base_url } : {}) },
       }),
     onSuccess: (cred) => {
       qc.setQueryData(keys.modelCredential(), cred)

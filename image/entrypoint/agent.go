@@ -81,6 +81,11 @@ type AgentResult struct {
 	SessionID string
 	ExitCode  int32
 	Usage     *runv1.Usage
+	// Error is what the CLI itself reported as its failure — claude-code's
+	// is_error result, codex's error events — or empty. It is not the model's
+	// answer, and it is often the only explanation a crash leaves: a rejected
+	// key exits 1 with nothing on stderr.
+	Error string
 }
 
 // runtimeFor picks the implementation. The configuration has already been
@@ -114,10 +119,21 @@ func phaseAuth(_ context.Context, r *Run) error {
 			"the model credential is a Claude subscription OAuth token, which authenticates "+
 				"claude-code only; %s needs an API key for its own provider", r.cfg.Agent)
 	}
+	if r.secrets.LLMBaseURL != "" && runv1.IsClaudeOAuthToken(r.secrets.LLMAPIKey) {
+		// The backend refuses to store this pair. Refused here as well,
+		// because the cost of being wrong is the token sent to the gateway.
+		return fail(runv1.ExitConfig, "CredentialMismatch",
+			"the model credential is a Claude subscription OAuth token, which authenticates to "+
+				"Anthropic only, and it has a gateway endpoint (%s); store the gateway's API key instead",
+			r.secrets.LLMBaseURL)
+	}
 	// What the agent's child process gets, and the whole of it. Not the git
 	// token, not the callback token, not one presigned link: the entrypoint
 	// handles those before and after the run, and the agent has a shell.
 	r.agentEnv = rt.Env(r)
+	if r.secrets.LLMBaseURL != "" {
+		r.logf("model calls go through %s as %s", r.secrets.LLMBaseURL, r.cfg.Model)
+	}
 
 	if !r.cfg.HasRepo() {
 		r.logf("model credential wired for %s; no repository, so no git credential", r.cfg.Agent)
@@ -320,7 +336,11 @@ func phaseRun(ctx context.Context, r *Run) error {
 	// here is a torn read of the one buffer holding a paid-for result.
 	captured := &syncBuffer{}
 	cmd.Stdout = multiWriter(captured, r.log)
-	cmd.Stderr = r.log
+	// stderr is not the answer, and it is where a CLI that crashed says why.
+	// The whole of it goes to the log as before; the tail is kept for the one
+	// case where it has to go further.
+	stderrTail := newTailBuffer(agentStderrTail)
+	cmd.Stderr = multiWriter(r.log, stderrTail)
 	cmd.GraceOnCancel = agentGraceOnTimeout
 
 	budget, cancel := context.WithTimeout(ctx, r.cfg.Timeout)
@@ -353,15 +373,52 @@ func phaseRun(ctx context.Context, r *Run) error {
 			"the agent did not finish within %s and was stopped; the partial result is kept",
 			r.cfg.Timeout)
 	case runErr != nil:
+		r.reportAgentCrash(cmd.Path, stderrTail.Lines())
 		return failWrap(runv1.ExitAgentError, "AgentNotStarted", runErr,
 			"could not start %s", cmd.Path)
 	case result.ExitCode != 0:
+		why := r.reportAgentCrash(cmd.Path, stderrTail.Lines())
 		return fail(runv1.ExitAgentError, "AgentFailed",
-			"%s exited %d after %s", cmd.Path, result.ExitCode, elapsed.Round(time.Second))
+			"%s exited %d after %s%s", cmd.Path, result.ExitCode, elapsed.Round(time.Second), why)
 	}
 
 	r.logf("agent finished in %s", elapsed.Round(time.Second))
 	return nil
+}
+
+// agentStderrTail is how much of the agent's stderr is kept for a crash
+// report. A stack trace and the line that caused it, not a transcript: the
+// transcript is in the run log.
+const agentStderrTail = 8 << 10
+
+// reportAgentCrash writes the evidence of an agent CLI that failed to the
+// container's stderr, and returns the line worth putting into the failure
+// message — ": " and the reason, or nothing.
+//
+// The evidence is the CLI's own error report when it made one, and the tail of
+// its stderr. A timeout does not come here: a CLI stopped for running out of
+// budget did not crash, and its stderr says nothing about why.
+func (r *Run) reportAgentCrash(path string, stderr []string) string {
+	if r.agent.Error != "" {
+		r.errorf("%s reported an error: %s", path, r.agent.Error)
+	}
+	if len(stderr) == 0 {
+		r.errorf("%s wrote nothing to stderr", path)
+	} else {
+		r.errorf("%s failed; the last %d line(s) of its stderr follow", path, len(stderr))
+		for _, line := range stderr {
+			r.errorf("%s stderr: %s", path, line)
+		}
+	}
+
+	why := r.agent.Error
+	if why == "" && len(stderr) > 0 {
+		why = stderr[len(stderr)-1]
+	}
+	if why == "" {
+		return ""
+	}
+	return ": " + why
 }
 
 // phaseParse normalises what the runtime produced into the result text and a
@@ -424,6 +481,49 @@ func (b *syncBuffer) Bytes() []byte {
 // bytes the parser needs.
 func multiWriter(writers ...interface{ Write([]byte) (int, error) }) *teeWriter {
 	return &teeWriter{writers: writers}
+}
+
+// tailBuffer keeps the last bytes written to it.
+type tailBuffer struct {
+	mu        sync.Mutex
+	buf       []byte
+	max       int
+	truncated bool
+}
+
+func newTailBuffer(max int) *tailBuffer { return &tailBuffer{max: max} }
+
+func (t *tailBuffer) Write(p []byte) (int, error) {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	t.buf = append(t.buf, p...)
+	if over := len(t.buf) - t.max; over > 0 {
+		t.buf = append(t.buf[:0], t.buf[over:]...)
+		t.truncated = true
+	}
+	return len(p), nil
+}
+
+// Lines is the tail as non-blank lines. When the buffer has dropped bytes, the
+// first line is a fragment and is dropped too: it may begin halfway through a
+// secret, and a secret's tail is not something the redactor can recognise.
+func (t *tailBuffer) Lines() []string {
+	t.mu.Lock()
+	text := string(t.buf)
+	truncated := t.truncated
+	t.mu.Unlock()
+
+	lines := strings.Split(text, "\n")
+	if truncated {
+		lines = lines[1:]
+	}
+	var out []string
+	for _, line := range lines {
+		if line = strings.TrimRight(line, "\r \t"); strings.TrimSpace(line) != "" {
+			out = append(out, line)
+		}
+	}
+	return out
 }
 
 type teeWriter struct {

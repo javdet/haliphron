@@ -60,10 +60,28 @@ func orDefault(v, fallback string) string {
 	return v
 }
 
-// modelID strips the provider qualifier. The backend speaks
-// anthropic/claude-opus-5 because it places runs across providers; the CLIs
-// each want their own bare identifier.
-func modelID(qualified string) string {
+// modelID is the model identifier the CLI sends. The backend speaks
+// anthropic/claude-opus-5 because it places runs across providers. A provider
+// called directly wants its own bare identifier, so the qualifier is stripped;
+// a gateway wants the qualified one, because the qualifier is how it routes —
+// OpenRouter's slugs are the backend's names exactly.
+func (r *Run) modelID() string {
+	if r.gateway() != "" {
+		return r.cfg.Model
+	}
+	return bareModelID(r.cfg.Model)
+}
+
+// gateway is the model endpoint the credential belongs to, or empty when the
+// CLIs talk to their own providers.
+func (r *Run) gateway() string {
+	if r.secrets == nil {
+		return ""
+	}
+	return r.secrets.LLMBaseURL
+}
+
+func bareModelID(qualified string) string {
 	if _, bare, found := strings.Cut(qualified, "/"); found {
 		return bare
 	}
@@ -111,7 +129,7 @@ func (claudeCode) Name() runv1.AgentType { return runv1.AgentClaudeCode }
 
 func (claudeCode) Env(r *Run) []string {
 	env := append(baseEnv(r),
-		"ANTHROPIC_MODEL="+modelID(r.cfg.Model),
+		"ANTHROPIC_MODEL="+r.modelID(),
 		// Into $HOME, or the CLI writes to a read-only root and the pod dies
 		// with a permission error nobody expected.
 		"CLAUDE_CONFIG_DIR="+filepath.Join(r.layout.Home, ".claude"),
@@ -120,6 +138,27 @@ func (claudeCode) Env(r *Run) []string {
 		// A subscription token, and nothing under the ANTHROPIC_ names: the
 		// CLI prefers those, and would send this token as an API key.
 		return append(env, "CLAUDE_CODE_OAUTH_TOKEN="+r.secrets.LLMAPIKey)
+	}
+	if gateway := r.gateway(); gateway != "" {
+		model := r.modelID()
+		return append(env,
+			// The root: the CLI appends /v1/messages itself.
+			"ANTHROPIC_BASE_URL="+gateway,
+			"ANTHROPIC_AUTH_TOKEN="+r.secrets.LLMAPIKey,
+			// Set, and empty. A gateway authenticates the bearer token, and
+			// with a key under this name as well the CLI sends that instead.
+			"ANTHROPIC_API_KEY=",
+			// Every model class pinned to the run's model. The CLI's own
+			// defaults for its background and subagent calls are bare
+			// Anthropic identifiers, which a gateway does not route; left
+			// alone they fail mid-run, or are routed somewhere the run did
+			// not choose. One model, the one the run names and is billed for.
+			"ANTHROPIC_DEFAULT_FABLE_MODEL="+model,
+			"ANTHROPIC_DEFAULT_OPUS_MODEL="+model,
+			"ANTHROPIC_DEFAULT_SONNET_MODEL="+model,
+			"ANTHROPIC_DEFAULT_HAIKU_MODEL="+model,
+			"ANTHROPIC_SMALL_FAST_MODEL="+model,
+		)
 	}
 	return append(env,
 		// ANTHROPIC_AUTH_TOKEN rather than ANTHROPIC_API_KEY: the former is
@@ -183,7 +222,7 @@ func (claudeCode) Launch(r *Run) Command {
 		"--output-format", "json",
 		"--append-system-prompt", systemPrompt(r),
 	}
-	if model := modelID(r.cfg.Model); model != "" {
+	if model := r.modelID(); model != "" {
 		args = append(args, "--model", model)
 	}
 	if r.cfg.MaxTurns > 0 {
@@ -207,6 +246,8 @@ func (claudeCode) Launch(r *Run) Command {
 // claudeResult is the shape of `claude -p --output-format json`.
 type claudeResult struct {
 	Result     string  `json:"result"`
+	IsError    bool    `json:"is_error"`
+	Subtype    string  `json:"subtype"`
 	SessionID  string  `json:"session_id"`
 	NumTurns   int32   `json:"num_turns"`
 	TotalCost  float64 `json:"total_cost_usd"`
@@ -228,7 +269,7 @@ func (claudeCode) Parse(stdout []byte) AgentResult {
 		// question, and a run reported with no result is a lost run.
 		return AgentResult{Text: string(stdout)}
 	}
-	return AgentResult{
+	result := AgentResult{
 		Text:      parsed.Result,
 		SessionID: parsed.SessionID,
 		Usage: &runv1.Usage{
@@ -244,6 +285,16 @@ func (claudeCode) Parse(stdout []byte) AgentResult {
 			SessionID:        parsed.SessionID,
 		},
 	}
+	if parsed.IsError {
+		// A rejected key or an unreachable API ends here, on stdout, with an
+		// empty stderr. The result text is then the CLI's error, not the
+		// model's answer.
+		result.Error = orDefault(strings.TrimSpace(parsed.Result), parsed.Subtype)
+		if result.Error == "" {
+			result.Error = "the CLI reported an error and gave no detail"
+		}
+	}
+	return result
 }
 
 // ---------------------------------------------------------------------------
@@ -256,7 +307,7 @@ func (codex) Name() runv1.AgentType { return runv1.AgentCodex }
 func (codex) Env(r *Run) []string {
 	return append(baseEnv(r),
 		"OPENAI_API_KEY="+r.secrets.LLMAPIKey,
-		"OPENAI_MODEL="+modelID(r.cfg.Model),
+		"OPENAI_MODEL="+r.modelID(),
 		"CODEX_HOME="+filepath.Join(r.layout.Home, ".codex"),
 	)
 }
@@ -337,7 +388,8 @@ func sandboxFor(mode string) []string {
 func (codex) Launch(r *Run) Command {
 	args := []string{"exec", "--json"}
 	args = append(args, sandboxFor(r.cfg.PermissionMode)...)
-	if model := modelID(r.cfg.Model); model != "" {
+	args = append(args, codexGatewayArgs(r.gateway())...)
+	if model := r.modelID(); model != "" {
 		args = append(args, "-m", model)
 	}
 	// codex has no --append-system-prompt: the instruction becomes a prefix of
@@ -347,13 +399,48 @@ func (codex) Launch(r *Run) Command {
 	return Command{Path: "codex", Args: args, Dir: r.layout.Workspace, Env: r.agentEnv}
 }
 
+// codexGatewayProvider names the model provider a gateway is declared as.
+const codexGatewayProvider = "haliphron-gateway"
+
+// codexGatewayArgs declares the gateway as a codex model provider and selects
+// it, or returns nothing when there is no gateway.
+//
+// On the command line rather than in config.toml. The plugins phase and
+// PrepareMCP both append to that file, and an override here cannot be undone
+// by either of them, nor by a config.toml the repository brings along.
+//
+// The gateway is a root; codex is given the OpenAI-style base under it, and
+// appends /responses. wire_api is responses because it is the only one this
+// codex speaks — "chat" is a startup error — and env_key reuses the variable
+// Env already sets, so the key is in exactly one place.
+func codexGatewayArgs(gateway string) []string {
+	if gateway == "" {
+		return nil
+	}
+	set := func(key, value string) []string {
+		return []string{"-c", key + "=" + tomlString(value)}
+	}
+	provider := "model_providers." + codexGatewayProvider + "."
+	var args []string
+	args = append(args, set("model_provider", codexGatewayProvider)...)
+	args = append(args, set(provider+"name", codexGatewayProvider)...)
+	args = append(args, set(provider+"base_url", gateway+"/v1")...)
+	args = append(args, set(provider+"env_key", "OPENAI_API_KEY")...)
+	args = append(args, set(provider+"wire_api", "responses")...)
+	return args
+}
+
 // codexEvent is one line of `codex exec --json`.
 type codexEvent struct {
 	Type      string `json:"type"`
 	SessionID string `json:"session_id"`
 	Message   string `json:"message"`
 	Text      string `json:"text"`
-	Usage     struct {
+	// Error is turn.failed's; a bare "error" event uses Message.
+	Error struct {
+		Message string `json:"message"`
+	} `json:"error"`
+	Usage struct {
 		InputTokens       int64 `json:"input_tokens"`
 		OutputTokens      int64 `json:"output_tokens"`
 		CachedInputTokens int64 `json:"cached_input_tokens"`
@@ -381,6 +468,12 @@ func (codex) Parse(stdout []byte) AgentResult {
 		case "item.completed", "agent_message", "message":
 			if msg := orDefault(event.Message, event.Text); msg != "" {
 				text = append(text, msg)
+			}
+		case "error", "turn.failed":
+			// The last one wins, as with usage: codex retries and reports each
+			// failure, and the one it gave up on is the one that matters.
+			if msg := orDefault(event.Error.Message, event.Message); msg != "" {
+				result.Error = msg
 			}
 		}
 		if event.Usage.InputTokens > 0 || event.Usage.OutputTokens > 0 {

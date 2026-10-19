@@ -115,7 +115,7 @@ func TestOnlyAnAdminSetsTheGitCredential(t *testing.T) {
 // it, so it is reported as a problem rather than as a stored token.
 func TestAReferencedGitTokenIsReportedAsAProblem(t *testing.T) {
 	h := newHarness(t)
-	if _, err := h.Store.PutReferencedSecret(context.Background(), "git-token-github", "vault://kv#git", "test"); err != nil {
+	if _, err := h.Store.PutReferencedSecret(context.Background(), "git-token-github", "vault://kv#git", "", "test"); err != nil {
 		t.Fatalf("store the reference: %v", err)
 	}
 

@@ -215,10 +215,10 @@ func newHarness(t *testing.T) *harness {
 
 	// The model credential every lease carries. Stored rather than configured,
 	// so the path under test is the one a deployment uses.
-	if _, err := st.PutManagedSecret(context.Background(), "llm-api-key", []byte("sk-test-model-key"), "test"); err != nil {
+	if _, err := st.PutManagedSecret(context.Background(), "llm-api-key", []byte("sk-test-model-key"), "", "test"); err != nil {
 		t.Fatalf("store the model credential: %v", err)
 	}
-	if _, err := st.PutManagedSecret(context.Background(), "git-token", []byte("ghs_test_repository_token"), "test"); err != nil {
+	if _, err := st.PutManagedSecret(context.Background(), "git-token", []byte("ghs_test_repository_token"), "", "test"); err != nil {
 		t.Fatalf("store the git credential: %v", err)
 	}
 	return h

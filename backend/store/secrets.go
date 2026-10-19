@@ -37,10 +37,13 @@ const (
 
 // Secret is a stored secret without its value.
 type Secret struct {
-	ID        runv1.ULID
-	Name      string
-	Kind      string
-	RefURI    string
+	ID     runv1.ULID
+	Name   string
+	Kind   string
+	RefURI string
+	// Endpoint is where the credential is presented when that is not its
+	// provider's default, and empty otherwise. See migration 0008.
+	Endpoint  string
 	KEKID     string
 	CreatedBy string
 	CreatedAt time.Time
@@ -70,7 +73,11 @@ func (s *Store) SetKEK(id string, key []byte) error {
 }
 
 // PutManagedSecret encrypts a value and stores it.
-func (s *Store) PutManagedSecret(ctx context.Context, name string, value []byte, by string) (Secret, error) {
+//
+// The endpoint is written with the value, and an empty one clears what the row
+// had: a value replaced without restating its endpoint must not inherit one
+// that belonged to the credential it replaced.
+func (s *Store) PutManagedSecret(ctx context.Context, name string, value []byte, endpoint, by string) (Secret, error) {
 	if len(s.kek) == 0 {
 		return Secret{}, ErrNoKEK
 	}
@@ -90,15 +97,15 @@ func (s *Store) PutManagedSecret(ctx context.Context, name string, value []byte,
 
 	var out Secret
 	err = s.db.QueryRowContext(ctx, `
-		INSERT INTO secrets (id, name, kind, kek_id, dek_wrapped, nonce, ciphertext, created_by)
-		VALUES ($1, $2, 'managed', $3, $4, $5, $6, $7)
+		INSERT INTO secrets (id, name, kind, kek_id, dek_wrapped, nonce, ciphertext, endpoint, created_by)
+		VALUES ($1, $2, 'managed', $3, $4, $5, $6, NULLIF($7, ''), $8)
 		ON CONFLICT (tenant_id, name) DO UPDATE SET
 			kind = 'managed', kek_id = EXCLUDED.kek_id, dek_wrapped = EXCLUDED.dek_wrapped,
 			nonce = EXCLUDED.nonce, ciphertext = EXCLUDED.ciphertext,
-			ref_uri = NULL, rotated_at = now()
-		RETURNING id, name, kind, kek_id, created_by, created_at, updated_at, rotated_at`,
-		newID(), name, s.kekID, append(wrapNonce, wrapped...), nonce, ciphertext, by).
-		Scan(&out.ID, &out.Name, &out.Kind, &out.KEKID, &out.CreatedBy,
+			endpoint = EXCLUDED.endpoint, ref_uri = NULL, rotated_at = now()
+		RETURNING id, name, kind, kek_id, COALESCE(endpoint, ''), created_by, created_at, updated_at, rotated_at`,
+		newID(), name, s.kekID, append(wrapNonce, wrapped...), nonce, ciphertext, endpoint, by).
+		Scan(&out.ID, &out.Name, &out.Kind, &out.KEKID, &out.Endpoint, &out.CreatedBy,
 			&out.CreatedAt, &out.UpdatedAt, nullTimeScanner(&out.RotatedAt))
 	if err != nil {
 		return Secret{}, fmt.Errorf("store: put managed secret %s: %w", name, err)
@@ -106,19 +113,21 @@ func (s *Store) PutManagedSecret(ctx context.Context, name string, value []byte,
 	return out, nil
 }
 
-// PutReferencedSecret stores a pointer to a value the backend never sees.
-func (s *Store) PutReferencedSecret(ctx context.Context, name, uri, by string) (Secret, error) {
+// PutReferencedSecret stores a pointer to a value the backend never sees. The
+// endpoint is written and cleared exactly as PutManagedSecret does it.
+func (s *Store) PutReferencedSecret(ctx context.Context, name, uri, endpoint, by string) (Secret, error) {
 	var out Secret
 	err := s.db.QueryRowContext(ctx, `
-		INSERT INTO secrets (id, name, kind, ref_uri, created_by)
-		VALUES ($1, $2, 'referenced', $3, $4)
+		INSERT INTO secrets (id, name, kind, ref_uri, endpoint, created_by)
+		VALUES ($1, $2, 'referenced', $3, NULLIF($4, ''), $5)
 		ON CONFLICT (tenant_id, name) DO UPDATE SET
-			kind = 'referenced', ref_uri = EXCLUDED.ref_uri,
+			kind = 'referenced', ref_uri = EXCLUDED.ref_uri, endpoint = EXCLUDED.endpoint,
 			kek_id = NULL, dek_wrapped = NULL, nonce = NULL, ciphertext = NULL,
 			rotated_at = now()
-		RETURNING id, name, kind, COALESCE(ref_uri, ''), created_by, created_at, updated_at, rotated_at`,
-		newID(), name, uri, by).
-		Scan(&out.ID, &out.Name, &out.Kind, &out.RefURI, &out.CreatedBy,
+		RETURNING id, name, kind, COALESCE(ref_uri, ''), COALESCE(endpoint, ''),
+		          created_by, created_at, updated_at, rotated_at`,
+		newID(), name, uri, endpoint, by).
+		Scan(&out.ID, &out.Name, &out.Kind, &out.RefURI, &out.Endpoint, &out.CreatedBy,
 			&out.CreatedAt, &out.UpdatedAt, nullTimeScanner(&out.RotatedAt))
 	if err != nil {
 		return Secret{}, fmt.Errorf("store: put referenced secret %s: %w", name, err)
@@ -128,6 +137,15 @@ func (s *Store) PutReferencedSecret(ctx context.Context, name, uri, by string) (
 
 // ResolveSecret returns the value of a managed secret.
 func (s *Store) ResolveSecret(ctx context.Context, name string) ([]byte, error) {
+	value, _, err := s.ResolveCredential(ctx, name)
+	return value, err
+}
+
+// ResolveCredential returns the value of a managed secret and its endpoint,
+// read in one statement. Two reads would let a concurrent replacement pair the
+// old value with the new endpoint, which is the one combination the column
+// exists to rule out.
+func (s *Store) ResolveCredential(ctx context.Context, name string) (value []byte, endpoint string, err error) {
 	var (
 		kind       string
 		kekID      sql.NullString
@@ -135,47 +153,48 @@ func (s *Store) ResolveSecret(ctx context.Context, name string) ([]byte, error) 
 		nonce      []byte
 		ciphertext []byte
 	)
-	err := s.db.QueryRowContext(ctx, `
-		SELECT kind, kek_id, dek_wrapped, nonce, ciphertext FROM secrets WHERE name = $1`,
-		name).Scan(&kind, &kekID, &wrapped, &nonce, &ciphertext)
+	err = s.db.QueryRowContext(ctx, `
+		SELECT kind, kek_id, dek_wrapped, nonce, ciphertext, COALESCE(endpoint, '')
+		FROM secrets WHERE name = $1`,
+		name).Scan(&kind, &kekID, &wrapped, &nonce, &ciphertext, &endpoint)
 	if errors.Is(err, sql.ErrNoRows) {
-		return nil, ErrNotFound
+		return nil, "", ErrNotFound
 	}
 	if err != nil {
-		return nil, fmt.Errorf("store: read secret %s: %w", name, err)
+		return nil, "", fmt.Errorf("store: read secret %s: %w", name, err)
 	}
 	if kind != SecretManaged {
-		return nil, ErrSecretNotManaged
+		return nil, "", ErrSecretNotManaged
 	}
 	if len(s.kek) == 0 {
-		return nil, ErrNoKEK
+		return nil, "", ErrNoKEK
 	}
 	if kekID.String != s.kekID {
 		// A secret encrypted under a key this process does not hold. Saying so
 		// is the difference between a five-minute fix and a hunt through a
 		// decryption error.
-		return nil, fmt.Errorf("store: secret %s is wrapped under key %q, this process holds %q",
+		return nil, "", fmt.Errorf("store: secret %s is wrapped under key %q, this process holds %q",
 			name, kekID.String, s.kekID)
 	}
 
 	if len(wrapped) < 12 {
-		return nil, fmt.Errorf("store: secret %s has a malformed wrapped key", name)
+		return nil, "", fmt.Errorf("store: secret %s has a malformed wrapped key", name)
 	}
 	dek, err := openAESGCM(s.kek, wrapped[:12], wrapped[12:])
 	if err != nil {
-		return nil, fmt.Errorf("store: unwrap data key for %s: %w", name, err)
+		return nil, "", fmt.Errorf("store: unwrap data key for %s: %w", name, err)
 	}
-	value, err := openAESGCM(dek, nonce, ciphertext)
+	value, err = openAESGCM(dek, nonce, ciphertext)
 	if err != nil {
-		return nil, fmt.Errorf("store: decrypt secret %s: %w", name, err)
+		return nil, "", fmt.Errorf("store: decrypt secret %s: %w", name, err)
 	}
-	return value, nil
+	return value, endpoint, nil
 }
 
 // ListSecrets returns the stored secrets, values excluded.
 func (s *Store) ListSecrets(ctx context.Context) ([]Secret, error) {
 	rows, err := s.db.QueryContext(ctx, `
-		SELECT id, name, kind, COALESCE(ref_uri, ''), COALESCE(kek_id, ''),
+		SELECT id, name, kind, COALESCE(ref_uri, ''), COALESCE(endpoint, ''), COALESCE(kek_id, ''),
 		       created_by, created_at, updated_at, rotated_at
 		FROM secrets ORDER BY name`)
 	if err != nil {
@@ -186,7 +205,7 @@ func (s *Store) ListSecrets(ctx context.Context) ([]Secret, error) {
 	var out []Secret
 	for rows.Next() {
 		var sec Secret
-		if err := rows.Scan(&sec.ID, &sec.Name, &sec.Kind, &sec.RefURI, &sec.KEKID,
+		if err := rows.Scan(&sec.ID, &sec.Name, &sec.Kind, &sec.RefURI, &sec.Endpoint, &sec.KEKID,
 			&sec.CreatedBy, &sec.CreatedAt, &sec.UpdatedAt, nullTimeScanner(&sec.RotatedAt)); err != nil {
 			return nil, fmt.Errorf("store: scan secret: %w", err)
 		}

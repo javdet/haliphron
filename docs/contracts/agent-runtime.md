@@ -126,8 +126,8 @@ This is a delta against contract 2, which had `envFrom` (R1), and it has two
 independent reasons, either of which would have sufficed.
 
 **Mechanical.** The Secret's keys are fixed by contract 1: `prompt`,
-`git-token`, `llm-api-key`, `mcp.json`, `callback-token`, and `presigned.json`
-in object-store mode. All but the first are invalid environment variable names.
+`git-token`, `llm-api-key`, `llm-base-url` when the key belongs to a gateway,
+`mcp.json`, `callback-token`, and `presigned.json` in object-store mode. All but the first are invalid environment variable names.
 `envFrom` silently skips such keys, leaving an Event in the namespace — which
 means the pod starts with no git token, no MCP configuration and no credentials
 at all, and the first intelligible message about it is a clone that failed to
@@ -664,6 +664,8 @@ the launch command and the output parser.
 |---|---|---|
 | model key | `ANTHROPIC_API_KEY` / `ANTHROPIC_AUTH_TOKEN`; a Claude subscription token (`sk-ant-oat…`) as `CLAUDE_CODE_OAUTH_TOKEN` alone | `OPENAI_API_KEY`; a subscription token is refused with `CredentialMismatch` |
 | model | `ANTHROPIC_MODEL` | `OPENAI_MODEL` |
+| model gateway (`llm-base-url`) | `ANTHROPIC_BASE_URL` = the root, the key as `ANTHROPIC_AUTH_TOKEN` only, `ANTHROPIC_API_KEY` set empty, every `ANTHROPIC_DEFAULT_*_MODEL` and `ANTHROPIC_SMALL_FAST_MODEL` pinned to the run's model; a subscription token is refused with `CredentialMismatch` | `-c model_provider=…` declaring a provider at the root + `/v1`, `wire_api = "responses"`, `env_key = "OPENAI_API_KEY"` |
+| model name | `provider/` stripped; passed as written when there is a gateway, which routes by it | the same |
 | `toolPolicy.allow` | `--allowedTools` | `enabled_tools` on the MCP server + the sandbox mode |
 | `toolPolicy.deny` | `--disallowedTools` | `disabled_tools` on the server |
 | `permissionMode: plan` | `--permission-mode plan` | `-s read-only` |
@@ -834,6 +836,22 @@ uploads the increments in chunks.
 - `logs/agent.log` is the concatenation of the same bytes, uploaded during
   `finalize`. A UI that has read the chunks to the end and switched to the final
   log must see neither a gap nor a repetition.
+
+**The container's stderr carries errors, and nothing else.** Every line in the
+chunks reaches a reader only through storage. A run whose storage failed, or a
+pod killed before its next chunk, leaves nothing there. stderr is collected by
+the kubelet without the process's help, so the entrypoint writes its errors
+there as well as to the log:
+
+- a failed phase
+- a grace period that expired before the pipeline finished
+- a panic in a phase, with its stack
+- an agent CLI that exited non-zero or did not start, with the error the CLI
+  reported itself and the last 8 KiB of its stderr
+
+A successful run writes nothing to stderr, and the agent's stream is never
+copied there. Every line is redacted before it is written, because nothing
+downstream of the kubelet redacts.
 
 **Redaction is mandatory** (R14). The entrypoint builds a set from every secret
 value at least eight characters long and passes **every byte it uploads**

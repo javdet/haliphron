@@ -454,6 +454,7 @@ without its value.
 | `kind` | string | `managed` or `referenced`; absent when not configured |
 | `type` | string | `api_key` or `oauth_token`, derived from the value; absent for a reference or a value this process cannot decrypt |
 | `ref` | string | the reference, for a referenced secret |
+| `base_url` | string | the root of the gateway the key belongs to, such as `https://openrouter.ai/api`; absent when the CLIs talk to their own providers |
 | `updated_at` | timestamp | |
 | `problem` | string | why a stored credential will not reach a pod; absent when leases will carry it |
 
@@ -469,10 +470,20 @@ Scope: `admin`. Stores the credential under `secret_name`.
 | `type` | string | required: `api_key` or `oauth_token` |
 | `value` | string | the credential, trimmed before it is stored |
 | `ref` | string | a pointer into an external manager |
+| `base_url` | string | optional: the root of a model gateway, such as `https://openrouter.ai/api` |
 
 Exactly one of `value` and `ref`. A `value` whose shape contradicts `type` is
 refused with `422`: an `oauth_token` starts with `sk-ant-oat`, and an
 `api_key` does not. Returns `200` with the same body as the `GET`.
+
+`base_url` is stored with the key and replaced with it: a `PUT` without one
+clears the stored endpoint, and so does a `PUT /api/v1/secrets/{name}` of the
+same secret. It must be an `http` or `https` URL with no credentials, query or
+fragment, and it is the gateway's root — a value ending in `/v1` is refused
+with `422`, because claude-code appends `/v1/messages` itself and codex is
+given the root plus `/v1`. A trailing slash is dropped. An `oauth_token` with a
+`base_url` is refused with `422`: a subscription token authenticates to
+Anthropic only.
 
 ### `GET /api/v1/git-credential`
 

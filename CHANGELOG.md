@@ -3,6 +3,51 @@
 All notable changes to Haliphron are recorded here. The version is the content
 of `VERSION`, and it is the tag of the published images.
 
+## Unreleased
+
+### Added
+
+- **Model gateways such as OpenRouter.** The model credential takes an optional
+  `base_url`: the gateway's root, for example `https://openrouter.ai/api`. Set
+  it under **Secrets → Model credential**, or as `base_url` on
+  `PUT /api/v1/model-credential`. The lease carries it to the pod as
+  `llm-base-url`, next to the key.
+  - claude-code gets `ANTHROPIC_BASE_URL`, the key as `ANTHROPIC_AUTH_TOKEN`
+    and an empty `ANTHROPIC_API_KEY`. Every model class is pinned to the run's
+    model.
+  - codex gets a model provider at the root plus `/v1` that uses the
+    Responses API.
+  - With a gateway configured, the model is passed through as written
+    (`anthropic/claude-opus-5`), not stripped to the provider's bare name.
+
+  Before this, an OpenRouter key was sent to Anthropic, and the run failed with
+  `claude exited 1` and `401 API key is invalid`.
+- **Agent pods write their errors to the container's stderr**, so
+  `kubectl logs` and the cluster's log pipeline see them even when storage is
+  unreachable or the pod dies before its next log chunk. Only errors go there:
+  a failed phase, an expired grace period, a panic with its stack, and a crashed
+  agent CLI. A crash includes the error the CLI reported (claude-code's
+  `is_error`, codex's `turn.failed`) and the last 8 KiB of the CLI's stderr. A
+  successful run writes nothing to stderr. Secrets are redacted.
+
+### Changed
+
+- When the agent CLI exits non-zero, the failure message now gives the reason
+  (`claude exited 1 after 3s: Invalid API key`). Before, it gave only the exit
+  code.
+- A panic in an entrypoint phase becomes an `EntrypointPanic` failure with
+  that phase's exit code. Persist and the report still run. Before, the pod
+  exited 2 with no report.
+
+- Replacing the model key without restating `base_url` clears the stored
+  endpoint. This applies to `PUT /api/v1/model-credential` and to
+  `PUT /api/v1/secrets/{name}` alike, so a key meant for Anthropic is never
+  sent to a gateway because an old endpoint stayed behind.
+- A Claude subscription token with a `base_url` is refused with `422` by the
+  backend, and with `CredentialMismatch` by the pod.
+- Migration `0008_secret_endpoint` adds the nullable `secrets.endpoint`
+  column.
+
 ## 0.4.0 — 2026-10-02
 
 ### Added

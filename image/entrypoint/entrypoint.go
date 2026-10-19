@@ -78,7 +78,7 @@ func RunWithSignals(parent context.Context, r *Run) int32 {
 		case <-time.After(r.cfg.Grace):
 			// Out of budget. SIGKILL is imminent and the exit code will be the
 			// platform's, not ours; saying so is the last useful thing left.
-			r.logf("the grace period expired before the pipeline finished; "+
+			r.errorf("the grace period expired before the pipeline finished; "+
 				"what reached storage is in %s", r.cfg.StoragePrefix)
 			return exitSIGTERM
 		}

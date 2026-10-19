@@ -160,7 +160,7 @@ func (s *Service) PutGitCredential(ctx context.Context, req GitCredentialRequest
 			Detail: "this looks like a " + string(forge) + " token, stored as the " + string(provider) + " one"}
 	}
 
-	if _, err := s.store.PutManagedSecret(ctx, gitTokenName(base, provider), []byte(value), by); err != nil {
+	if _, err := s.store.PutManagedSecret(ctx, gitTokenName(base, provider), []byte(value), "", by); err != nil {
 		return GitCredential{}, err
 	}
 	return s.GitCredential(ctx)

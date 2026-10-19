@@ -350,7 +350,11 @@ func splitList(raw string) []string {
 type Secrets struct {
 	GitToken  string
 	LLMAPIKey string
-	MCPConfig []byte
+	// LLMBaseURL is the gateway the key belongs to, normalised, or empty for
+	// the CLIs' own providers. Not a secret, and so not in Values: the log
+	// saying where the model was called is worth more than hiding a hostname.
+	LLMBaseURL string
+	MCPConfig  []byte
 	// Bundle is object-store mode only, and nil in relay mode. A pointer rather
 	// than a zero value so that "there is no bundle" and "there is an empty
 	// bundle" are different states: the second is a defect and would otherwise
@@ -422,6 +426,19 @@ func LoadSecrets(dir string, c *Config) (*Secrets, error) {
 				"then start a new run", filepath.Join(dir, runv1.SecretKeyLLMAPIKey))
 	}
 	s.LLMAPIKey = strings.TrimSpace(string(key))
+
+	// Checked again here although the backend checked it when it was saved:
+	// the pod is the side that sends the key there, and a malformed endpoint
+	// fails now with its name rather than as a DNS error inside the model's
+	// first turn.
+	baseURL, err := read(runv1.SecretKeyLLMBaseURL, false)
+	if err != nil {
+		return nil, err
+	}
+	if s.LLMBaseURL, err = runv1.NormalizeModelEndpoint(string(baseURL)); err != nil {
+		return nil, failWrap(runv1.ExitConfig, "MalformedSecret", err,
+			"%s is not a usable model endpoint", runv1.SecretKeyLLMBaseURL)
+	}
 
 	// The git token is required exactly when there is a repository. Demanding
 	// it otherwise would refuse every run that has nothing to clone.

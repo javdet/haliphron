@@ -31,6 +31,45 @@ one and fail in the pod with a `401`.
 It is stored as the secret `llm-api-key` (see [Use different
 names](#use-different-names)). Until it is set, every page of the UI says so.
 
+### Go through OpenRouter or another gateway
+
+Store the gateway's key as an `api_key`, with the gateway's root as
+`base_url`. In the UI, fill in **Gateway endpoint** in the same dialog.
+
+```sh
+curl -sX PUT https://haliphron.example.com/api/v1/model-credential \
+  -H "Authorization: Bearer $ADMIN_TOKEN" \
+  -H 'Content-Type: application/json' \
+  -d '{"type":"api_key","value":"sk-or-v1-...","base_url":"https://openrouter.ai/api"}'
+```
+
+Then name models by the gateway's own names. For OpenRouter that is its slug,
+`anthropic/claude-opus-5` or `openai/gpt-5.5`. With a gateway configured the
+pod passes the model through as written, and without one it drops the
+`provider/` part for the provider's own API.
+
+What the pod does with it:
+
+- **claude-code** gets `ANTHROPIC_BASE_URL` set to the root,
+  `ANTHROPIC_AUTH_TOKEN` set to the key and `ANTHROPIC_API_KEY` set to an
+  empty string. If `ANTHROPIC_API_KEY` held the key, the CLI would send it
+  instead. Every model class (`ANTHROPIC_DEFAULT_OPUS_MODEL`, `…_SONNET_…`,
+  `…_HAIKU_…`, `ANTHROPIC_SMALL_FAST_MODEL`) is pinned to the run's model. The
+  CLI's background calls would otherwise use bare Anthropic names, which the
+  gateway does not route.
+- **codex** gets a model provider declared on its command line, with
+  `base_url` set to the root plus `/v1` and `wire_api = "responses"`, and that
+  provider selected. This codex speaks only the Responses API, so the gateway
+  must serve `/v1/responses`. OpenRouter does.
+
+The endpoint travels in the lease as `llm-base-url`, next to the key. Replacing
+the key without restating `base_url` clears it. That way a key meant for
+Anthropic is never sent to a gateway because an old endpoint stayed behind.
+
+A run that reached the wrong place fails with `claude exited 1` and a result
+summary of `401 API key is invalid`. That is an OpenRouter key sent to
+Anthropic, which means `base_url` is not set.
+
 ### Use a Claude subscription instead of an API key
 
 On a machine signed in to the plan:
@@ -40,7 +79,7 @@ claude setup-token        # prints sk-ant-oat01-...
 ```
 
 Then store it with `"type":"oauth_token"`, or choose **Claude subscription
-(OAuth)** in the UI. The pod hands it to claude-code as
+(OAuth)** in the UI. A subscription token cannot have a `base_url`. The pod hands it to claude-code as
 `CLAUDE_CODE_OAUTH_TOKEN` and sets no `ANTHROPIC_*` key, which the CLI would
 otherwise prefer.
 

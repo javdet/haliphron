@@ -35,6 +35,13 @@ type harness struct {
 	layout    entrypoint.Layout
 	commander *scriptedCommander
 	clock     func() time.Time
+	// stderr is the container's stderr. Every run writes it here rather than
+	// to the test binary's, which would otherwise carry every failure this
+	// suite provokes on purpose.
+	stderr *lockedBuffer
+	// options are applied after the harness's own, so that a test can replace
+	// any of them.
+	options []entrypoint.Option
 }
 
 // harnessOption adjusts the harness before the run is built.
@@ -85,6 +92,7 @@ func newHarness(t *testing.T, req controlplane.RunRequest, opts ...harnessOption
 		prepared:  cp.Prepare(req),
 		commander: &scriptedCommander{},
 		clock:     time.Now,
+		stderr:    &lockedBuffer{},
 	}
 	for _, opt := range opts {
 		opt(h)
@@ -143,10 +151,13 @@ func (h *harness) build() *entrypoint.Run {
 	if err != nil {
 		h.t.Fatalf("the harness produced secrets the entrypoint rejects: %v", err)
 	}
-	run, err := entrypoint.New(cfg, secrets,
+	opts := append([]entrypoint.Option{
 		entrypoint.WithLayout(h.layout),
 		entrypoint.WithCommander(h.commander),
-		entrypoint.WithClock(h.clock))
+		entrypoint.WithClock(h.clock),
+		entrypoint.WithStderr(h.stderr),
+	}, h.options...)
+	run, err := entrypoint.New(cfg, secrets, opts...)
 	if err != nil {
 		h.t.Fatalf("building the run: %v", err)
 	}
@@ -470,3 +481,22 @@ func removeSecret(t *testing.T, h *harness, key string) {
 func chmodDir(dir string, mode os.FileMode) error { return os.Chmod(dir, mode) }
 
 func removeFile(dir, name string) error { return os.Remove(filepath.Join(dir, name)) }
+
+// lockedBuffer is a buffer that the run's goroutines may write while the
+// test reads.
+type lockedBuffer struct {
+	mu  sync.Mutex
+	buf strings.Builder
+}
+
+func (b *lockedBuffer) Write(p []byte) (int, error) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.buf.Write(p)
+}
+
+func (b *lockedBuffer) String() string {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.buf.String()
+}

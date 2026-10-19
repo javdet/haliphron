@@ -441,7 +441,8 @@ backend: `callbackURL` itself is cluster-local, and without a token any pod in
 the namespace could send a forged completion for somebody else's run.
 
 **`envFrom` will not do here**, and this is delta R1 of contract 3. The Secret's
-keys are fixed by contract 1 — `prompt`, `git-token`, `llm-api-key`, `mcp.json`,
+keys are fixed by contract 1 — `prompt`, `git-token`, `llm-api-key`,
+`llm-base-url` when the key belongs to a gateway, `mcp.json`,
 `callback-token`, and `presigned.json` in object-store mode — and all but the
 first are invalid environment variable names. `envFrom` silently skips such
 keys, leaving an Event in the namespace: the pod starts with no token, no MCP

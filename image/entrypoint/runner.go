@@ -3,6 +3,7 @@ package entrypoint
 import (
 	"context"
 	"errors"
+	"runtime/debug"
 	"time"
 
 	runv1 "github.com/automagicops/haliphron/api/run/v1"
@@ -103,7 +104,7 @@ func (r *Run) Execute(ctx context.Context) int32 {
 		}
 
 		started := r.clock()
-		err := s.fn(ctx, r)
+		err := r.runStep(ctx, s)
 		elapsed := r.clock().Sub(started)
 
 		switch {
@@ -124,7 +125,7 @@ func (r *Run) Execute(ctx context.Context) int32 {
 				f.Phase = s.phase
 			}
 			r.record(ctx, s.phase, runv1.PhaseOutcomeFailed, elapsed, f.Reason)
-			r.logf("phase %s failed: %s (%s, exit %d)", s.phase, f.Message(), f.Reason, f.Code)
+			r.errorf("phase %s failed: %s (%s, exit %d)", s.phase, f.Message(), f.Reason, f.Code)
 
 			// The first failure is the one that gets reported. A later phase
 			// failing because of the first would otherwise overwrite the cause
@@ -139,6 +140,25 @@ func (r *Run) Execute(ctx context.Context) int32 {
 	}
 
 	return r.exitCode()
+}
+
+// runStep runs one phase and turns a panic in it into a failure of it.
+//
+// A panic is a bug in this package, exactly like an unclassified error, and it
+// is given the same treatment: the phase's default code and the rest of the
+// pipeline. Left alone it would take the process down with exit 2, which the
+// controller cannot classify, past persist and past the report — a paid-for
+// result lost to a nil map. The stack goes to stderr and the run log, where the
+// person fixing the bug will look, and not into the report, whose message is
+// bounded and read by the person whose run it was.
+func (r *Run) runStep(ctx context.Context, s step) (err error) {
+	defer func() {
+		if p := recover(); p != nil {
+			r.errorf("phase %s panicked: %v\n%s", s.phase, p, debug.Stack())
+			err = fail(s.defaultCode, "EntrypointPanic", "phase %s panicked: %v", s.phase, p)
+		}
+	}()
+	return s.fn(ctx, r)
 }
 
 // record notes a phase's outcome in the three places that need it: this

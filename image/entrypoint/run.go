@@ -33,7 +33,10 @@ type Run struct {
 	commander Commander
 	clock     func() time.Time
 	log       *LogSink
-	http      *http.Client
+	// stderr is the container's own stream. It carries errors and nothing
+	// else; see errorf.
+	stderr io.Writer
+	http   *http.Client
 
 	// checkpoint is what an earlier attempt got through and what this one has
 	// reported. There is no "prior" any more: the checkpoint is not a document
@@ -96,6 +99,10 @@ func WithClock(clock func() time.Time) Option { return func(r *Run) { r.clock = 
 // the phases without git and without a model CLI on the machine.
 func WithCommander(c Commander) Option { return func(r *Run) { r.commander = c } }
 
+// WithStderr replaces the container's stderr, so that a test can read what a
+// failing run left for `kubectl logs`.
+func WithStderr(w io.Writer) Option { return func(r *Run) { r.stderr = w } }
+
 // New builds a run from the config and secrets the pod was given.
 func New(cfg *Config, secrets *Secrets, opts ...Option) (*Run, error) {
 	r := &Run{
@@ -104,6 +111,7 @@ func New(cfg *Config, secrets *Secrets, opts ...Option) (*Run, error) {
 		layout:    DefaultLayout(),
 		clock:     time.Now,
 		commander: ExecCommander{},
+		stderr:    os.Stderr,
 		http:      &http.Client{Timeout: 30 * time.Second},
 		outcomes:  map[runv1.RuntimePhase]runv1.PhaseOutcome{},
 	}
@@ -160,7 +168,29 @@ func (r *Run) logf(format string, args ...any) {
 		r.log.Printf(format, args...)
 		return
 	}
-	_, _ = os.Stderr.WriteString(r.redactor.String(sprintf(format, args...)) + "\n")
+	_, _ = io.WriteString(r.stderr, r.redactor.String(sprintf(format, args...))+"\n")
+}
+
+// errorf is logf for something that went wrong, and it also goes to the
+// container's stderr.
+//
+// The run log is where a person reads a run, but it reaches them only through
+// storage: a run whose storage is the thing that failed, or a pod killed before
+// its next chunk, leaves nothing there. stderr is collected by the kubelet and
+// by whatever log pipeline the cluster runs, and it is collected without any
+// help from this process. It carries errors only — the agent's stream stays in
+// the chunks, which is the decision section 11 of the contract records — so a
+// successful run says nothing on it at all.
+//
+// Redacted here rather than at upload, because nothing downstream of the
+// kubelet will do it.
+func (r *Run) errorf(format string, args ...any) {
+	msg := sprintf(format, args...)
+	if r.log != nil {
+		r.log.Printf("error: %s", msg)
+	}
+	_, _ = fmt.Fprintf(r.stderr, "%s haliphron: error: %s\n",
+		time.Now().UTC().Format(time.RFC3339), r.redactor.String(msg))
 }
 
 // Cancel marks the run as stopped from outside — a cancellation, an eviction, a

@@ -260,14 +260,14 @@ func (s *Server) putSecret(w http.ResponseWriter, r *http.Request, c caller) {
 		s.fail(w, http.StatusUnprocessableEntity, "invalid_request",
 			"a secret is either managed or referenced, not both", "value")
 	case req.Value != "":
-		secret, err := s.app.Store().PutManagedSecret(r.Context(), name, []byte(req.Value), c.Name())
+		secret, err := s.app.Store().PutManagedSecret(r.Context(), name, []byte(req.Value), "", c.Name())
 		if err != nil {
 			s.failFor(w, r, err)
 			return
 		}
 		s.write(w, http.StatusOK, map[string]any{"name": secret.Name, "kind": secret.Kind})
 	case req.Ref != "":
-		secret, err := s.app.Store().PutReferencedSecret(r.Context(), name, req.Ref, c.Name())
+		secret, err := s.app.Store().PutReferencedSecret(r.Context(), name, req.Ref, "", c.Name())
 		if err != nil {
 			s.failFor(w, r, err)
 			return
@@ -290,18 +290,23 @@ func (s *Server) listSecrets(w http.ResponseWriter, r *http.Request, _ caller) {
 	for _, secret := range secrets {
 		// Names, kinds and references. Never a value, and never a ciphertext:
 		// an endpoint that returns one turns a read scope into a credential.
-		items = append(items, map[string]any{
+		item := map[string]any{
 			"name": secret.Name, "kind": secret.Kind, "ref": secret.RefURI,
 			"updated_at": secret.UpdatedAt, "rotated_at": secret.RotatedAt,
-		})
+		}
+		if secret.Endpoint != "" {
+			item["endpoint"] = secret.Endpoint
+		}
+		items = append(items, item)
 	}
 	s.write(w, http.StatusOK, map[string]any{"secrets": items})
 }
 
 type modelCredentialRequest struct {
-	Type  string `json:"type"`
-	Value string `json:"value,omitempty"`
-	Ref   string `json:"ref,omitempty"`
+	Type    string `json:"type"`
+	Value   string `json:"value,omitempty"`
+	Ref     string `json:"ref,omitempty"`
+	BaseURL string `json:"base_url,omitempty"`
 }
 
 func (s *Server) getModelCredential(w http.ResponseWriter, r *http.Request, _ caller) {
@@ -319,7 +324,7 @@ func (s *Server) putModelCredential(w http.ResponseWriter, r *http.Request, c ca
 		return
 	}
 	cred, err := s.app.PutModelCredential(r.Context(), app.ModelCredentialRequest{
-		Type: req.Type, Value: req.Value, Ref: req.Ref,
+		Type: req.Type, Value: req.Value, Ref: req.Ref, BaseURL: req.BaseURL,
 	}, c.Name())
 	if err != nil {
 		s.failFor(w, r, err)
@@ -334,7 +339,8 @@ func modelCredentialBody(cred app.ModelCredential) map[string]any {
 		"configured":  cred.Configured,
 	}
 	for k, v := range map[string]string{
-		"kind": cred.Kind, "type": cred.Type, "ref": cred.Ref, "problem": cred.Problem,
+		"kind": cred.Kind, "type": cred.Type, "ref": cred.Ref, "base_url": cred.BaseURL,
+		"problem": cred.Problem,
 	} {
 		if v != "" {
 			body[k] = v
