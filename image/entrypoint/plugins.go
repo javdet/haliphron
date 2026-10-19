@@ -236,27 +236,13 @@ func (r *Run) rolePluginSpec() (*runv1.PluginSpec, error) {
 	return &spec, nil
 }
 
-// claudeSettings is the part of a settings.json this phase reads. The shape is
-// claude-code's own, because the file is claude-code's own; a repository
-// running codex declares its plugins to the role instead.
-type claudeSettings struct {
-	ExtraKnownMarketplaces map[string]struct {
-		Source struct {
-			Source string `json:"source"`
-			Repo   string `json:"repo"`
-			URL    string `json:"url"`
-			Path   string `json:"path"`
-		} `json:"source"`
-	} `json:"extraKnownMarketplaces"`
-	EnabledPlugins map[string]bool `json:"enabledPlugins"`
-}
-
 // readSettingsPlugins turns a repository's settings file into a PluginSpec.
 //
 // Everything it returns came out of the cloned repository, so everything it
 // returns goes through the same validation the role's own list does — including
 // the ceilings on how many catalogues a run will clone and how many plugins it
-// will install.
+// will install. The parser is the one the backend uses for a role's own
+// settings.json (runv1.PluginSpecFromSettings), read leniently here.
 //
 // What it cannot use it drops, with a line in the log, rather than failing the
 // run. A settings file is written for a developer's machine: it may name a
@@ -275,64 +261,16 @@ func (r *Run) readSettingsPlugins(path string) (*runv1.PluginSpec, error) {
 		return nil, failWrap(runv1.ExitConfig, "RoleConfigUnreadable", err, "reading %s", path)
 	}
 
-	var parsed claudeSettings
-	if err := json.Unmarshal(body, &parsed); err != nil {
-		// A settings file this build cannot parse is not a reason to fail a
-		// run: the agent is about to read it for itself, and it may well
-		// understand a newer shape than this does.
+	spec, dropped, err := runv1.PluginSpecFromSettings(body, false)
+	if err != nil {
+		// The whole file is dropped rather than repaired. A settings file this
+		// build will not act on is a normal thing to find, and half of one is
+		// not — and the agent is about to read it for itself anyway.
+		r.logf("plugins: ignoring %s — %s", path, err)
 		return &runv1.PluginSpec{}, nil
 	}
-
-	spec := &runv1.PluginSpec{}
-	for name, entry := range parsed.ExtraKnownMarketplaces {
-		var raw string
-		switch entry.Source.Source {
-		case "github":
-			raw = entry.Source.Repo
-		case "git":
-			raw = entry.Source.URL
-		default:
-			// "directory" and "url" name something on the developer's machine
-			// or a catalogue this pod cannot authenticate to.
-			continue
-		}
-		url, err := runv1.PluginMarketplaceURL(raw)
-		if err != nil {
-			continue
-		}
-		clean, err := runv1.PluginMarketplaceName(name)
-		if err != nil || clean == "" {
-			continue
-		}
-		spec.Marketplaces = append(spec.Marketplaces, runv1.PluginMarketplace{Name: clean, URL: url})
-	}
-	for id, enabled := range parsed.EnabledPlugins {
-		if !enabled {
-			continue
-		}
-		plugin, marketplace, err := runv1.PluginID(id)
-		if err != nil {
-			continue
-		}
-		spec.Enabled = append(spec.Enabled, plugin+"@"+marketplace)
-	}
-
-	// Map iteration is unordered and a run's log should not be. Both lists are
-	// sorted so that two attempts of the same run install in the same order.
-	sortStrings(spec.Enabled)
-	sortMarketplaces(spec.Marketplaces)
-
-	// The same validation the backend applies to a role, applied here to the
-	// one source that did not come through it. It is what enforces the ceilings
-	// on how many catalogues a run will clone and how many plugins it will
-	// install — without it a repository could put a few thousand of either in
-	// front of the agent and spend the lease on them.
-	//
-	// The whole file is dropped rather than repaired. A settings file this
-	// build will not act on is a normal thing to find, and half of one is not.
-	if field, err := runv1.ValidatePluginSpec(spec); err != nil {
-		r.logf("plugins: ignoring %s — %s: %s", path, field, err)
-		return &runv1.PluginSpec{}, nil
+	for _, reason := range dropped {
+		r.logf("plugins: %s: skipped %s", path, reason)
 	}
 	return spec, nil
 }
@@ -423,21 +361,4 @@ func marketplaceDirName(m runv1.PluginMarketplace) (string, error) {
 			"%q gives no usable directory name", m.URL)
 	}
 	return name, nil
-}
-
-func sortStrings(in []string) {
-	for i := 1; i < len(in); i++ {
-		for j := i; j > 0 && in[j] < in[j-1]; j-- {
-			in[j], in[j-1] = in[j-1], in[j]
-		}
-	}
-}
-
-func sortMarketplaces(in []runv1.PluginMarketplace) {
-	key := func(m runv1.PluginMarketplace) string { return m.Name + "\x00" + m.URL }
-	for i := 1; i < len(in); i++ {
-		for j := i; j > 0 && key(in[j]) < key(in[j-1]); j-- {
-			in[j], in[j-1] = in[j-1], in[j]
-		}
-	}
 }

@@ -6,10 +6,11 @@
 // it, where, whether it names the bot — and every decision about what to do
 // with one is app.Chat's.
 //
-// The connection is outbound, the same direction as everything else in this
-// system: the backend dials the chat server as the bot and holds the socket
-// open. Nothing needs to reach the backend, so a chat server on another network
-// needs an egress rule and no ingress.
+// The WebSocket connection is outbound, the same direction as everything else
+// in this system: the backend dials the chat server as the bot and holds the
+// socket open, so a chat server on another network needs an egress rule and no
+// ingress. The outgoing-webhook transport (webhook.go) is the one exception,
+// and is optional: there the chat server calls the public API.
 //
 // The bot's access token is the one secret this package holds. It travels in
 // the Authorization header of each request and the WebSocket handshake, and
@@ -183,16 +184,38 @@ func (c *Client) Thread(ctx context.Context, rootID string) ([]app.ChatThreadPos
 	self := c.me()
 	out := make([]app.ChatThreadPost, 0, len(posts))
 	for _, p := range posts {
+		kind, _ := p.Props["haliphron_kind"].(string)
 		out = append(out, app.ChatThreadPost{
 			ID:        p.ID,
 			Username:  names[p.UserID],
 			Text:      p.Message,
 			CreatedAt: time.UnixMilli(p.CreateAt),
 			FromSelf:  self.ID != "" && p.UserID == self.ID,
+			FromBot:   fromBot(p),
+			Kind:      kind,
 			System:    p.Type != "",
 		})
 	}
 	return out, nil
+}
+
+// getPost reads one post. It is how a webhook delivery is checked: the
+// payload says which post fired it, and the server says what the post is.
+func (c *Client) getPost(ctx context.Context, id string) (wirePost, error) {
+	var p wirePost
+	if err := c.do(ctx, http.MethodGet, "/api/v4/posts/"+url.PathEscape(id), nil, &p); err != nil {
+		return wirePost{}, err
+	}
+	return p, nil
+}
+
+// username resolves one author.
+func (c *Client) username(ctx context.Context, userID string) (string, error) {
+	names, err := c.usernames(ctx, []wirePost{{UserID: userID}})
+	if err != nil {
+		return "", err
+	}
+	return names[userID], nil
 }
 
 // usernames resolves the authors of posts, asking the server only for the ones

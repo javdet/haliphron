@@ -24,10 +24,12 @@ type envelope struct {
 }
 
 type postedData struct {
-	ChannelType string `json:"channel_type"`
-	SenderName  string `json:"sender_name"`
-	Post        string `json:"post"`
-	Mentions    string `json:"mentions"`
+	ChannelType        string `json:"channel_type"`
+	ChannelName        string `json:"channel_name"`
+	ChannelDisplayName string `json:"channel_display_name"`
+	SenderName         string `json:"sender_name"`
+	Post               string `json:"post"`
+	Mentions           string `json:"mentions"`
 }
 
 // decodePosted turns a posted event into a message. ok is false for events
@@ -53,20 +55,28 @@ func decodePosted(data json.RawMessage, self User) (m app.ChatMessage, ok bool, 
 
 	text, named := stripMention(p.Message, self.Username)
 	return app.ChatMessage{
-		ID:          p.ID,
-		ChannelID:   p.ChannelID,
-		RootID:      p.RootID,
-		UserID:      p.UserID,
-		Username:    strings.TrimPrefix(d.SenderName, "@"),
-		Text:        text,
-		CreatedAt:   time.UnixMilli(p.CreateAt),
-		Direct:      d.ChannelType == "D",
-		MentionsBot: named || (self.ID != "" && slices.Contains(mentions, self.ID)),
-		FromSelf:    self.ID != "" && p.UserID == self.ID,
-		FromBot:     truthy(p.Props["from_bot"]) || truthy(p.Props["from_plugin"]),
-		FromWebhook: truthy(p.Props["from_webhook"]),
-		System:      p.Type != "",
+		ID:                 p.ID,
+		ChannelID:          p.ChannelID,
+		ChannelName:        d.ChannelName,
+		ChannelDisplayName: d.ChannelDisplayName,
+		ChannelType:        d.ChannelType,
+		RootID:             p.RootID,
+		UserID:             p.UserID,
+		Username:           strings.TrimPrefix(d.SenderName, "@"),
+		Text:               text,
+		CreatedAt:          time.UnixMilli(p.CreateAt),
+		Direct:             d.ChannelType == "D",
+		MentionsBot:        named || (self.ID != "" && slices.Contains(mentions, self.ID)),
+		FromSelf:           self.ID != "" && p.UserID == self.ID,
+		FromBot:            fromBot(p),
+		FromWebhook:        truthy(p.Props["from_webhook"]),
+		System:             p.Type != "",
 	}, true, nil
+}
+
+// fromBot is a post made by a bot account or a plugin.
+func fromBot(p wirePost) bool {
+	return truthy(p.Props["from_bot"]) || truthy(p.Props["from_plugin"])
 }
 
 // truthy reads a flag the server writes as a boolean in some versions and as

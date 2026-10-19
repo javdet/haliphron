@@ -7,6 +7,77 @@ of `VERSION`, and it is the tag of the published images.
 
 ### Added
 
+- **Mattermost from the UI.** The Integrations page configures the bot:
+  server, bot token, transport, role, reply policy, and an optional repository,
+  run link and limits. Every API replica picks up a saved change within 15
+  seconds and restarts the bot; no rollout. The same configuration is
+  `GET` and `PUT /api/v1/integrations/mattermost` (`admin`). The tokens are
+  write-only and stored as the managed secrets `mattermost-bot-token` and
+  `mattermost-webhook-token`, so the page needs a key encryption key
+  (`409 no_kek` without one). When `HALIPHRON_MATTERMOST_URL` is set, the
+  environment's configuration is in force, the page shows it read-only, and a
+  save is refused with `409 managed_by_environment`.
+- **Outgoing-webhook transport.** Besides the WebSocket, the bot can be fed by
+  a Mattermost outgoing webhook at
+  `POST /api/v1/integrations/mattermost/webhook`. The endpoint takes no bearer
+  token: the webhook's token is compared in constant time against each
+  configured one, and a mismatch is a bare `401`. The backend answers `{}` and
+  then reads the post back from the server with the bot's token, so the
+  author, channel, thread and text are the server's, not the payload's. A
+  trigger word is removed like a mention. Outgoing webhooks fire only in
+  public channels, and the Mattermost server must reach the public API. With
+  both transports on, one post still starts one run.
+- **Reply policy.** `always` is the existing behaviour: an acknowledgement,
+  then the result. `if_unanswered` is for agents that answer in the thread
+  themselves: the bot only reacts with :eyes:. A run that did not succeed is
+  always reported. A run that succeeded is reported only if no bot account
+  posted in the thread after the request, because `Succeeded` means the agent
+  exited 0, not that the person was answered. The policy is frozen on each
+  request when it is claimed. A configuration saved from the UI defaults to
+  `if_unanswered`; one from the environment keeps `always`.
+- **Children of a chat run answer the same person.** A run started by a run
+  that came from chat owes a reply in the same thread, and so do its own
+  children. Its prompt opens with the same chat header as its parent's, added
+  by admission.
+- **Chat header in every chat prompt.** A block between `--- chat message ---`
+  and `--- end of chat message ---` states the platform, the channel, the
+  message and thread identifiers, the sender, and where a reply belongs.
+  Values are flattened, so a display name cannot write lines of its own into
+  it.
+- **Default role `classificator`.** Seeded once at startup, and the default
+  role of a configuration saved from the UI. It picks the role that fits a
+  request with `list_roles`, posts a short routing note in the thread through
+  its Mattermost plugin, and starts the agent with `run_agent`. An edit to it
+  is kept, and a deleted one stays deleted.
+- **`secretEnv` on roles.** A role can add variables to the agent's own
+  environment from managed secrets, such as `MATTERMOST_TOKEN` for a plugin's
+  MCP server that expands `${MATTERMOST_TOKEN}`. The values travel in a new
+  per-run Secret key, `agent-env.json`, together with the role's literal `env`.
+  Names the entrypoint sets itself (`ANTHROPIC_*`, `CLAUDE_*`, `CODEX_*`,
+  `OPENAI_*`, `HALIPHRON_*`, `GIT_*`, `PATH`, `HOME`, `GH_TOKEN`,
+  `LD_PRELOAD`, …) are refused when the role is saved, and with exit 30
+  `MalformedSecret` by the pod. Every value is redacted. This is a deliberate
+  exception to ADR 33, recorded as ADR 39: give the agent a narrow
+  credential, a separate bot account for agent replies, never the listener's.
+  The role form has a Secret variables section.
+- **A role's `settings.json` declares its plugins.** A role without `plugins`
+  may carry `settings.json` or `settings.<role>.json` in claude-code's format.
+  Its `enabledPlugins` and `extraKnownMarketplaces` (`github` and `git`
+  sources only) are checked when the role is saved and become the role's
+  `plugins.json`. Nothing else in the file is applied.
+- **Private plugin catalogues without a repository.** A run with no repository
+  whose role names a marketplace is given a git token minted for the first
+  marketplace, and the pod binds its credential helper to that host only.
+- **Chart.** `mattermost.transport`, `mattermost.webhookToken`,
+  `mattermost.existingSecretWebhookKey` (default `webhookToken`) and
+  `mattermost.replyPolicy`, as `HALIPHRON_MATTERMOST_TRANSPORT`,
+  `HALIPHRON_MATTERMOST_WEBHOOK_TOKEN[_FILE]` and
+  `HALIPHRON_MATTERMOST_REPLY_POLICY`. `deploy/values/ai-infra-control-plane.yaml`
+  exposes MCP on the public hostname and sets `mcpEndpoint`, which agents need
+  for `run_agent`.
+- Migration `0009_chat_integrations` adds the `chat_integrations` table and
+  the `reply_policy`, `channel_name`, `channel_type` and `origin_message_id`
+  columns of `chat_triggers`.
 - **Model gateways such as OpenRouter.** The model credential takes an optional
   `base_url`: the gateway's root, for example `https://openrouter.ai/api`. Set
   it under **Secrets → Model credential**, or as `base_url` on
@@ -47,6 +118,10 @@ of `VERSION`, and it is the tag of the published images.
   backend, and with `CredentialMismatch` by the pod.
 - Migration `0008_secret_endpoint` adds the nullable `secrets.endpoint`
   column.
+- The role's literal `env` now also reaches the agent's own environment, not
+  only the container's, except names the entrypoint reserves.
+- Changing the Mattermost bot's configuration no longer needs a restart when it
+  is saved from the UI. A configuration from the environment still does.
 
 ## 0.4.0 — 2026-10-02
 

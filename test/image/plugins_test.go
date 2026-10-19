@@ -712,3 +712,29 @@ func TestARepositoryThatNamesNoMarketplaceIsIgnoredRatherThanFatal(t *testing.T)
 		t.Errorf("the role's list was discarded by an unusable settings file: %s", cmds)
 	}
 }
+
+func TestARunWithoutARepositoryBindsItsGitTokenToTheRolesMarketplace(t *testing.T) {
+	t.Parallel()
+	h := pluginRun(t, controlplane.RunRequest{
+		Secrets: map[string]string{runv1.SecretKeyGitToken: "ghs_the_marketplace_token"},
+		RoleConfig: pluginConfig(t, runv1.PluginSpec{
+			Marketplaces: []runv1.PluginMarketplace{{Name: "acme", URL: "https://git.acme.example/plugins.git"}},
+			Enabled:      []string{"mattermost@acme"},
+		}),
+	})
+
+	run, code := h.executeRun()
+	if code != 0 {
+		t.Fatalf("exit %d, want 0 (%v)", code, run.Failure())
+	}
+	// The backend mints a token for a run with no repository only when its
+	// role keeps plugins in a catalogue. Without a helper bound to that
+	// catalogue's host, a private one could never be fetched.
+	helper, err := os.ReadFile(filepath.Join(h.layout.RunPrivate, "git-credential-haliphron"))
+	if err != nil {
+		t.Fatalf("no credential helper for the marketplace: %v", err)
+	}
+	if !strings.Contains(string(helper), "'git.acme.example'") {
+		t.Errorf("the helper is not bound to the marketplace's host:\n%s", helper)
+	}
+}

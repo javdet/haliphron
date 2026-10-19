@@ -6,7 +6,9 @@ import (
 	"log/slog"
 	"strings"
 	"time"
+	"unicode/utf8"
 
+	clusterv1 "github.com/automagicops/haliphron/api/cluster/v1"
 	runv1 "github.com/automagicops/haliphron/api/run/v1"
 	"github.com/automagicops/haliphron/backend/run"
 	"github.com/automagicops/haliphron/backend/store"
@@ -54,6 +56,12 @@ type ChatPlatform interface {
 type ChatMessage struct {
 	ID        string
 	ChannelID string
+	// ChannelName is the channel's handle and ChannelDisplayName what the
+	// platform shows for it; either may be empty. ChannelType is the
+	// platform's type letter: O public, P private, D direct, G group.
+	ChannelName        string
+	ChannelDisplayName string
+	ChannelType        string
 	// RootID is the thread the message was posted in, empty when it started
 	// none.
 	RootID   string
@@ -83,7 +91,12 @@ type ChatThreadPost struct {
 	Text      string
 	CreatedAt time.Time
 	FromSelf  bool
-	System    bool
+	// FromBot is a post by any bot account — the agent answering through its
+	// own chat tools, typically. Kind is the kind this process gave its own
+	// post, empty for every other.
+	FromBot bool
+	Kind    string
+	System  bool
 }
 
 // ChatPost is a post the bot publishes.
@@ -116,6 +129,10 @@ type ChatConfig struct {
 	RunURL string
 	// MaxThreadBytes bounds the thread history quoted into a prompt.
 	MaxThreadBytes int
+	// ReplyPolicy is store.ChatReplyAlways — acknowledge, then post the
+	// result — or store.ChatReplyIfUnanswered, for an agent that answers in the
+	// thread itself. Empty means always.
+	ReplyPolicy string
 }
 
 // ChatOutcome is what Handle did with a message.
@@ -171,6 +188,10 @@ const (
 	chatRefusalRetention = 30 * 24 * time.Hour
 )
 
+// chatUnanswered opens the reply to a run that ended without anything
+// answering the thread.
+const chatUnanswered = "Nothing was posted in this thread in answer, so here is how the run ended.\n\n"
+
 // chatLostClaim is the answer to a message whose handler died before deciding
 // anything. Asking again is safe: nothing was started.
 const chatLostClaim = "I could not start a run for this message. Nothing was started; mention me again to retry."
@@ -188,6 +209,9 @@ type Chat struct {
 func (s *Service) NewChat(p ChatPlatform, cfg ChatConfig) *Chat {
 	if cfg.MaxThreadBytes <= 0 {
 		cfg.MaxThreadBytes = DefaultChatThreadBytes
+	}
+	if cfg.ReplyPolicy == "" {
+		cfg.ReplyPolicy = store.ChatReplyAlways
 	}
 	return &Chat{
 		svc:      s,
@@ -233,6 +257,9 @@ func (c *Chat) Handle(ctx context.Context, m ChatMessage) (ChatOutcome, error) {
 		ThreadID:       thread,
 		UserID:         m.UserID,
 		Username:       m.Username,
+		ChannelName:    chatChannelName(m),
+		ChannelType:    m.ChannelType,
+		ReplyPolicy:    c.cfg.ReplyPolicy,
 	}, chatOrphanAfter)
 	if err != nil {
 		return 0, err
@@ -258,7 +285,8 @@ func (c *Chat) Handle(ctx context.Context, m ChatMessage) (ChatOutcome, error) {
 	}
 
 	submitted, err := c.svc.submit(ctx, run.SubmitRequest{
-		Prompt:     BuildChatPrompt(history, m, c.svc.maxPromptBytes(), c.cfg.MaxThreadBytes),
+		Prompt: BuildChatPrompt(c.platform.Name(), history, m, c.svc.maxPromptBytes(),
+			c.cfg.MaxThreadBytes),
 		Role:       c.cfg.Role,
 		RepoURL:    c.cfg.RepoURL,
 		BaseBranch: c.cfg.BaseBranch,
@@ -282,8 +310,13 @@ func (c *Chat) Handle(ctx context.Context, m ChatMessage) (ChatOutcome, error) {
 
 	// The acknowledgement is best effort. The reply that matters is the
 	// durable one, and a person whose acknowledgement was lost still gets it.
+	// Under if_unanswered the reaction is the whole of it: the agent is the one
+	// who speaks in the thread, and a post from the bot ahead of it is noise.
 	if err := c.platform.React(ctx, m.ID, "eyes"); err != nil {
 		c.log.Warn("could not react to a chat message", "message", m.ID, "error", err)
+	}
+	if c.cfg.ReplyPolicy == store.ChatReplyIfUnanswered {
+		return ChatStarted, nil
 	}
 	if _, err := c.platform.Post(ctx, ChatPost{
 		ChannelID: m.ChannelID, RootID: thread, RunID: id, Kind: ChatPostAck,
@@ -379,7 +412,28 @@ func (c *Chat) deliver(ctx context.Context, t store.ChatTrigger) (bool, error) {
 		if !c.svc.ResultSettled(r) {
 			return false, c.svc.store.DeferChatReply(ctx, t.ChatTriggerKey, chatSettleRecheck)
 		}
-		text = renderResult(r, c.runLink(r.ID), c.platform.MaxPostRunes())
+		// A run that did not succeed is always reported: whatever it posted
+		// before it failed is not the answer it was on its way to.
+		if t.ReplyPolicy == store.ChatReplyIfUnanswered && r.Status == clusterv1.StatusSucceeded {
+			answered, err := c.answered(ctx, t)
+			if err != nil {
+				// Not knowing is not silence. The thread is read again on the
+				// next attempt rather than answered twice now.
+				c.log.Warn("could not read a thread to see whether it was answered",
+					"message", t.MessageID, "run", t.RunID, "error", err)
+				return false, c.svc.store.FailChatReply(ctx, t.ChatTriggerKey, err.Error(),
+					chatBackoff(t.Attempts), isPermanent(err) || t.Attempts+1 >= chatMaxAttempts)
+			}
+			if answered {
+				c.log.Info("the agent answered the thread itself; no reply is posted",
+					"message", t.MessageID, "run", t.RunID)
+				return false, c.svc.store.MarkChatReplied(ctx, t.ChatTriggerKey, "")
+			}
+			text = chatUnanswered + renderResult(r, c.runLink(r.ID),
+				c.platform.MaxPostRunes()-utf8.RuneCountInString(chatUnanswered))
+		} else {
+			text = renderResult(r, c.runLink(r.ID), c.platform.MaxPostRunes())
+		}
 		kind = ChatPostResult
 	case t.Refusal != "":
 		text = t.Refusal
@@ -415,6 +469,29 @@ func (c *Chat) deliver(ctx context.Context, t store.ChatTrigger) (bool, error) {
 	}
 	c.log.Info("chat reply posted", "message", t.MessageID, "run", t.RunID, "kind", kind)
 	return true, nil
+}
+
+// answered reports whether anything answered the thread a row owes a reply
+// to, after the row's answer starts to count.
+//
+// An answer is a post by a bot account — the agent's own chat tools post as
+// one — that this process did not make itself. Succeeded is deliberately not
+// consulted: it means the agent exited 0, which says nothing about whether the
+// person heard back.
+func (c *Chat) answered(ctx context.Context, t store.ChatTrigger) (bool, error) {
+	posts, err := c.platform.Thread(ctx, t.ThreadID)
+	if err != nil {
+		return false, err
+	}
+	for _, p := range posts {
+		if p.System || p.Kind != "" || !(p.FromBot || p.FromSelf) {
+			continue
+		}
+		if p.CreatedAt.After(t.AnsweredAfter) {
+			return true, nil
+		}
+	}
+	return false, nil
 }
 
 func (c *Chat) runLink(id runv1.ULID) string {

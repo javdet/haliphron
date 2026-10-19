@@ -111,6 +111,14 @@ type MattermostConfig struct {
 
 	MaxPostRunes   int
 	MaxThreadBytes int
+
+	// Transport is websocket, webhook or both. WebhookTokens are the outgoing
+	// webhooks' tokens, read from a file like the bot's own.
+	Transport     string
+	WebhookTokens []string
+	// ReplyPolicy is always — acknowledge, then post the result — or
+	// if_unanswered, for an agent that answers in the thread itself.
+	ReplyPolicy string
 }
 
 // Enabled reports whether the bot is configured.
@@ -122,7 +130,10 @@ func (m MattermostConfig) LogValue() slog.Value {
 		slog.String("url", m.URL),
 		slog.String("role", m.Role),
 		slog.String("repo", m.RepoURL),
+		slog.String("transport", m.Transport),
+		slog.String("reply_policy", m.ReplyPolicy),
 		slog.Bool("token_set", m.Token != ""),
+		slog.Int("webhook_tokens", len(m.WebhookTokens)),
 	)
 }
 
@@ -278,6 +289,8 @@ func Load() (Config, error) {
 			RunURL:         os.Getenv("HALIPHRON_MATTERMOST_RUN_URL"),
 			MaxPostRunes:   intEnv("HALIPHRON_MATTERMOST_MAX_POST_RUNES", app.DefaultChatPostRunes),
 			MaxThreadBytes: intEnv("HALIPHRON_MATTERMOST_MAX_THREAD_BYTES", app.DefaultChatThreadBytes),
+			Transport:      env("HALIPHRON_MATTERMOST_TRANSPORT", store.ChatTransportWebSocket),
+			ReplyPolicy:    env("HALIPHRON_MATTERMOST_REPLY_POLICY", store.ChatReplyAlways),
 		},
 	}
 
@@ -318,6 +331,11 @@ func Load() (Config, error) {
 			return Config{}, err
 		}
 		cfg.Mattermost.Token = token
+		webhook, err := loadSecret("HALIPHRON_MATTERMOST_WEBHOOK_TOKEN")
+		if err != nil {
+			return Config{}, err
+		}
+		cfg.Mattermost.WebhookTokens = app.SplitChatWebhookTokens(webhook)
 	}
 
 	return cfg, cfg.validate()
@@ -475,6 +493,22 @@ func (m MattermostConfig) validate() error {
 		// Required rather than defaulted: the role is what anyone who can
 		// reach the bot may do, and that is a decision, not a fallback.
 		return fmt.Errorf("config: the Mattermost bot needs HALIPHRON_MATTERMOST_ROLE")
+	}
+	switch m.Transport {
+	case store.ChatTransportWebSocket, store.ChatTransportWebhook, store.ChatTransportBoth:
+	default:
+		return fmt.Errorf("config: HALIPHRON_MATTERMOST_TRANSPORT is %q; it is websocket, webhook or both",
+			m.Transport)
+	}
+	if m.Transport != store.ChatTransportWebSocket && len(m.WebhookTokens) == 0 {
+		return fmt.Errorf("config: the Mattermost %s transport needs HALIPHRON_MATTERMOST_WEBHOOK_TOKEN_FILE "+
+			"or HALIPHRON_MATTERMOST_WEBHOOK_TOKEN", m.Transport)
+	}
+	switch m.ReplyPolicy {
+	case store.ChatReplyAlways, store.ChatReplyIfUnanswered:
+	default:
+		return fmt.Errorf("config: HALIPHRON_MATTERMOST_REPLY_POLICY is %q; it is always or if_unanswered",
+			m.ReplyPolicy)
 	}
 	if m.BaseBranch != "" && m.RepoURL == "" {
 		return fmt.Errorf("config: HALIPHRON_MATTERMOST_BASE_BRANCH is set without HALIPHRON_MATTERMOST_REPO")

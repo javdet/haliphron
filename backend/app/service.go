@@ -38,6 +38,10 @@ type Service struct {
 	// the poll deadline in one select.
 	work *notifier
 
+	// chatEnv is the chat integration the deployment's environment
+	// configures, which overrides chat_integrations while it is set.
+	chatEnv chatEnvironment
+
 	now func() time.Time
 }
 

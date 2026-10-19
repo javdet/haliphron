@@ -43,6 +43,9 @@ const (
 	AuditClusterDeleted    = "cluster.deleted"
 
 	AuditTokenRemoved = "token.removed"
+
+	AuditChatIntegrationSaved = "chat_integration.saved"
+	AuditRoleSeeded           = "role.seeded"
 )
 
 // AuditEntry is one record. Actor and ActorKind are who did it — a token, a

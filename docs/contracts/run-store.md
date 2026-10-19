@@ -457,7 +457,8 @@ this column.
 
 **`chat_triggers` is the chat bot's claim and the reply it owes.** Every API
 replica holds its own connection to the chat server as the bot, so every message
-arrives once per replica. The first statement executed about a message is an
+arrives once per replica — and with the outgoing-webhook transport switched on
+beside the socket, once more through the webhook. The first statement executed about a message is an
 `INSERT … ON CONFLICT DO NOTHING` keyed by `(tenant_id, platform, message_id)`,
 and the replica that loses it does nothing more: no thread fetch, no admission,
 no reply. `idempotency_keys` does not do this job. It expires after a day, a
@@ -492,6 +493,59 @@ reaper 30 days after they were claimed, once answered.
 `created_via` gains `mattermost`. The domain is widened the way `runtime_phase`
 is in 0006: the constraint is dropped and re-added with the whole list written
 out.
+
+**`reply_policy` is frozen on the row when the message is claimed** (0009).
+`always` is what 0007 did: an acknowledgement, then the run's result.
+`if_unanswered` is for an agent that answers in the thread itself: the bot only
+reacts, and when the run ends the reply loop reads the thread before posting.
+A run that did not reach `Succeeded` is always reported — whatever it posted
+before it failed is not the answer it was on its way to. A run that did is
+reported only if no post by a bot account appeared in the thread after the
+row's answer starts to count; posts the backend made itself carry a
+`haliphron_kind` prop and do not count. A thread that cannot be read is a
+failed attempt and is retried, never taken for silence. The rule exists because
+`Succeeded` means the agent exited 0, which says nothing about whether the
+person was answered. Frozen, because an operator changing the policy while a
+run is in flight must not change what that run owes. Rows written before 0009
+read as `always`, which is what they were claimed under.
+
+**A child of a chat run owes the same person a reply, through a follow-up
+row.** When `InsertRun` inserts a run with a parent, it inserts — in the same
+transaction, for the same reason the claim is linked there — a row copying the
+parent's row: platform, channel, thread, sender, `channel_name`,
+`channel_type` and `reply_policy`. Its `message_id` is `run:` and the child's
+identifier, which is not a chat message and is never claimed;
+`origin_message_id` is the message the whole tree answers; `run_id` is the
+child. A parent with no row gives its child none, and a grandchild inherits
+through its parent's follow-up by the same statement. A follow-up is due at once
+and selected only when its run ends, like any row with a run. For a follow-up,
+an answer counts only after the child's `started_at`, so that what the parent
+said before the child ran — the classificator's routing note, typically — is not
+taken for the child's answer. Admission reads the same row to prepend the chat
+header to a child's prompt. A follow-up is never written from anywhere but
+`InsertRun`: a child committed without one is a child whose failure nobody is
+told about.
+
+`channel_name` and `channel_type` are what a prompt says about where a message
+came from, kept so a child run can be told the same.
+
+**`chat_integrations` is the bot's configuration when an operator keeps it in
+the UI** (0009), one row per platform. It holds no credential: the bot's token
+and the outgoing-webhook tokens are managed secrets under fixed names,
+`mattermost-bot-token` and `mattermost-webhook-token`, encrypted like every
+other. The environment wins when it names a server, so there is never a
+question of which of two sources is in force. `updated_at` is the version every
+API replica polls, every 15 seconds, to notice a change. It is written by the
+statement that saves the row, never by a trigger, so a save that changes
+nothing is still a restart an operator can ask for. The credentials are written
+before the row, so a replica that sees the version move finds the credentials
+it is about to read.
+
+**A default role is seeded once.** The `classificator` role is inserted at
+startup by `INSERT … WHERE NOT EXISTS` over any row of that name, deleted ones
+included. A default an operator edits keeps the edits, one an operator deletes
+stays deleted across restarts, and one statement does the check and the insert,
+so replicas starting together seed it once.
 
 ---
 
@@ -591,6 +645,18 @@ real PostgreSQL — generated columns, domains, partial indexes,
 - [x] the migrations apply from scratch, roll back to an empty database and apply again
 - [x] `Migrate` is idempotent (every replica calls it at startup)
 - [x] every contract query `PREPARE`s against the schema it ships with
+
+The chat rules 0009 added are store and `app` together, so they are exercised
+in [test/backend](../../test/backend) (`chatintegration_test.go`) against the
+same real PostgreSQL rather than here:
+
+- [x] under `if_unanswered` the bot only reacts, and posts nothing when a bot account answered the thread after the claim
+- [x] under `if_unanswered` a run that succeeded without anything answering the thread is still reported
+- [x] under `if_unanswered` a run that did not succeed is reported even if the agent posted first
+- [x] a child and a grandchild of a chat run are told where the message came from, and a child that fails without a word is reported in the parent's thread even though the parent's routing note answered the parent
+- [x] a run not started from chat gives its children no chat header
+- [x] the default roles are seeded once and stay deleted when deleted
+- [x] an integration configured by the environment cannot be saved from the UI, and its tokens are never returned
 
 Not covered, and cannot be covered here: the decision table in section 5 of the
 Cluster API. It lives in the backend

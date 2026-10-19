@@ -188,6 +188,10 @@ spec:
             items:
               - key: {{ include "haliphron.mattermostSecretKey" . }}
                 path: {{ include "haliphron.mattermostSecretKey" . }}
+              {{- if (include "haliphron.mattermostWebhook" .) }}
+              - key: {{ include "haliphron.mattermostWebhookKey" . }}
+                path: {{ include "haliphron.mattermostWebhookKey" . }}
+              {{- end }}
         {{- end }}
         {{- with .Values.backend.extraVolumes }}
         {{- toYaml . | nindent 8 }}

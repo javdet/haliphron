@@ -16,6 +16,8 @@ import {
   type Attempt,
   type BootstrapToken,
   type BootstrapTokenSecret,
+  type ChatIntegration,
+  type ChatIntegrationRequest,
   type Cluster,
   type CreateRunRequest,
   type GitCredential,
@@ -54,6 +56,7 @@ export const keys = {
   secrets: () => ['secrets'] as const,
   modelCredential: () => ['model-credential'] as const,
   gitCredential: () => ['git-credential'] as const,
+  mattermost: () => ['integrations', 'mattermost'] as const,
 }
 
 /** How often a run that has not finished is re-read. */
@@ -415,6 +418,30 @@ export function usePutGitCredential() {
       }),
     onSuccess: (cred) => {
       qc.setQueryData(keys.gitCredential(), cred)
+      void qc.invalidateQueries({ queryKey: keys.secrets() })
+    },
+  })
+}
+
+// ---------------------------------------------------------------------------
+// integrations
+// ---------------------------------------------------------------------------
+
+export function useMattermost() {
+  return useQuery({
+    queryKey: keys.mattermost(),
+    queryFn: ({ signal }) => request<ChatIntegration>('/integrations/mattermost', { signal }),
+  })
+}
+
+export function usePutMattermost() {
+  const qc = useQueryClient()
+  return useMutation({
+    mutationFn: (body: ChatIntegrationRequest) =>
+      request<ChatIntegration>('/integrations/mattermost', { method: 'PUT', body }),
+    onSuccess: (saved) => {
+      qc.setQueryData(keys.mattermost(), saved)
+      // The tokens are rows on the Secrets page.
       void qc.invalidateQueries({ queryKey: keys.secrets() })
     },
   })

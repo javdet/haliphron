@@ -168,6 +168,15 @@ return { runs, attempts, LOG, roles, clusters }
 // because that is the state a fresh installation is in.
 let modelCredential = { secret_name: 'llm-api-key', configured: false }
 
+// Never saved, so the page opens on the defaults a new installation sees.
+let mattermost = {
+  platform: 'mattermost', source: 'none', enabled: false, transport: 'websocket', url: '',
+  role: 'classificator', repo: '', base_branch: '', run_url: '', reply_policy: 'if_unanswered',
+  max_post_runes: 16383, max_thread_bytes: 65536, bot_token_configured: false,
+  webhook_token_configured: false, webhook_path: '/api/v1/integrations/mattermost/webhook',
+  bot_token_secret: 'mattermost-bot-token', webhook_token_secret: 'mattermost-webhook-token',
+}
+
 // Starts empty, so the prompt to set one is what the mock shows first.
 const gitTokens = [
   { secret_name: 'git-token', configured: false },
@@ -322,6 +331,16 @@ const routes = [
       secret_name: 'llm-api-key', configured: true, kind: 'managed', type: 'oauth_token', updated_at: iso(0),
     }
     return modelCredential
+  }],
+  ['GET', /^\/api\/v1\/integrations\/mattermost$/, () => mattermost],
+  ['PUT', /^\/api\/v1\/integrations\/mattermost$/, (_m, _url, _fx, payload) => {
+    const { bot_token, webhook_tokens, ...rest } = payload ?? {}
+    mattermost = {
+      ...mattermost, ...rest, source: 'database', updated_by: 'maria-admin', updated_at: iso(0),
+      bot_token_configured: mattermost.bot_token_configured || !!bot_token,
+      webhook_token_configured: mattermost.webhook_token_configured || !!webhook_tokens,
+    }
+    return mattermost
   }],
   ['GET', /^\/api\/v1\/git-credential$/, () => gitCredential()],
   ['PUT', /^\/api\/v1\/git-credential$/, (_m, _url, _fx, payload) => {

@@ -55,6 +55,19 @@ const (
 	// absent, because the pod addresses no object store at all.
 	SecretKeyPresigned = "presigned.json"
 
+	// SecretKeyAgentEnv holds the variables a role adds to the agent's own
+	// environment, as a JSON object of name to value: the role's literal env
+	// and the values of the managed secrets its secretEnv names. Absent when the
+	// role adds none.
+	//
+	// The one deliberate exception to ADR 33. A plugin's MCP server that needs
+	// a credential — a chat bot's token, say — can only be given one through
+	// the environment of the CLI that starts it, and the agent can read that
+	// environment. The role is the decision to accept that; the names that
+	// would let it replace the model key or the control plane's own variables
+	// are refused when the role is saved (ReservedAgentEnvName).
+	SecretKeyAgentEnv = "agent-env.json"
+
 	// SecretKeyCallbackToken authenticates the pod's completion callback and
 	// its artifact uploads to the controller. Unlike every other key it is
 	// minted by the controller, not the backend: without it any pod in the

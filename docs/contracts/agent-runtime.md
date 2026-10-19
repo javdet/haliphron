@@ -127,7 +127,8 @@ independent reasons, either of which would have sufficed.
 
 **Mechanical.** The Secret's keys are fixed by contract 1: `prompt`,
 `git-token`, `llm-api-key`, `llm-base-url` when the key belongs to a gateway,
-`mcp.json`, `callback-token`, and `presigned.json` in object-store mode. All but the first are invalid environment variable names.
+`mcp.json`, `callback-token`, `presigned.json` in object-store mode, and
+`agent-env.json` when the role adds variables to the agent's environment. All but the first are invalid environment variable names.
 `envFrom` silently skips such keys, leaving an Event in the namespace — which
 means the pod starts with no git token, no MCP configuration and no credentials
 at all, and the first intelligible message about it is a clone that failed to
@@ -146,8 +147,42 @@ runs not here but along the scope of the secrets themselves — an hour-long
 repo-scoped token, presigned links to its own prefix, no ServiceAccount token.
 
 **What the entrypoint exports to the agent's child process:** the model key
-under the name the CLI expects, and the MCP header values (section 8). Nothing
-else. The rest stays in the entrypoint's environment and in files.
+under the name the CLI expects, the MCP header values (section 8), and the
+variables in `agent-env.json`. Nothing else. The rest stays in the entrypoint's
+environment and in files.
+
+**`agent-env.json` is the one deliberate exception to ADR 33** (ADR 39 in the
+architecture). It is a JSON object of variable name to value: the role's literal
+`env` whose names are not reserved, and the values of the managed secrets the
+role's `secretEnv` names, resolved by the backend when it cuts the lease. A
+secret that is gone by then is left out with a warning in the backend's log
+rather than failing the lease. The key is absent when the role adds nothing.
+
+It exists because a plugin's MCP server that needs a credential — a chat bot's
+token, typically — can only be given one through the environment of the CLI
+that starts it: claude-code expands `${NAME}` in a plugin's `.mcp.json` from its
+own environment, and there is no file it could be pointed at instead. The agent
+can read that environment. The role is the decision to accept that, which is why
+the variables come from the role and never from a run request.
+
+Two rules keep the exception from reaching anything else:
+
+- **Reserved names are refused on both sides.** A name starting `ANTHROPIC_`,
+  `CLAUDE_`, `CODEX_`, `OPENAI_`, `HALIPHRON_` or `GIT_`, or one of `PATH`,
+  `HOME`, `USER`, `SHELL`, `TMPDIR`, `GH_TOKEN`, `GL_TOKEN`, `GITHUB_TOKEN`,
+  `GITLAB_TOKEN`, `LD_PRELOAD`, `LD_LIBRARY_PATH` and `NODE_OPTIONS`, is refused
+  when the role is saved, and a file carrying one fails the pod with exit 30,
+  `MalformedSecret`. One list, `AgentEnvName` in
+  [api/run/v1/agentenv.go](../../api/run/v1/agentenv.go), by the rule
+  `ArtifactKey` states: a role that could set `ANTHROPIC_BASE_URL` could send
+  the model key to a host of its choosing. The pod refuses rather than drops,
+  because a name one side accepts and the other discards is a variable the role
+  believes it set. A file that is not an object of strings is exit 30 as well.
+- **Every value is redacted.** The file does not say which values are
+  credentials, so all of them are treated as one (section 11).
+
+The variables are appended after the runtime's own, and the log names them
+without their values.
 
 ### 2.3 The prompt is the one exception, and it is a deliberate one
 
@@ -511,6 +546,22 @@ marketplace half must be one the **same document** declares, since the chain
 picks a single source and nothing else will register it.
 `trustRepositorySources` defaults to **true** when absent.
 
+**A role's own `settings.json` is an accepted way to declare its plugins.** A
+role whose `plugins` is unset may carry `settings.<role>.json` or
+`settings.json` among its `configFiles`, in claude-code's own format. The backend
+reads its `enabledPlugins` and `extraKnownMarketplaces` — `github` and `git`
+sources only — **strictly** when the role is saved, refusing a `directory` or
+`url` marketplace and anything that does not validate, and renders them into
+`plugins.json` at lease time. Nothing else in that file is applied: its
+`permissions` would widen the tool ceiling the backend already computed. The
+pod is unaffected — it still receives only `plugins.json`, and reads it exactly
+as above. The parser is one, `PluginSpecFromSettings` in
+[api/run/v1/settings.go](../../api/run/v1/settings.go), used strictly by the
+backend for a role and leniently by the pod for a repository's settings files
+in steps 1 and 3 below: a marketplace the backend accepted at save and the pod
+dropped at lease would be a plugin the operator believes is installed and the
+agent never had.
+
 ### The chain
 
 Executed in the `plugins` phase, after `role`, most specific first. The first
@@ -569,6 +620,15 @@ host on the helper's stdin; the helper answers that one and stays silent for
 every other. A marketplace on a different forge is therefore cloned
 unauthenticated — public catalogues work, private ones elsewhere do not, and
 that is the correct trade.
+
+A run with **no repository** has no repository host to bind to. When its role
+names a marketplace, the backend mints the git token for the **first**
+marketplace's URL instead (an `owner/repo` shorthand read as GitHub's), and the
+`auth` phase binds the helper to that marketplace's host on the same terms.
+Without it, a role that keeps its plugins in a private catalogue — the chat
+router is the case — could never run without a repository to clone. A run with
+neither a repository nor a marketplace gets no git token, and a token that
+arrives anyway is not used.
 
 | haliphron concept | claude-code | codex |
 |---|---|---|
@@ -1176,6 +1236,8 @@ needs a kubelet.
 
 - [ ] the agent prints the contents of `/haliphron/secrets/` → not one log chunk contains the values
 - [ ] a secret in `result.md` → absent from the report's `summary` as well
+- [ ] the variables in `agent-env.json` reach the agent's environment, and none of their values reaches a log chunk
+- [ ] `agent-env.json` naming a reserved variable → 30, `MalformedSecret`, before the model is started
 
 **Runtime equivalence:**
 

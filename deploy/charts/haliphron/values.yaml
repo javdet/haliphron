@@ -383,6 +383,12 @@ limits:
 # The Mattermost bot
 # -----------------------------------------------------------------------------
 #
+# The bot can be configured here or in the UI (Integrations → Mattermost). The
+# UI is the usual answer: it needs no rollout, keeps the tokens encrypted with
+# the other managed secrets, and seeds the default `classificator` role. Set
+# `enabled` here only to pin the configuration to the release; while it is set
+# the UI shows it read-only.
+#
 # A bot account whose mentions become runs. "@devops_duty why is CI red?" in a
 # channel the bot is a member of — or any message in a direct conversation
 # with it — starts a run under `role` below, with the message as the prompt
@@ -437,6 +443,24 @@ mattermost:
   maxPostRunes: 16383
   # How much of a thread is quoted into the prompt as context.
   maxThreadBytes: 65536
+
+  # How messages arrive: websocket (the backend dials the server), webhook
+  # (the server calls POST /api/v1/integrations/mattermost/webhook through an
+  # outgoing webhook — public channels only, and the public API must be
+  # reachable from the server), or both. The same post arriving both ways
+  # starts one run.
+  transport: websocket
+  # The outgoing webhooks' tokens, one per line, when transport is webhook or
+  # both. Taken from existingSecret under existingSecretWebhookKey when that is
+  # set.
+  webhookToken: ""
+  existingSecretWebhookKey: webhookToken
+
+  # always: the bot acknowledges each request and posts the run's result.
+  # if_unanswered: for a role whose agent answers in the thread itself; the
+  # bot only reacts, and posts the result only when the run failed or nothing
+  # answered the thread.
+  replyPolicy: always
 
 # -----------------------------------------------------------------------------
 # The UI

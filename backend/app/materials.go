@@ -77,9 +77,38 @@ func (s *Service) materials(ctx context.Context, runID runv1.ULID, spec runv1.Re
 
 	secrets = map[string]string{}
 
-	if spec.Repo.URL != "" && s.git != nil {
+	// The role first: what it says decides whether a run with no repository
+	// still needs a git token, for a private plugin catalogue.
+	var role *run.Role
+	if spec.Role != "" {
+		stored, err := s.store.RoleByName(ctx, spec.Role)
+		switch {
+		case err == nil:
+			if role, err = parseRole(stored); err != nil {
+				return nil, nil, err
+			}
+			if roleConfig, err = s.renderRoleConfig(runID, role); err != nil {
+				return nil, nil, err
+			}
+		case errors.Is(err, store.ErrNotFound):
+			// The role was deleted after the run was admitted. The spec is
+			// frozen and still describes what to run, so the run proceeds
+			// without the fallback files rather than failing on a record that
+			// is no longer there.
+			s.log.Warn("role named by an admitted run no longer exists",
+				"run", runID, "role", spec.Role)
+		default:
+			return nil, nil, fmt.Errorf("read role %s: %w", spec.Role, err)
+		}
+	}
+
+	if gitURL := gitTokenTarget(spec, role); gitURL != "" && s.git != nil {
 		ttl := time.Duration(spec.Runtime.TimeoutSeconds) * time.Second * 2
-		token, err := s.git.MintToken(ctx, spec.Repo.URL, spec.Repo.Provider, ttl)
+		provider := spec.Repo.Provider
+		if spec.Repo.URL == "" {
+			provider = run.ProviderFor(gitURL)
+		}
+		token, err := s.git.MintToken(ctx, gitURL, provider, ttl)
 		if err != nil {
 			return nil, nil, fmt.Errorf("mint git token for %s: %w", runID, err)
 		}
@@ -116,31 +145,81 @@ func (s *Service) materials(ctx context.Context, runID runv1.ULID, spec runv1.Re
 		secrets[runv1.SecretKeyMCPConfig] = mcp
 	}
 
-	if spec.Role != "" {
-		role, err := s.store.RoleByName(ctx, spec.Role)
-		switch {
-		case err == nil:
-			parsed, err := parseRole(role)
-			if err != nil {
-				return nil, nil, err
-			}
-			roleConfig, err = s.renderRoleConfig(runID, parsed)
-			if err != nil {
-				return nil, nil, err
-			}
-		case errors.Is(err, store.ErrNotFound):
-			// The role was deleted after the run was admitted. The spec is
-			// frozen and still describes what to run, so the run proceeds
-			// without the fallback files rather than failing on a record that
-			// is no longer there.
-			s.log.Warn("role named by an admitted run no longer exists",
-				"run", runID, "role", spec.Role)
-		default:
-			return nil, nil, fmt.Errorf("read role %s: %w", spec.Role, err)
-		}
+	agentEnv, err := s.agentEnv(ctx, runID, spec, role)
+	if err != nil {
+		return nil, nil, err
+	}
+	if agentEnv != "" {
+		secrets[runv1.SecretKeyAgentEnv] = agentEnv
 	}
 
 	return secrets, roleConfig, nil
+}
+
+// gitTokenTarget is the repository a run's git token is minted for: the run's
+// own, or — for a run with no repository whose role installs plugins — the
+// first plugin catalogue, which the pod binds the token to and nothing else.
+func gitTokenTarget(spec runv1.RenderedRunSpec, role *run.Role) string {
+	if spec.Repo.URL != "" {
+		return spec.Repo.URL
+	}
+	if role == nil || role.Plugins == nil || len(role.Plugins.Marketplaces) == 0 {
+		return ""
+	}
+	url := role.Plugins.Marketplaces[0].URL
+	if !strings.HasPrefix(url, "https://") {
+		// The owner/repo shorthand is GitHub's, as the pod reads it.
+		url = "https://github.com/" + url
+	}
+	return url
+}
+
+// agentEnv renders what the role adds to the agent's environment: its literal
+// env, which until now reached only the container, and the values of the
+// managed secrets its secretEnv names.
+//
+// A literal name the agent environment reserves is left out rather than
+// refused. It reaches the container as it always has, and a role saved before
+// this key existed must not stop running because of it. A secret that is gone
+// is left out too, loudly: the run still has work it can do, and refusing the
+// lease would make one deleted secret a queue of runs that cannot start.
+func (s *Service) agentEnv(ctx context.Context, runID runv1.ULID, spec runv1.RenderedRunSpec,
+	role *run.Role) (string, error) {
+
+	vars := map[string]string{}
+	for _, v := range spec.Runtime.Env {
+		if runv1.AgentEnvName(v.Name) == nil {
+			vars[v.Name] = v.Value
+		}
+	}
+	if role != nil {
+		for _, v := range role.SecretEnv {
+			if err := runv1.AgentEnvName(v.Name); err != nil {
+				s.log.Warn("a role's secretEnv names a reserved variable; it is left out",
+					"run", runID, "role", role.Name, "variable", v.Name)
+				continue
+			}
+			value, err := s.store.ResolveSecret(ctx, v.Secret)
+			switch {
+			case err == nil:
+				vars[v.Name] = string(value)
+			case errors.Is(err, store.ErrNotFound), errors.Is(err, store.ErrSecretNotManaged):
+				s.log.Warn("a role's secretEnv names a secret this backend cannot read; "+
+					"the variable is left out", "run", runID, "role", role.Name,
+					"variable", v.Name, "secret", v.Secret, "error", err)
+			default:
+				return "", fmt.Errorf("resolve secret %s for %s: %w", v.Secret, runID, err)
+			}
+		}
+	}
+	if len(vars) == 0 {
+		return "", nil
+	}
+	encoded, err := json.Marshal(vars)
+	if err != nil {
+		return "", fmt.Errorf("render agent environment for %s: %w", runID, err)
+	}
+	return string(encoded), nil
 }
 
 // renderRoleConfig is the role's files plus the documents the control plane

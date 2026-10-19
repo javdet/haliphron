@@ -14,7 +14,6 @@ import (
 	"fmt"
 	"log/slog"
 	"net/http"
-	"net/url"
 	"os"
 	"os/signal"
 	"sync"
@@ -156,6 +155,29 @@ func run() error {
 		Limits:    cfg.Limits,
 	})
 
+	// The chat bot's configuration: the environment's when it names a server,
+	// the stored one otherwise. Recorded before any listener starts, so the UI
+	// never shows the stored row while the environment is what runs.
+	if cfg.Mattermost.Enabled() {
+		service.UseEnvironmentChat(app.ResolvedChatIntegration{
+			ChatIntegration: store.ChatIntegration{
+				Platform:       mattermost.Name,
+				Enabled:        true,
+				Transport:      cfg.Mattermost.Transport,
+				URL:            cfg.Mattermost.URL,
+				Role:           cfg.Mattermost.Role,
+				RepoURL:        cfg.Mattermost.RepoURL,
+				BaseBranch:     cfg.Mattermost.BaseBranch,
+				RunURL:         cfg.Mattermost.RunURL,
+				ReplyPolicy:    cfg.Mattermost.ReplyPolicy,
+				MaxPostRunes:   cfg.Mattermost.MaxPostRunes,
+				MaxThreadBytes: cfg.Mattermost.MaxThreadBytes,
+			},
+			BotToken:      cfg.Mattermost.Token,
+			WebhookTokens: cfg.Mattermost.WebhookTokens,
+		})
+	}
+
 	var wg sync.WaitGroup
 	serve := func(name, addr string, handler http.Handler) {
 		server := &http.Server{
@@ -189,8 +211,21 @@ func run() error {
 		}()
 	}
 
+	// The chat bot runs beside the public API: it is another way in for a
+	// person, and it belongs with the listener a person reaches rather than
+	// with the Cluster API, which may face remote clusters and has no reason
+	// to reach a chat server. Every API replica runs it; the claim in the
+	// store makes that one run per message. Its webhook is served on the
+	// public listener, because that is the one a chat server can reach.
+	var bot *mattermost.Supervisor
 	if cfg.Mode.Serves(config.ModeAPI) {
-		serve("public", cfg.PublicAddr, restapi.New(service, log).Handler())
+		bot = mattermost.NewSupervisor(service, log, nil)
+		serve("public", cfg.PublicAddr, restapi.New(service, log).
+			Mount("POST "+restapi.BasePath+"/integrations/mattermost/webhook", bot).
+			Handler())
+	} else if cfg.Mattermost.Enabled() {
+		log.Warn("the Mattermost bot is configured but this process does not serve the public API; "+
+			"it is not started here", "mode", cfg.Mode)
 	}
 	if cfg.Mode.Serves(config.ModeMCP) {
 		serve("mcp", cfg.MCPAddr, mcp.New(service, log).WithRunRetention(cfg.RunRetention).Handler())
@@ -224,60 +259,22 @@ func run() error {
 		}()
 	}
 
-	// The chat bot runs beside the public API: it is another way in for a
-	// person, and it belongs with the listener a person reaches rather than
-	// with the Cluster API, which may face remote clusters and has no reason
-	// to reach a chat server. Every API replica connects; the claim in the
-	// store makes that one run per message.
-	if cfg.Mattermost.Enabled() {
-		if cfg.Mode.Serves(config.ModeAPI) {
-			startMattermost(ctx, &wg, cfg, service, log)
-		} else {
-			log.Warn("the Mattermost bot is configured but this process does not serve the public API; "+
-				"it is not started here", "mode", cfg.Mode)
+	if bot != nil {
+		// The default roles are seeded where the bot runs, because the bot is
+		// what needs one: a stored integration defaults to the classificator.
+		if created, err := service.EnsureDefaultRoles(ctx); err != nil {
+			log.Error("could not seed the default roles", "error", err)
+		} else if len(created) > 0 {
+			log.Info("seeded default roles", "roles", created)
 		}
+		wg.Add(1)
+		go func() { defer wg.Done(); bot.Run(ctx) }()
 	}
 
 	<-ctx.Done()
 	log.Info("shutting down")
 	wg.Wait()
 	return nil
-}
-
-// startMattermost connects the bot and starts the loop that posts its replies.
-func startMattermost(ctx context.Context, wg *sync.WaitGroup, cfg config.Config,
-	service *app.Service, log *slog.Logger) {
-
-	base, err := url.Parse(cfg.Mattermost.URL)
-	if err != nil {
-		// validate has already parsed it; this is unreachable short of a bug.
-		log.Error("the Mattermost URL could not be parsed", "error", err)
-		return
-	}
-	client := mattermost.NewClient(mattermost.Config{
-		BaseURL:      base,
-		Token:        cfg.Mattermost.Token,
-		MaxPostRunes: cfg.Mattermost.MaxPostRunes,
-	})
-	chat := service.NewChat(client, app.ChatConfig{
-		Role:           cfg.Mattermost.Role,
-		RepoURL:        cfg.Mattermost.RepoURL,
-		BaseBranch:     cfg.Mattermost.BaseBranch,
-		RunURL:         cfg.Mattermost.RunURL,
-		MaxThreadBytes: cfg.Mattermost.MaxThreadBytes,
-	})
-	if err := chat.CheckRole(ctx); errors.Is(err, store.ErrNotFound) {
-		log.Warn("the Mattermost bot's role does not exist; every mention is refused until it is created",
-			"role", cfg.Mattermost.Role)
-	} else if err != nil {
-		log.Warn("could not check the Mattermost bot's role", "role", cfg.Mattermost.Role, "error", err)
-	}
-	log.Info("starting the Mattermost bot", "mattermost", cfg.Mattermost)
-
-	listener := mattermost.NewListener(client, chat, log)
-	wg.Add(2)
-	go func() { defer wg.Done(); listener.Run(ctx) }()
-	go func() { defer wg.Done(); chat.RunReplier(ctx, 5*time.Second) }()
 }
 
 // healthHandler answers the two probes, and serves /metrics beside them.

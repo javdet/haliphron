@@ -191,7 +191,7 @@ timeout below it.
 
 | Value | Default |
 |---|---|
-| `mcpEndpoint` | `""` |
+| `mcpEndpoint` | `""` — the MCP URL as an agent pod reaches it; needed for `run_agent` from inside a run, and so for the chat bot's `classificator`. Agent egress excludes RFC1918, so this is a public hostname |
 | `limits.runTokenTTLMultiplier` | `2` |
 | `limits.idempotencyTTL` | `24h` |
 | `limits.maxAckExpiries` | `0` — contract default 5 |
@@ -211,12 +211,27 @@ timeout below it.
 | `mattermost.existingSecretKey` | `token` | |
 | `mattermost.maxPostRunes` | `16383` | |
 | `mattermost.maxThreadBytes` | `65536` | |
+| `mattermost.transport` | `websocket` | `websocket`, `webhook` or `both` |
+| `mattermost.webhookToken` | `""` | the outgoing webhooks' tokens, one per line; written to the credentials Secret |
+| `mattermost.existingSecretWebhookKey` | `webhookToken` | the key of `mattermost.existingSecret` holding the webhook tokens |
+| `mattermost.replyPolicy` | `always` | `always` or `if_unanswered` |
+
+These values are one of two ways to configure the bot. The other is the UI
+(Integrations → Mattermost), which needs no rollout and keeps the tokens with
+the other managed secrets. Leave `mattermost.enabled` off to use the UI; while
+it is on, the UI shows this configuration read-only.
 
 Exactly one of `mattermost.token` and `mattermost.existingSecret` must be set.
 The token is mounted as a file at `/haliphron/mattermost/`. It is read once at
 startup, so a token rotated inside an existing Secret needs a rollout restart.
-With `networkPolicy.enabled`, the Mattermost server has to be added to
-`networkPolicy.egressTo`.
+With `mattermost.transport` `webhook` or `both`, the chart refuses to render
+without the webhook tokens, taken from `mattermost.existingSecret` under
+`mattermost.existingSecretWebhookKey` when that is set and from
+`mattermost.webhookToken` otherwise; they are mounted beside the bot's token.
+The webhook transport needs the Mattermost server to reach the public API, and
+fires only in public channels. With `networkPolicy.enabled`, the Mattermost
+server has to be added to `networkPolicy.egressTo` for the WebSocket, and its
+traffic admitted by `networkPolicy.ingressFrom` for the webhook.
 
 ### Frontend
 

@@ -1,5 +1,6 @@
 import { useMemo, useState } from 'react'
 import { Field, Rows, Section, StringList } from './ui'
+import { useSecrets } from '../api/hooks'
 import {
   AGENT_TYPES,
   PERMISSION_MODES,
@@ -27,7 +28,7 @@ import {
 /** The keys this form renders. Everything else is carried through untouched. */
 const KNOWN = [
   'description', 'agent', 'model', 'image', 'permissionMode', 'maxTurns', 'systemPrompt', 'env',
-  'mcpServers', 'toolPolicy', 'plugins', 'configFiles', 'clusterSelector',
+  'secretEnv', 'mcpServers', 'toolPolicy', 'plugins', 'configFiles', 'clusterSelector',
 ] as const
 
 export interface RoleFormState {
@@ -45,6 +46,7 @@ export interface RoleFormState {
   trustRepositorySources: boolean
   mcpServers: McpServer[]
   env: { name: string; value: string }[]
+  secretEnv: { name: string; secret: string }[]
   configFiles: { name: string; body: string }[]
   /**
    * Everything this build does not render, kept so it survives a save: the
@@ -88,6 +90,7 @@ export function split(spec: RoleSpec | undefined): RoleFormState {
     trustRepositorySources: s.plugins?.trustRepositorySources ?? true,
     mcpServers: s.mcpServers ?? [],
     env: s.env ?? [],
+    secretEnv: s.secretEnv ?? [],
     configFiles: Object.entries(s.configFiles ?? {}).map(([name, body]) => ({ name, body })),
     rest,
     restToolPolicy: others(s.toolPolicy, KNOWN_TOOL_POLICY),
@@ -146,6 +149,11 @@ export function merge(form: RoleFormState): RoleSpec {
   const env = form.env.filter((e) => e.name.trim())
   set('env', env, env.length > 0)
 
+  const secretEnv = form.secretEnv
+    .filter((e) => e.name.trim())
+    .map((e) => ({ name: e.name.trim(), secret: e.secret.trim() }))
+  set('secretEnv', secretEnv, secretEnv.length > 0)
+
   const files = form.configFiles.filter((f) => f.name.trim())
   set(
     'configFiles',
@@ -172,6 +180,27 @@ function systemPromptError(prompt: string): string | undefined {
   const bytes = new TextEncoder().encode(prompt).length
   if (bytes <= MAX_SYSTEM_PROMPT_BYTES) return undefined
   return `${bytes} bytes; the limit is ${MAX_SYSTEM_PROMPT_BYTES}`
+}
+
+/**
+ * Mirrors api/run/v1.AgentEnvName: the names the entrypoint sets itself, which a
+ * role may not replace in the agent's environment.
+ */
+const RESERVED_ENV_PREFIXES = ['ANTHROPIC_', 'CLAUDE_', 'CODEX_', 'OPENAI_', 'HALIPHRON_', 'GIT_']
+const RESERVED_ENV_NAMES = [
+  'PATH', 'HOME', 'USER', 'SHELL', 'TMPDIR', 'GH_TOKEN', 'GL_TOKEN', 'GITHUB_TOKEN', 'GITLAB_TOKEN',
+  'LD_PRELOAD', 'LD_LIBRARY_PATH', 'NODE_OPTIONS',
+]
+
+export function agentEnvNameError(name: string): string | undefined {
+  const n = name.trim()
+  if (!n) return undefined
+  if (!/^[A-Za-z_][A-Za-z0-9_]*$/.test(n)) return `${n} is not a variable name`
+  const upper = n.toUpperCase()
+  if (RESERVED_ENV_NAMES.includes(upper) || RESERVED_ENV_PREFIXES.some((p) => upper.startsWith(p))) {
+    return `${n} is set by the entrypoint and cannot be replaced`
+  }
+  return undefined
 }
 
 /** Mirrors api/run/v1.PluginID, so a typo is caught before the round trip. */
@@ -203,6 +232,10 @@ export function RoleForm({
     () => form.marketplaces.map((m) => m.name?.trim()).filter((n): n is string => !!n),
     [form.marketplaces],
   )
+  const secrets = useSecrets()
+  const secretEnvErrors = form.secretEnv
+    .map((row) => agentEnvNameError(row.name))
+    .filter((e): e is string => !!e)
 
   return (
     <div className="stack">
@@ -438,8 +471,44 @@ export function RoleForm({
         </Field>
 
         <Field
+          label="Secret variables"
+          error={secretEnvErrors[0]}
+          hint="Added to the agent's own environment from a stored secret — the credential a plugin's MCP server reads as ${NAME}. The agent can read these: give it a narrow credential, never an admin one."
+        >
+          <Rows
+            value={form.secretEnv}
+            onChange={(secretEnv) => set({ secretEnv })}
+            empty={() => ({ name: '', secret: '' })}
+            addLabel="Add a secret variable"
+          >
+            {(row, setRow) => (
+              <>
+                <input
+                  value={row.name}
+                  placeholder="MATTERMOST_TOKEN"
+                  aria-label="Variable name"
+                  onChange={(e) => setRow({ ...row, name: e.target.value })}
+                />
+                <input
+                  value={row.secret}
+                  list="role-secret-names"
+                  placeholder="secret name"
+                  aria-label="Secret"
+                  onChange={(e) => setRow({ ...row, secret: e.target.value })}
+                />
+              </>
+            )}
+          </Rows>
+          <datalist id="role-secret-names">
+            {(secrets.data ?? []).map((s) => (
+              <option key={s.name} value={s.name} />
+            ))}
+          </datalist>
+        </Field>
+
+        <Field
           label="Config files"
-          hint="Mounted flat into /haliphron/role. A flat file name — settings.coder.json — not a path."
+          hint="Mounted flat into /haliphron/role. A flat file name — settings.coder.json — not a path. A settings.json here declares the role's plugins (enabledPlugins, extraKnownMarketplaces) when the Plugins section above is empty."
         >
           <Rows
             value={form.configFiles}

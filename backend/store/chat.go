@@ -21,6 +21,16 @@ type ChatTriggerKey struct {
 	MessageID string
 }
 
+// Reply policies, as the chat_triggers.reply_policy domain spells them. See
+// db/migrations/0009_chat_integrations.sql.
+const (
+	// ChatReplyAlways acknowledges the message and posts the run's result.
+	ChatReplyAlways = "always"
+	// ChatReplyIfUnanswered is for an agent that answers in the thread itself:
+	// the result is posted only when nothing answered the thread.
+	ChatReplyIfUnanswered = "if_unanswered"
+)
+
 // ChatTrigger is a claimed message and where its reply goes.
 type ChatTrigger struct {
 	ChatTriggerKey
@@ -28,6 +38,25 @@ type ChatTrigger struct {
 	ThreadID  string
 	UserID    string
 	Username  string
+
+	// ChannelName and ChannelType describe the channel to a prompt: the name a
+	// person would recognise, and the platform's type letter.
+	ChannelName string
+	ChannelType string
+
+	// ReplyPolicy is frozen at the claim. Empty means ChatReplyAlways.
+	ReplyPolicy string
+
+	// OriginMessageID is set on a follow-up — the row of a child run, which
+	// answers its ancestor's message — and names that message. Empty on a row
+	// claimed from a message.
+	OriginMessageID string
+
+	// AnsweredAfter is when an answer in the thread starts to count for this
+	// row: the claim for a message, the child's start for a follow-up, so that
+	// what its parent said before the child ran is not taken for the child's
+	// answer. Set only by DueChatReplies.
+	AnsweredAfter time.Time
 
 	// RunID and Refusal are admission's answer. Both empty on a row returned
 	// by DueChatReplies means the handler that claimed it never answered.
@@ -53,11 +82,11 @@ var ErrChatTriggerSettled = errors.New("store: the chat message was already answ
 func (s *Store) ClaimChatTrigger(ctx context.Context, t ChatTrigger, orphanAfter time.Duration) (bool, error) {
 	res, err := s.db.ExecContext(ctx, `
 		INSERT INTO chat_triggers (platform, message_id, channel_id, thread_id, user_id, username,
-		                           next_attempt_at)
-		VALUES ($1, $2, $3, $4, $5, $6, now() + make_interval(secs => $7))
+		                           channel_name, channel_type, reply_policy, next_attempt_at)
+		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, now() + make_interval(secs => $10))
 		ON CONFLICT (tenant_id, platform, message_id) DO NOTHING`,
 		t.Platform, t.MessageID, t.ChannelID, t.ThreadID, t.UserID, t.Username,
-		orphanAfter.Seconds())
+		t.ChannelName, t.ChannelType, replyPolicy(t.ReplyPolicy), orphanAfter.Seconds())
 	if err != nil {
 		return false, fmt.Errorf("store: claim chat message %s: %w", t.MessageID, err)
 	}
@@ -81,6 +110,61 @@ func linkChatTrigger(ctx context.Context, tx *sql.Tx, k ChatTriggerKey, id runv1
 		return ErrChatTriggerSettled
 	}
 	return nil
+}
+
+// linkChatFollowUp gives a child run the reply its parent owes, inside the
+// child's own insert.
+//
+// The child's row copies where the parent's reply goes and the policy it was
+// claimed under, and names the message the whole tree answers. A parent with no
+// row — a run not started from chat — gives its child none, and a grandchild
+// inherits through its parent's follow-up by the same statement. The row is due
+// at once and selected only when the child ends, like any row with a run.
+func linkChatFollowUp(ctx context.Context, tx *sql.Tx, parent, child runv1.ULID) error {
+	if _, err := tx.ExecContext(ctx, `
+		INSERT INTO chat_triggers (tenant_id, platform, message_id, channel_id, thread_id, user_id,
+		                           username, channel_name, channel_type, reply_policy,
+		                           origin_message_id, run_id, next_attempt_at)
+		SELECT tenant_id, platform, 'run:' || $2::text, channel_id, thread_id, user_id,
+		       username, channel_name, channel_type, reply_policy,
+		       coalesce(origin_message_id, message_id), $2::text::ulid, now()
+		  FROM chat_triggers
+		 WHERE run_id = $1`,
+		parent, child); err != nil {
+		return fmt.Errorf("store: link chat follow-up of %s to %s: %w", parent, child, err)
+	}
+	return nil
+}
+
+// ChatTriggerForRun returns the chat row a run answers — its own claim, or the
+// follow-up it inherited — or ErrNotFound for a run not descended from chat.
+func (s *Store) ChatTriggerForRun(ctx context.Context, id runv1.ULID) (ChatTrigger, error) {
+	var (
+		t      ChatTrigger
+		origin sql.NullString
+	)
+	err := s.db.QueryRowContext(ctx, `
+		SELECT platform, message_id, channel_id, thread_id, user_id, username,
+		       channel_name, channel_type, reply_policy, origin_message_id, claimed_at
+		  FROM chat_triggers WHERE run_id = $1`, id).Scan(
+		&t.Platform, &t.MessageID, &t.ChannelID, &t.ThreadID, &t.UserID, &t.Username,
+		&t.ChannelName, &t.ChannelType, &t.ReplyPolicy, &origin, &t.ClaimedAt)
+	if errors.Is(err, sql.ErrNoRows) {
+		return ChatTrigger{}, ErrNotFound
+	}
+	if err != nil {
+		return ChatTrigger{}, fmt.Errorf("store: read chat trigger of run %s: %w", id, err)
+	}
+	t.RunID = id
+	t.OriginMessageID = origin.String
+	return t, nil
+}
+
+func replyPolicy(p string) string {
+	if p == "" {
+		return ChatReplyAlways
+	}
+	return p
 }
 
 // RefuseChatTrigger records that a message started nothing, and why, and makes
@@ -128,7 +212,11 @@ func (s *Store) DueChatReplies(ctx context.Context, platform string, limit int,
 		        LIMIT $1
 		          FOR UPDATE OF c SKIP LOCKED)
 		RETURNING t.platform, t.message_id, t.channel_id, t.thread_id, t.user_id, t.username,
-		          t.run_id, t.refusal, t.attempts, t.claimed_at`,
+		          t.channel_name, t.channel_type, t.reply_policy, t.origin_message_id,
+		          t.run_id, t.refusal, t.attempts, t.claimed_at,
+		          CASE WHEN t.origin_message_id IS NULL THEN t.claimed_at
+		               ELSE coalesce((SELECT r.started_at FROM runs r WHERE r.id = t.run_id),
+		                             t.claimed_at) END`,
 		limit, lease.Seconds(), platform)
 	if err != nil {
 		return nil, fmt.Errorf("store: claim due chat replies: %w", err)
@@ -139,13 +227,16 @@ func (s *Store) DueChatReplies(ctx context.Context, platform string, limit int,
 	for rows.Next() {
 		var (
 			t       ChatTrigger
+			origin  sql.NullString
 			runID   sql.NullString
 			refusal sql.NullString
 		)
 		if err := rows.Scan(&t.Platform, &t.MessageID, &t.ChannelID, &t.ThreadID, &t.UserID,
-			&t.Username, &runID, &refusal, &t.Attempts, &t.ClaimedAt); err != nil {
+			&t.Username, &t.ChannelName, &t.ChannelType, &t.ReplyPolicy, &origin,
+			&runID, &refusal, &t.Attempts, &t.ClaimedAt, &t.AnsweredAfter); err != nil {
 			return nil, fmt.Errorf("store: scan chat trigger: %w", err)
 		}
+		t.OriginMessageID = origin.String
 		t.RunID = runv1.ULID(runID.String)
 		t.Refusal = refusal.String
 		out = append(out, t)

@@ -101,3 +101,23 @@ func (s *Store) DeleteRole(ctx context.Context, name string) error {
 	}
 	return nil
 }
+
+// InsertRoleIfNeverExisted creates a role only when no role of that name was
+// ever stored — live or deleted — and reports whether it did.
+//
+// It is how a default role is seeded. Deleted rows count, so a default an
+// operator removed stays removed across restarts, and one statement does the
+// check and the insert, so replicas starting together seed it once.
+func (s *Store) InsertRoleIfNeverExisted(ctx context.Context, name string, spec json.RawMessage, by string) (bool, error) {
+	res, err := s.db.ExecContext(ctx, `
+		INSERT INTO roles (id, name, spec, created_by)
+		SELECT $1, $2, $3::jsonb, $4
+		 WHERE NOT EXISTS (SELECT 1 FROM roles WHERE name = $2)
+		ON CONFLICT DO NOTHING`,
+		newID(), name, []byte(spec), by)
+	if err != nil {
+		return false, fmt.Errorf("store: seed role %s: %w", name, err)
+	}
+	n, _ := res.RowsAffected()
+	return n == 1, nil
+}

@@ -64,12 +64,28 @@ type roleSpec struct {
 	// and after the entrypoint's instruction, never instead of them. Material
 	// by the same argument as Plugins, under RoleConfigKeySystemPrompt.
 	SystemPrompt string `json:"systemPrompt,omitempty"`
+
+	// SecretEnv adds variables to the agent's own environment from managed
+	// secrets — the credential a plugin's MCP server expands from ${NAME}. It
+	// is the role's decision to hand the agent that credential; see
+	// SecretKeyAgentEnv for why it is an exception and what it may not name.
+	SecretEnv []run.SecretEnvVar `json:"secretEnv,omitempty"`
 }
 
 func parseRole(r store.Role) (*run.Role, error) {
 	var spec roleSpec
 	if err := json.Unmarshal(r.Spec, &spec); err != nil {
 		return nil, fmt.Errorf("decode role %s: %w", r.Name, err)
+	}
+	plugins := spec.Plugins
+	if !plugins.Declares() {
+		// A role may state its plugins as a claude-code settings.json among
+		// its files instead. Read leniently here — PutRole read it strictly
+		// when it was saved, and a role saved by an older build is not a
+		// reason to refuse every run under it.
+		if derived, _, err := settingsPlugins(r.Name, spec.ConfigFiles, false); err == nil && derived != nil {
+			plugins = derived
+		}
 	}
 	return &run.Role{
 		Name:            r.Name,
@@ -86,9 +102,28 @@ func parseRole(r store.Role) (*run.Role, error) {
 		ToolPolicy:      spec.ToolPolicy,
 		ConfigFiles:     spec.ConfigFiles,
 		ClusterSelector: spec.ClusterSelector,
-		Plugins:         spec.Plugins,
+		Plugins:         plugins,
 		SystemPrompt:    spec.SystemPrompt,
+		SecretEnv:       spec.SecretEnv,
 	}, nil
+}
+
+// settingsPlugins reads the plugin half of a role's own settings.json, if the
+// role carries one among its files, and names the file it read. It returns a
+// nil spec when there is no such file.
+func settingsPlugins(role string, files map[string]string, strict bool) (*runv1.PluginSpec, string, error) {
+	for _, name := range runv1.RoleSettingsFiles(role) {
+		body, ok := files[name]
+		if !ok {
+			continue
+		}
+		spec, _, err := runv1.PluginSpecFromSettings([]byte(body), strict)
+		if err != nil {
+			return nil, name, err
+		}
+		return spec, name, nil
+	}
+	return nil, "", nil
 }
 
 // MaxRoleDescriptionBytes bounds a role's description.
@@ -156,8 +191,68 @@ func (s *Service) PutRole(ctx context.Context, name string, spec json.RawMessage
 			return store.Role{}, &run.InvalidRequestError{Field: "configFiles", Detail: err.Error()}
 		}
 	}
+	if err := validateRoleSettings(name, parsed); err != nil {
+		return store.Role{}, err
+	}
+	if err := validateSecretEnv(parsed.SecretEnv); err != nil {
+		return store.Role{}, err
+	}
+	for i, v := range parsed.SecretEnv {
+		// Checked here because here someone is at the keyboard. At lease time
+		// a missing secret is a variable the agent does not get, and the run
+		// finds out only when its MCP server refuses to start.
+		exists, err := s.store.SecretExists(ctx, v.Secret)
+		if err != nil {
+			return store.Role{}, err
+		}
+		if !exists {
+			return store.Role{}, &run.InvalidRequestError{
+				Field:  fmt.Sprintf("secretEnv[%d].secret", i),
+				Detail: fmt.Sprintf("no secret named %q; store it under Secrets first", v.Secret)}
+		}
+	}
 
 	return s.store.UpsertRole(ctx, name, spec, by)
+}
+
+// validateRoleSettings reads a role's settings.json strictly, when the role
+// states its plugins that way. A marketplace the pod cannot fetch is refused
+// now, while the operator is looking, rather than dropped an hour later in a
+// pod.
+func validateRoleSettings(name string, parsed roleSpec) error {
+	if parsed.Plugins.Declares() {
+		// plugins wins; a settings.json beside it is only a file in the
+		// mount, and the agent is never pointed at it.
+		return nil
+	}
+	if _, file, err := settingsPlugins(name, parsed.ConfigFiles, true); err != nil {
+		return &run.InvalidRequestError{Field: "configFiles." + file, Detail: err.Error()}
+	}
+	return nil
+}
+
+// validateSecretEnv checks what a role's secretEnv may name.
+func validateSecretEnv(vars []run.SecretEnvVar) error {
+	if len(vars) > runv1.MaxAgentEnvVars {
+		return &run.InvalidRequestError{Field: "secretEnv", Detail: fmt.Sprintf(
+			"%d variables is over the limit of %d", len(vars), runv1.MaxAgentEnvVars)}
+	}
+	seen := make(map[string]bool, len(vars))
+	for i, v := range vars {
+		if err := runv1.AgentEnvName(v.Name); err != nil {
+			return &run.InvalidRequestError{Field: fmt.Sprintf("secretEnv[%d].name", i), Detail: err.Error()}
+		}
+		if seen[v.Name] {
+			return &run.InvalidRequestError{Field: fmt.Sprintf("secretEnv[%d].name", i),
+				Detail: fmt.Sprintf("%q is named twice", v.Name)}
+		}
+		seen[v.Name] = true
+		if v.Secret == "" {
+			return &run.InvalidRequestError{Field: fmt.Sprintf("secretEnv[%d].secret", i),
+				Detail: "names no secret"}
+		}
+	}
+	return nil
 }
 
 // configFileKey admits what a ConfigMap admits.

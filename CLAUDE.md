@@ -9,8 +9,9 @@ request from REST, MCP, Slack or a UI, and orchestrates them into workflows. On-
 tenant, delivered as two Helm charts.
 
 The repository is currently phase 1 of five (see section 19 of `docs/architecture.md`): the
-vertical `run_agent` slice. There is no frontend directory yet, and no workflow engine or
-scheduler — the domain model for both is designed but unimplemented.
+vertical `run_agent` slice. `frontend/` is the React UI, served by nginx that proxies `/api`
+to the backend. There is no workflow engine or scheduler yet — the domain model for both is
+designed but unimplemented.
 
 ## Commands
 
@@ -96,9 +97,10 @@ holds every rule, `store` is SQL. The reason is stated in the package comment of
 `backend/app/service.go` — the REST path and the MCP path must not admit runs by different
 rules, and the ingest path and the heartbeat path must not apply reports by different ones.
 Put a new rule in `app`, not in a handler. The Mattermost bot follows the same split:
-`backend/mattermost` decodes WebSocket events and makes REST calls, and `app/chat.go` decides
-what is a request, builds the prompt and renders replies. Every API replica holds its own
-socket, so the `chat_triggers` claim (keyed by post id) is what makes one run per message.
+`backend/mattermost` decodes WebSocket events and outgoing-webhook deliveries and makes REST
+calls, and `app/chat.go` decides what is a request, builds the prompt and renders replies. Every
+API replica holds its own socket, and a webhook may deliver the same post again, so the
+`chat_triggers` claim (keyed by post id) is what makes one run per message.
 
 The HTTP stack is stdlib `net/http`, not gin, despite what `docs/architecture.md` says.
 
@@ -180,6 +182,13 @@ place that reads the action.
 
 **Reconciliation remembers nothing.** Anything that must survive a restart is in the CR status;
 anything arriving from outside, including backend commands, arrives as an annotation.
+
+**A chat-started run's reply is owed through `chat_triggers`, and so is its children's.** A
+run admitted from a chat message links its claimed row; a run whose parent has a row gets a
+follow-up row (`message_id` `run:<child id>`, `origin_message_id` set). Both are written only
+inside `InsertRun`'s transaction (`linkChatTrigger`, `linkChatFollowUp` in
+`backend/store/chat.go`). A run committed without its row is a run whose end nobody is told
+about — never insert a run, or one of these rows, from another path.
 
 **In the image, `persist` runs before the git phases** — what has been paid for is made durable
 before anything allowed to fail, so a retry never pays for the model twice.

@@ -224,6 +224,11 @@ export interface RoleSpec {
    */
   systemPrompt?: string
   env?: { name: string; value: string }[]
+  /**
+   * Variables for the agent's own environment whose values are managed
+   * secrets — the credential a plugin's MCP server expands from ${NAME}.
+   */
+  secretEnv?: { name: string; secret: string }[]
   mcpServers?: McpServer[]
 
   toolPolicy?: ToolPolicy
@@ -390,4 +395,56 @@ export interface GitCredential {
 /** The error envelope every non-2xx answer carries. */
 export interface ErrorBody {
   error: { code: string; message: string; field?: string }
+}
+
+/** How Mattermost messages reach the bot. */
+export type ChatTransport = 'websocket' | 'webhook' | 'both'
+
+/**
+ * always: the bot acknowledges and posts the run's result.
+ * if_unanswered: the agent answers in the thread itself; the bot posts only
+ * when the run failed or nothing answered.
+ */
+export type ChatReplyPolicy = 'always' | 'if_unanswered'
+
+/** The Mattermost integration, tokens excluded: they are write-only. */
+export interface ChatIntegration {
+  platform: string
+  /** environment: pinned by the deployment and read-only here. none: never saved. */
+  source: 'environment' | 'database' | 'none'
+  enabled: boolean
+  transport: ChatTransport
+  url: string
+  role: string
+  repo: string
+  base_branch: string
+  run_url: string
+  reply_policy: ChatReplyPolicy
+  max_post_runes: number
+  max_thread_bytes: number
+  bot_token_configured: boolean
+  webhook_token_configured: boolean
+  /** Where the outgoing webhook is served, relative to this UI's origin. */
+  webhook_path: string
+  bot_token_secret: string
+  webhook_token_secret: string
+  updated_by?: string
+  updated_at?: string
+}
+
+export interface ChatIntegrationRequest {
+  enabled: boolean
+  transport: ChatTransport
+  url: string
+  role: string
+  repo: string
+  base_branch: string
+  run_url: string
+  reply_policy: ChatReplyPolicy
+  max_post_runes: number
+  max_thread_bytes: number
+  /** Absent keeps the stored token. */
+  bot_token?: string
+  /** One per line. Absent keeps the stored tokens. */
+  webhook_tokens?: string
 }

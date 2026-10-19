@@ -83,7 +83,9 @@ var ErrTooManyChildren = errors.New("store: the parent run has started its full 
 //
 // A run admitted from a chat message links that message in the same
 // transaction, and is rolled back with ErrChatTriggerSettled if the message
-// was answered in the meantime.
+// was answered in the meantime. A child of a run started from chat inherits
+// its parent's reply as a follow-up, in the same transaction for the same
+// reason.
 func (s *Store) InsertRun(ctx context.Context, r NewRun) error {
 	return s.inTx(ctx, func(tx *sql.Tx) error {
 		if r.ParentRunID != "" && r.MaxChildren > 0 {
@@ -96,6 +98,9 @@ func (s *Store) InsertRun(ctx context.Context, r NewRun) error {
 		}
 		if r.ChatTrigger != nil {
 			return linkChatTrigger(ctx, tx, *r.ChatTrigger, r.ID)
+		}
+		if r.ParentRunID != "" {
+			return linkChatFollowUp(ctx, tx, r.ParentRunID, r.ID)
 		}
 		return nil
 	})

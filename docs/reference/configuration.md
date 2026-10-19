@@ -182,9 +182,14 @@ object outlives its run.
 
 ### Mattermost bot
 
-Off unless `HALIPHRON_MATTERMOST_URL` is set. The bot starts only in a process
-that serves the public API (`HALIPHRON_MODE` `all` or `api`); any other mode
-logs a warning and leaves it off.
+The bot is configured here or from the UI (Integrations → Mattermost, stored in
+`chat_integrations`), never both. When `HALIPHRON_MATTERMOST_URL` is set, these
+variables are the configuration: the UI shows it read-only and refuses a save
+with `409 managed_by_environment`. When it is unset, the stored configuration is
+used, and every replica checks it for a change every 15 seconds and restarts the
+bot when it finds one. Either way the bot runs only in a process that serves the
+public API (`HALIPHRON_MODE` `all` or `api`); any other mode logs a warning and
+leaves it off.
 
 | Variable | Default | Meaning |
 |---|---|---|
@@ -197,9 +202,16 @@ logs a warning and leaves it off.
 | `HALIPHRON_MATTERMOST_RUN_URL` | — | a link to a run in the UI, with `{id}` for the run identifier |
 | `HALIPHRON_MATTERMOST_MAX_POST_RUNES` | `16383` | the server's post length limit; between 1000 and 65535 |
 | `HALIPHRON_MATTERMOST_MAX_THREAD_BYTES` | `65536` | how much thread history is quoted into a prompt |
+| `HALIPHRON_MATTERMOST_TRANSPORT` | `websocket` | `websocket` (the backend dials the server), `webhook` (the server calls `POST /api/v1/integrations/mattermost/webhook`) or `both` |
+| `HALIPHRON_MATTERMOST_WEBHOOK_TOKEN_FILE` | — | path to the outgoing webhooks' tokens, one per line; checked first |
+| `HALIPHRON_MATTERMOST_WEBHOOK_TOKEN` | — | the tokens themselves, separated by newlines or commas |
+| `HALIPHRON_MATTERMOST_REPLY_POLICY` | `always` | `always`, or `if_unanswered` for an agent that answers in the thread itself |
 
 The process refuses to start when the URL is set and the token or the role is
-missing. A role that does not exist yet is only a warning: every mention is
+missing, when the transport or the reply policy is not one of its values, and
+when a `webhook` or `both` transport has no webhook token. A configuration saved
+from the UI defaults to `if_unanswered` instead; the environment keeps
+`always`, which is what it did before the policy existed. A role that does not exist yet is only a warning: every mention is
 refused until it is created. See [connect a Mattermost
 bot](../how-to/connect-a-mattermost-bot.md).
 

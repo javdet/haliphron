@@ -191,6 +191,17 @@ func (s *Store) ResolveCredential(ctx context.Context, name string) (value []byt
 	return value, endpoint, nil
 }
 
+// SecretExists reports whether a secret of that name is stored, without
+// reading its value.
+func (s *Store) SecretExists(ctx context.Context, name string) (bool, error) {
+	var exists bool
+	if err := s.db.QueryRowContext(ctx,
+		`SELECT EXISTS (SELECT 1 FROM secrets WHERE name = $1)`, name).Scan(&exists); err != nil {
+		return false, fmt.Errorf("store: look up secret %s: %w", name, err)
+	}
+	return exists, nil
+}
+
 // ListSecrets returns the stored secrets, values excluded.
 func (s *Store) ListSecrets(ctx context.Context) ([]Secret, error) {
 	rows, err := s.db.QueryContext(ctx, `

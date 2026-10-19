@@ -965,8 +965,11 @@ components:
             policy.
 
             Known keys: `git-token`, `llm-api-key`, `llm-base-url` when the
-            model key belongs to a gateway such as OpenRouter, `mcp.json`, and
-            `presigned.json` in object-store mode only. Others are passed
+            model key belongs to a gateway such as OpenRouter, `mcp.json`,
+            `presigned.json` in object-store mode only, and `agent-env.json`
+            when the role adds variables to the agent's environment — a JSON
+            object of name to value that the entrypoint adds to the agent's
+            environment (agent runtime contract, section 2.2). Others are passed
             through as they are.
 
             `llm-base-url` is not a credential, and it is here anyway: it

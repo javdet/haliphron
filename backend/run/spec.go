@@ -141,6 +141,19 @@ type Role struct {
 	// Plugins: it becomes the RoleConfigKeySystemPrompt key of the per-run
 	// ConfigMap and never appears in the CR.
 	SystemPrompt string
+
+	// SecretEnv are variables for the agent's own environment whose values are
+	// managed secrets, resolved at lease time into the SecretKeyAgentEnv key of
+	// the per-run Secret. Material: neither the names' values nor the secrets'
+	// names appear in the CR.
+	SecretEnv []SecretEnvVar
+}
+
+// SecretEnvVar is one variable of a role's secretEnv.
+type SecretEnvVar struct {
+	Name string `json:"name"`
+	// Secret is the managed secret whose value the variable takes.
+	Secret string `json:"secret"`
 }
 
 var (

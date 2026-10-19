@@ -123,6 +123,20 @@ func (s *Service) submit(ctx context.Context, req run.SubmitRequest, chat *store
 		}
 	}
 
+	if req.ParentRunID != "" && chat == nil {
+		// A child of a run started from chat answers the same person, and is
+		// told where they are the way its parent was. Done here rather than
+		// left to the parent's prompt so that it holds whatever the parent
+		// chose to write — and before the digest, which is over what runs.
+		origin, err := s.store.ChatTriggerForRun(ctx, req.ParentRunID)
+		switch {
+		case err == nil:
+			req.Prompt = RenderChatHeader(chatOriginOfTrigger(origin)) + req.Prompt
+		case !errors.Is(err, store.ErrNotFound):
+			return Submitted{}, err
+		}
+	}
+
 	id, err := run.NewULID(s.now())
 	if err != nil {
 		return Submitted{}, err

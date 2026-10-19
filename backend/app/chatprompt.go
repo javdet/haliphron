@@ -5,13 +5,21 @@ import (
 	"sort"
 	"strings"
 	"unicode/utf8"
+
+	"github.com/automagicops/haliphron/backend/store"
 )
 
 // The prompt a chat message becomes.
 //
-// A message outside a thread is the prompt, exactly: what the person typed,
-// with the mention removed. A message inside a thread is a request that leans
-// on what was said before it — "now do the same for staging" — so the thread is
+// Every prompt opens with a header saying where the message came from: the
+// platform, the channel, the message, the thread a reply belongs in and who
+// sent it. An agent that answers in the thread itself needs exactly those
+// identifiers, and an agent that does not is told nothing it can misuse — they
+// are all things the sender could see.
+//
+// After the header, a message outside a thread is the request as typed, with
+// the mention removed. A message inside a thread is a request that leans on
+// what was said before it — "now do the same for staging" — so the thread is
 // quoted ahead of it as context, bounded, and the message itself is set apart
 // at the end as the thing to act on.
 //
@@ -31,12 +39,149 @@ const (
 	chatEmptyAsk    = "(no text beyond the mention: act on the thread above)"
 )
 
+// ChatOrigin is where a message came from, as a prompt states it.
+type ChatOrigin struct {
+	Platform string
+	// ChannelName is how the header names the channel: its handle, or for a
+	// direct message the name the platform displays.
+	ChannelName string
+	ChannelType string
+	ChannelID   string
+	MessageID   string
+	// ThreadID is the root a reply is posted under.
+	ThreadID string
+	UserID   string
+	Username string
+}
+
+// chatOriginOf is the origin of a message as the adapter decoded it.
+func chatOriginOf(platform string, m ChatMessage) ChatOrigin {
+	thread := m.RootID
+	if thread == "" {
+		thread = m.ID
+	}
+	return ChatOrigin{
+		Platform:    platform,
+		ChannelName: chatChannelName(m),
+		ChannelType: m.ChannelType,
+		ChannelID:   m.ChannelID,
+		MessageID:   m.ID,
+		ThreadID:    thread,
+		UserID:      m.UserID,
+		Username:    m.Username,
+	}
+}
+
+// chatOriginOfTrigger is the origin a stored row records. For a follow-up the
+// message is the one the whole tree answers.
+func chatOriginOfTrigger(t store.ChatTrigger) ChatOrigin {
+	message := t.MessageID
+	if t.OriginMessageID != "" {
+		message = t.OriginMessageID
+	}
+	return ChatOrigin{
+		Platform:    t.Platform,
+		ChannelName: t.ChannelName,
+		ChannelType: t.ChannelType,
+		ChannelID:   t.ChannelID,
+		MessageID:   message,
+		ThreadID:    t.ThreadID,
+		UserID:      t.UserID,
+		Username:    t.Username,
+	}
+}
+
+// chatChannelName prefers the display name where the handle means nothing to
+// a reader: a direct message's handle is two user identifiers.
+func chatChannelName(m ChatMessage) string {
+	if m.Direct || m.ChannelType == "D" || m.ChannelType == "G" || m.ChannelName == "" {
+		if m.ChannelDisplayName != "" {
+			return m.ChannelDisplayName
+		}
+	}
+	if m.ChannelName != "" && m.ChannelDisplayName != "" && m.ChannelDisplayName != m.ChannelName {
+		return m.ChannelName + " (" + m.ChannelDisplayName + ")"
+	}
+	return m.ChannelName
+}
+
+const (
+	chatHeaderOpen  = "--- chat message ---\n"
+	chatHeaderClose = "--- end of chat message ---\n\n"
+	// chatHeaderValueBytes bounds one value. Names are short; an identifier
+	// that is not is not one this header should carry whole.
+	chatHeaderValueBytes = 256
+)
+
+// RenderChatHeader is the block a prompt opens with.
+//
+// Every value is flattened onto its line and has its runs of dashes collapsed.
+// A display name is whatever the person typed into a profile, and one holding
+// a newline or a marker could otherwise end the block early and write lines of
+// its own into what reads as the system's statement of where the message came
+// from.
+func RenderChatHeader(o ChatOrigin) string {
+	var b strings.Builder
+	b.WriteString(chatHeaderOpen)
+	line := func(key, value string) {
+		if value = chatHeaderValue(value); value != "" {
+			fmt.Fprintf(&b, "%s: %s\n", key, value)
+		}
+	}
+	line("platform", o.Platform)
+	channel := chatHeaderValue(o.ChannelName)
+	if channel == "" {
+		channel = "(unnamed)"
+	}
+	if o.ChannelType != "" {
+		channel += ", type " + chatHeaderValue(o.ChannelType)
+	}
+	line("channel", channel)
+	line("channel_id", o.ChannelID)
+	line("message_id", o.MessageID)
+	line("thread_root_id", o.ThreadID)
+	sender := "@" + chatHeaderValue(o.Username)
+	if o.Username == "" {
+		sender = "someone"
+	}
+	if o.UserID != "" {
+		sender += " (user id " + chatHeaderValue(o.UserID) + ")"
+	}
+	line("sender", sender)
+	if o.ChannelID != "" && o.ThreadID != "" {
+		fmt.Fprintf(&b, "A reply to this message belongs in channel_id %s under root_id %s.\n",
+			chatHeaderValue(o.ChannelID), chatHeaderValue(o.ThreadID))
+	}
+	b.WriteString(chatHeaderClose)
+	return b.String()
+}
+
+func chatHeaderValue(v string) string {
+	v = strings.Map(func(r rune) rune {
+		if r == '\n' || r == '\r' || r == '\u2028' || r == '\u2029' || r < 0x20 {
+			return ' '
+		}
+		return r
+	}, v)
+	// The block's own markers are runs of dashes. A name may not spell one
+	// even inline, where a reader skimming for the end could still take it.
+	for strings.Contains(v, "--") {
+		v = strings.ReplaceAll(v, "--", "-")
+	}
+	v = strings.TrimSpace(v)
+	if len(v) > chatHeaderValueBytes {
+		v = cutBytes(v, chatHeaderValueBytes)
+	}
+	return v
+}
+
 // BuildChatPrompt renders a message, and the thread it was posted in, as a
 // prompt of at most maxBytes.
-func BuildChatPrompt(thread []ChatThreadPost, trigger ChatMessage, maxBytes, maxThreadBytes int) string {
+func BuildChatPrompt(platform string, thread []ChatThreadPost, trigger ChatMessage, maxBytes, maxThreadBytes int) string {
+	header := RenderChatHeader(chatOriginOf(platform, trigger))
 	posts := contextPosts(thread, trigger)
 	if len(posts) == 0 {
-		return trigger.Text
+		return header + trigger.Text
 	}
 
 	ask := trigger.Text
@@ -45,7 +190,8 @@ func BuildChatPrompt(thread []ChatThreadPost, trigger ChatMessage, maxBytes, max
 	}
 	request := fmt.Sprintf(chatRequestHead, speaker(trigger.Username, false)) + ask + "\n"
 
-	budget := maxBytes - len(chatPromptPreamble) - len(chatThreadOpen) - len(chatThreadClose) - len(request)
+	budget := maxBytes - len(header) - len(chatPromptPreamble) - len(chatThreadOpen) -
+		len(chatThreadClose) - len(request)
 	if maxThreadBytes > 0 && maxThreadBytes < budget {
 		budget = maxThreadBytes
 	}
@@ -53,9 +199,9 @@ func BuildChatPrompt(thread []ChatThreadPost, trigger ChatMessage, maxBytes, max
 	if quoted == "" {
 		// No room for any of it. The request alone is still the request, and
 		// whether it fits is admission's call.
-		return trigger.Text
+		return header + trigger.Text
 	}
-	return chatPromptPreamble + chatThreadOpen + quoted + chatThreadClose + request
+	return header + chatPromptPreamble + chatThreadOpen + quoted + chatThreadClose + request
 }
 
 // contextPosts is the part of a thread that is context for a message: what was

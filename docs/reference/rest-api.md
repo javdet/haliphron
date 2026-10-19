@@ -20,7 +20,7 @@ The version is in the path, not in a header.
 | Field naming | `snake_case` |
 | Request and response media type | `application/json` |
 | Maximum request body | 8 MiB (8388608 bytes) |
-| Authentication | `Authorization: Bearer <token>` on every endpoint |
+| Authentication | `Authorization: Bearer <token>` on every endpoint but the [Mattermost webhook](#post-apiv1integrationsmattermostwebhook) |
 | Time format | RFC 3339 |
 | Money | decimal string, e.g. `"1.250000"` |
 | Identifiers | ULID strings |
@@ -30,8 +30,11 @@ webhook — use `camelCase`. This API does not.
 
 ## Authentication and scopes
 
-Every request carries a bearer token. There are three scopes; `admin` implies
-the other two.
+Every request carries a bearer token, with one exception: the Mattermost
+outgoing-webhook endpoint, whose caller is a chat server that cannot hold one of
+these tokens. It authenticates with the webhook's own token instead; see
+[below](#post-apiv1integrationsmattermostwebhook). There are three scopes;
+`admin` implies the other two.
 
 | Scope | Value |
 |---|---|
@@ -70,6 +73,8 @@ Every failure returns this envelope:
 | 409 | `token_live` | the token has not been revoked and has not expired, so it cannot be removed |
 | 409 | `bootstrap_token` | the bootstrap token's row is never removed |
 | 409 | `in_flight` | a request with this `Idempotency-Key` is still being processed; `Retry-After: 1` is set |
+| 409 | `no_kek` | a managed secret was sent to an installation with no key encryption key |
+| 409 | `managed_by_environment` | the integration is configured by the deployment's environment and cannot be saved here |
 | 413 | `too_large` | the request body exceeds 8 MiB, or the prompt exceeds 512 KiB |
 | 422 | `invalid_request` | the request is well formed and refused |
 | 422 | `idempotency_conflict` | this `Idempotency-Key` was used with a different body |
@@ -525,6 +530,91 @@ A reference is refused with `422`, because a lease fails on one. A value with
 whitespace in it, or with a documented prefix naming the other forge
 (`ghp_`, `github_pat_`, … for GitHub; `glpat-` for GitLab), is refused with
 `422` too. Returns `200` with the same body as the `GET`.
+
+---
+
+## Integrations
+
+The chat bot's configuration, as the UI's Integrations page edits it. The rules
+are in [`backend/app/chatintegration.go`](../../backend/app/chatintegration.go);
+the guide is [connect a Mattermost bot](../how-to/connect-a-mattermost-bot.md).
+
+### `GET /api/v1/integrations/mattermost`
+
+Scope: `admin`. The configuration in force, without its tokens.
+
+| Field | Type | Meaning |
+|---|---|---|
+| `platform` | string | `mattermost` |
+| `source` | string | `environment` when `HALIPHRON_MATTERMOST_URL` configures the bot, `database` when a configuration was saved here, `none` when neither; with `none` the other fields are the defaults a save would start from |
+| `enabled` | boolean | |
+| `transport` | string | `websocket`, `webhook` or `both` |
+| `url` | string | the server, as a browser opens it |
+| `role` | string | the role every run from the bot is admitted under |
+| `repo` | string | the repository runs are pointed at; empty runs without one |
+| `base_branch` | string | |
+| `run_url` | string | a link to a run, with `{id}` for its identifier |
+| `reply_policy` | string | `always` or `if_unanswered` |
+| `max_post_runes` | integer | the server's post length limit |
+| `max_thread_bytes` | integer | how much of a thread is quoted into a prompt |
+| `bot_token_configured` | boolean | whether the bot's token is stored |
+| `webhook_token_configured` | boolean | whether at least one webhook token is stored |
+| `webhook_path` | string | `/api/v1/integrations/mattermost/webhook`, the callback path to give Mattermost |
+| `bot_token_secret` | string | the managed secret holding the bot's token: `mattermost-bot-token` |
+| `webhook_token_secret` | string | the managed secret holding the webhook tokens: `mattermost-webhook-token` |
+| `updated_by` | string | absent when nothing was saved |
+| `updated_at` | timestamp | absent when nothing was saved |
+
+The tokens are never returned.
+
+### `PUT /api/v1/integrations/mattermost`
+
+Scope: `admin`. Saves the configuration, and every API replica restarts the bot
+within 15 seconds.
+
+The body takes every field of the `GET` from `enabled` to `max_thread_bytes`,
+plus two write-only ones:
+
+| Field | Type | Meaning |
+|---|---|---|
+| `bot_token` | string | the bot account's access token; absent or empty keeps the stored one |
+| `webhook_tokens` | string | the outgoing webhooks' tokens, one per line (commas also separate); absent keeps the stored ones, a non-empty value replaces them all |
+
+Defaults: `transport` `websocket`, `role` `classificator`, `reply_policy`
+`if_unanswered`, `max_post_runes` `16383`. `url` must be an `http` or `https`
+address, `base_branch` needs `repo`, `run_url` must contain `{id}`, and
+`max_post_runes` is between 1000 and 65535. A switched-off configuration is
+held to those shape rules only, so it may be saved half finished. An enabled one
+also needs `url`, `role` and a bot token, stored or sent, and a `webhook` or
+`both` transport needs at least one webhook token. A refusal is `422` naming the
+field.
+
+The tokens are stored as the managed secrets named in the `GET`, before the
+configuration itself. `409 no_kek` when the installation has no key encryption
+key; `409 managed_by_environment` when `HALIPHRON_MATTERMOST_URL` is set. Each
+save is audited as `chat_integration.saved`, without the tokens. Returns `200`
+with the same body as the `GET`.
+
+### `POST /api/v1/integrations/mattermost/webhook`
+
+**No bearer token.** This is Mattermost's outgoing webhook calling in, on the
+public listener. Its body is Mattermost's outgoing-webhook payload, as a form or
+as JSON, at most 64 KiB.
+
+| Status | Meaning |
+|---|---|
+| `200` with `{}` | accepted; the post is read and handled after the answer |
+| `400` | an unreadable payload, or one that names no post |
+| `401` with `{}` | the `token` matches none of the configured webhook tokens |
+| `404` | the bot is off, or its transport does not include `webhook` |
+
+The token is compared in constant time against every configured one. The
+answer is an empty object so that Mattermost posts nothing itself; the reply is
+the run's. After answering, the backend reads the post back with
+`GET /api/v4/posts/{id}` and the bot's token, and acts on what the server
+reports — author, channel, thread, text and whether a bot wrote it — never on
+the payload. A post the bot cannot read starts nothing. The same post arriving
+over the WebSocket and here starts one run.
 
 ---
 

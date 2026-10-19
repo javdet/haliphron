@@ -1309,6 +1309,32 @@ A long-lived PAT is the worst option: full access to every repository, with no t
 
 This is the main compensating control in the absence of egress filtering: even a leaked token lives for an hour and opens one repository.
 
+### Credentials in the agent's environment
+
+ADR 33 keeps secret material out of the environment the agent inherits. ADR 39
+is the one exception, and it is a role's decision rather than a run's. An agent
+that answers in a chat thread does so through a plugin's MCP server, and that
+server is started by the agent's CLI with the CLI's own environment: a
+`${MATTERMOST_TOKEN}` in its `.mcp.json` is the only way to hand it a token. So
+a role may name managed secrets under `secretEnv`, the backend resolves them
+when it cuts the lease into the per-run Secret's `agent-env.json`, and the
+entrypoint appends them to the agent's environment.
+
+What that costs is stated plainly: the agent can read the value, and the agent
+works in a repository that may contain a prompt injection. The controls are the
+ones that do not depend on the agent behaving:
+
+- names that would let a role replace what the entrypoint sets — the model key
+  under any CLI's spelling, the gateway, `HALIPHRON_*`, `GIT_*`, `PATH`,
+  `LD_PRELOAD` and the rest — are refused when the role is saved and again by
+  the pod, from one list in `api/run/v1`;
+- every value is redacted from the logs and the report;
+- the credential is narrow. For chat, that is a separate bot account for agent
+  replies, a member only of the channels it answers in. The listener's own token
+  and a token another automation already uses (n8n's bot, say) are never handed
+  to an agent: a leaked listener token reads every channel the bot is in and
+  can impersonate it everywhere.
+
 ### Authentication and authorization
 
 - The UI — OIDC (Keycloak/Okta/GitHub), the session in an httpOnly cookie.
@@ -1439,6 +1465,7 @@ The split is fundamental: a target cluster needs neither the database, nor the U
 | 34 | The CR's `spec` is immutable; a new epoch means a new CR | Updating `leaseEpoch` in place | The status is obliged to describe the run that actually started. A change of ownership must not inherit somebody else's status |
 | 35 | Pruning of unknown fields is cured by the spec hash and a negative ack | Relying on the "ignore the unfamiliar" rule | In a CR it means "delete silently": the run executes with a lost setting, and nobody finds out |
 | 36 | An attempt is a separate Job, `backoffLimit: 0` | Relying on the Job's `backoffLimit` | A restart by Kubernetes is invisible: it does not grow `attempt`, never reaches the report, and bypasses the "retry only for infra" rule |
+| 39 | A role may put credentials into the agent's environment, through `secretEnv` and the per-run Secret's `agent-env.json`: the one deliberate exception to ADR 33 | No exception, and no plugin MCP server that needs a credential; or a credential file the agent is pointed at | A plugin's MCP server takes its credential by `${NAME}` expansion from the environment of the CLI that starts it, and there is no other place to put it. The role is the decision to accept that the agent can read the value. Bounded by refusing reserved names on both sides (the model key's, the CLIs', `HALIPHRON_*`, `GIT_*`, `PATH`, `LD_PRELOAD`, …), by redacting every value, and by the operator: the credential is a narrow one — for chat replies, a separate bot account that is a member only of the channels it answers in, never the listener's or another system's bot token |
 
 ---
 

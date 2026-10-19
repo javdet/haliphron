@@ -33,13 +33,14 @@ Every field is optional.
 | `permissionMode` | string | `default`, `acceptEdits`, `bypassPermissions` or `plan` |
 | `maxTurns` | integer | |
 | `systemPrompt` | string | **appended** to the agent's system prompt, never substituted; at most 32 KiB; see below |
-| `env` | array of [EnvVar](#envvar) | |
+| `env` | array of [EnvVar](#envvar) | the container's environment, and the agent's too unless the name is reserved; see below |
+| `secretEnv` | array of [SecretEnvVar](#secretenv) | variables in the agent's environment whose values are managed secrets; see below |
 | `resources` | [Resources](#resources) | |
 | `mcpServers` | array of [MCPServer](#mcpserver) | |
 | `nodeSelector` | object of string to string | replaces the installation default outright |
 | `tolerations` | array of [Toleration](#toleration) | replaces the installation default outright |
 | `toolPolicy` | [ToolPolicy](#toolpolicy) | omit it, or leave `allow` empty, for everything the installation permits |
-| `plugins` | [PluginSpec](#pluginspec) | marketplaces to fetch and plugins to install |
+| `plugins` | [PluginSpec](#pluginspec) | marketplaces to fetch and plugins to install; when unset, a `settings.json` in `configFiles` may say the same |
 | `configFiles` | object of string to string | **flat** filename to contents — not a path; see below |
 | `clusterSelector` | object of string to string | restricts placement to clusters carrying these labels |
 
@@ -105,6 +106,40 @@ the list above. It defaults to true. A plugin is arbitrary code that runs beside
 the agent, so set it to `false` for a role that runs against repositories the
 installation does not control. The full resolution order is in
 [the agent runtime contract](../contracts/agent-runtime.md).
+
+### `settings.json` as the role's plugins
+
+A role whose `plugins` is unset may declare its plugins the way a repository
+does: a claude-code `settings.json` among its `configFiles`, under
+`settings.<role>.json` or `settings.json`, the first of the two that exists.
+
+```json
+{
+  "configFiles": {
+    "settings.json": "{\"extraKnownMarketplaces\":{\"example-chat\":{\"source\":{\"source\":\"github\",\"repo\":\"example/claude-plugins\"}}},\"enabledPlugins\":{\"mattermost@example-chat\":true}}"
+  }
+}
+```
+
+Only two keys are read:
+
+- `extraKnownMarketplaces` — each entry's `source` must be `github` (with
+  `repo`) or `git` (with an `https://` `url`), with an optional `ref`. The key
+  is the marketplace's name.
+- `enabledPlugins` — entries set to `true`, as `plugin@marketplace`.
+
+They are read **strictly** when the role is saved. A `directory` or `url`
+marketplace, which names something on a developer's machine or a catalogue a
+pod cannot authenticate to, is refused with a 422 naming the file and the
+entry, as is anything [PluginSpec](#pluginspec) itself would refuse. The
+backend then renders them into the reserved `plugins.json` at lease time, so the
+pod sees exactly what a role with `plugins` would have produced.
+
+Nothing else in the file is applied. Its `permissions` in particular would
+widen the tool ceiling, which is the backend's to compute from `toolPolicy`.
+The file is still mounted with the other `configFiles`.
+
+When `plugins` is set, it wins, and a `settings.json` beside it is only a file.
 
 ### A note on `configFiles` keys
 
@@ -222,6 +257,57 @@ agent runs, and exits 30 when they did not.
 | `name` | string | `^[A-Za-z_][A-Za-z0-9_]*$`, at most 128 characters |
 | `value` | string | at most 4096 characters |
 
+The variables are set on the container. Those whose names are not
+[reserved](#reserved-names) are also passed to the agent's own environment,
+through the per-run Secret's `agent-env.json`; a reserved one reaches the
+container only, as it always has.
+
+## `secretEnv`
+
+| Field | Type | Limits |
+|---|---|---|
+| `name` | string | `^[A-Za-z_][A-Za-z0-9_]*$`, at most 128 characters, not [reserved](#reserved-names), unique within the role |
+| `secret` | string | the name of a stored secret; required |
+
+At most 64 entries.
+
+Each variable is added to the agent's own environment with the value of a
+managed secret. It is how a plugin's MCP server gets a credential: claude-code
+expands `${NAME}` in a plugin's `.mcp.json` from its own environment.
+
+```json
+"secretEnv": [{"name": "MATTERMOST_TOKEN", "secret": "mattermost-agent-token"}]
+```
+
+The secret must exist when the role is saved, or the role is refused with a 422
+naming the entry. The value is read when each lease is cut, into the per-run
+Secret under `agent-env.json`, and never appears in the run spec or the CR. A
+secret deleted since is left out with a warning in the backend's log; the run
+proceeds without the variable. Every value is redacted from the run's logs.
+
+**The agent can read these.** This is the one deliberate exception to keeping
+credentials out of the agent's environment (ADR 39 in the
+[architecture](../architecture.md)). Give it a narrow credential — for a chat
+bot, a separate account that is a member only of the channels it answers in —
+never an administrator's, and never a token another system already uses.
+
+### Reserved names
+
+Names the entrypoint sets itself, which a role may not set in the agent's
+environment:
+
+- any name starting `ANTHROPIC_`, `CLAUDE_`, `CODEX_`, `OPENAI_`, `HALIPHRON_`
+  or `GIT_`;
+- `PATH`, `HOME`, `USER`, `SHELL`, `TMPDIR`, `GH_TOKEN`, `GL_TOKEN`,
+  `GITHUB_TOKEN`, `GITLAB_TOKEN`, `LD_PRELOAD`, `LD_LIBRARY_PATH`,
+  `NODE_OPTIONS`.
+
+The comparison ignores case. A role that could set `ANTHROPIC_BASE_URL` could
+send the model key to a host of its choosing. In `secretEnv` a reserved name is
+refused when the role is saved; the pod refuses one too, with exit 30
+`MalformedSecret`, if it arrives anyway. The list is `AgentEnvName` in
+[`api/run/v1/agentenv.go`](../../api/run/v1/agentenv.go).
+
 ## `toleration`
 
 Mirrors the Kubernetes toleration.
@@ -255,3 +341,12 @@ every lease afterwards. Editing a role does not change what an already
 admitted run executes — including its later attempts.
 
 Deleting a role is a soft delete. Runs admitted under it keep naming it.
+
+## Default roles
+
+The backend seeds one role the first time a process serving the public API
+starts: `classificator`, the chat bot's default, which routes a request to the
+role that fits it rather than doing the work
+([connect a Mattermost bot](../how-to/connect-a-mattermost-bot.md#the-classificator)).
+It is seeded once. An edit to it is kept, and deleting it is permanent: the seed
+looks for any role of that name ever stored, deleted ones included.

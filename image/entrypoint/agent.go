@@ -6,9 +6,11 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"maps"
 	"net/url"
 	"os"
 	"path/filepath"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
@@ -131,19 +133,67 @@ func phaseAuth(_ context.Context, r *Run) error {
 	// token, not the callback token, not one presigned link: the entrypoint
 	// handles those before and after the run, and the agent has a shell.
 	r.agentEnv = rt.Env(r)
+	// The role's own variables, after the runtime's: a plugin's MCP server
+	// that expands ${NAME} in its configuration inherits them from the CLI
+	// that starts it. The names cannot shadow the runtime's — LoadSecrets has
+	// refused the reserved ones — so the order is only for a stable log.
+	if names := slices.Sorted(maps.Keys(r.secrets.AgentEnv)); len(names) > 0 {
+		for _, name := range names {
+			r.agentEnv = append(r.agentEnv, name+"="+r.secrets.AgentEnv[name])
+		}
+		r.logf("the role adds %d variable(s) to the agent's environment: %s",
+			len(names), strings.Join(names, ", "))
+	}
 	if r.secrets.LLMBaseURL != "" {
 		r.logf("model calls go through %s as %s", r.secrets.LLMBaseURL, r.cfg.Model)
 	}
 
 	if !r.cfg.HasRepo() {
-		r.logf("model credential wired for %s; no repository, so no git credential", r.cfg.Agent)
-		return nil
+		return r.wireMarketplaceCredential()
 	}
-	if err := r.writeGitCredentialHelper(); err != nil {
+	host, err := gitHost(r.cfg.RepoURL)
+	if err != nil {
+		return fail(runv1.ExitConfig, "RepoURLUnusable", "%s", err)
+	}
+	if err := r.writeGitCredentialHelper(host); err != nil {
 		return err
 	}
 	r.logf("model credential wired for %s; git credential helper at %s",
 		r.cfg.Agent, r.gitCredentialHelperPath())
+	return nil
+}
+
+// wireMarketplaceCredential is the git credential of a run with no
+// repository.
+//
+// Such a run is handed a git token only when its role names a marketplace —
+// the backend mints it for that catalogue — and the token is then bound to the
+// first marketplace's host, the same way a repository's token is bound to the
+// repository's. Without one, a role that keeps its plugins in a private
+// catalogue could never be used without a repository to clone.
+func (r *Run) wireMarketplaceCredential() error {
+	if r.secrets.GitToken == "" {
+		r.logf("model credential wired for %s; no repository, so no git credential", r.cfg.Agent)
+		return nil
+	}
+	spec, err := r.rolePluginSpec()
+	if err != nil {
+		return err
+	}
+	if len(spec.Marketplaces) == 0 {
+		r.logf("model credential wired for %s; no repository and no marketplace, "+
+			"so the git token is not used", r.cfg.Agent)
+		return nil
+	}
+	host, err := gitHost(marketplaceCloneURL(spec.Marketplaces[0].URL))
+	if err != nil {
+		return fail(runv1.ExitConfig, "MarketplaceUnusable", "%s", err)
+	}
+	if err := r.writeGitCredentialHelper(host); err != nil {
+		return err
+	}
+	r.logf("model credential wired for %s; no repository, git credential bound to the marketplace host %s",
+		r.cfg.Agent, host)
 	return nil
 }
 
@@ -158,18 +208,14 @@ func (r *Run) gitCredentialHelperPath() string {
 // script lives in the entrypoint's private directory, but a script with a token
 // in it is one `cat` away from a log, and the file it reads is 0400 and mounted
 // read-only anyway.
-func (r *Run) writeGitCredentialHelper() error {
-	// The host the token was minted for. Every clone this pod makes passes
-	// through this helper, and since the plugins phase clones marketplaces
-	// whose URL may have come out of the cloned repository, "answer whoever
-	// asks" would hand the run's token to any host a repository cared to name.
-	// git tells the helper which host it is talking to; the helper answers that
-	// one and stays silent for the rest.
-	host, err := gitHost(r.cfg.RepoURL)
-	if err != nil {
-		return fail(runv1.ExitConfig, "RepoURLUnusable", "%s", err)
-	}
-
+//
+// host is the host the token was minted for. Every clone this pod makes passes
+// through this helper, and since the plugins phase clones marketplaces whose
+// URL may have come out of the cloned repository, "answer whoever asks" would
+// hand the run's token to any host a repository cared to name. git tells the
+// helper which host it is talking to; the helper answers that one and stays
+// silent for the rest.
+func (r *Run) writeGitCredentialHelper(host string) error {
 	tokenPath := filepath.Join(r.layout.Secrets, runv1.SecretKeyGitToken)
 	script := "#!/bin/sh\n" +
 		"# Answers git's credential protocol for haliphron runs. Only 'get' is\n" +

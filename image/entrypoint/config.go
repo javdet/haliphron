@@ -355,6 +355,10 @@ type Secrets struct {
 	// saying where the model was called is worth more than hiding a hostname.
 	LLMBaseURL string
 	MCPConfig  []byte
+	// AgentEnv is what the role adds to the agent's environment, from
+	// SecretKeyAgentEnv. Every value is redacted: some of them are credentials,
+	// and the file does not say which.
+	AgentEnv map[string]string
 	// Bundle is object-store mode only, and nil in relay mode. A pointer rather
 	// than a zero value so that "there is no bundle" and "there is an empty
 	// bundle" are different states: the second is a defect and would otherwise
@@ -451,6 +455,25 @@ func LoadSecrets(dir string, c *Config) (*Secrets, error) {
 	if s.MCPConfig, err = read(runv1.SecretKeyMCPConfig, false); err != nil {
 		return nil, err
 	}
+
+	agentEnv, err := read(runv1.SecretKeyAgentEnv, false)
+	if err != nil {
+		return nil, err
+	}
+	if agentEnv != nil {
+		if err := json.Unmarshal(agentEnv, &s.AgentEnv); err != nil {
+			return nil, failWrap(runv1.ExitConfig, "MalformedSecret", err,
+				"%s is not an object of variable names to values", runv1.SecretKeyAgentEnv)
+		}
+		// The backend refuses these names when the role is saved. Refused here
+		// as well rather than dropped: a name one side accepts and the other
+		// discards is a variable the role believes it set.
+		for name := range s.AgentEnv {
+			if err := runv1.AgentEnvName(name); err != nil {
+				return nil, fail(runv1.ExitConfig, "MalformedSecret", "%s: %s", runv1.SecretKeyAgentEnv, err)
+			}
+		}
+	}
 	return s, nil
 }
 
@@ -462,6 +485,9 @@ func LoadSecrets(dir string, c *Config) (*Secrets, error) {
 // what the agent was asked to do, and it is going into result.md anyway.
 func (s *Secrets) Values() []string {
 	values := []string{s.GitToken, s.LLMAPIKey, s.CallbackToken}
+	for _, v := range s.AgentEnv {
+		values = append(values, v)
+	}
 	if s.Bundle == nil {
 		return values
 	}

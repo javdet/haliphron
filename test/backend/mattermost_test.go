@@ -113,6 +113,16 @@ func newFakeMattermost(t *testing.T) *fakeMattermost {
 		}
 		writeMM(w, http.StatusOK, map[string]any{"order": order, "posts": thread})
 	}))
+	mux.HandleFunc("GET /api/v4/posts/{id}", f.authorised(func(w http.ResponseWriter, r *http.Request) {
+		f.mu.Lock()
+		p, ok := f.posts[r.PathValue("id")]
+		f.mu.Unlock()
+		if !ok {
+			writeMM(w, http.StatusNotFound, map[string]string{"id": "app.post.get.app_error"})
+			return
+		}
+		writeMM(w, http.StatusOK, p)
+	}))
 	mux.HandleFunc("POST /api/v4/posts", f.authorised(func(w http.ResponseWriter, r *http.Request) {
 		var p mmPost
 		_ = json.NewDecoder(r.Body).Decode(&p)
@@ -435,8 +445,15 @@ func TestAMentionStartsARunWithTheConfiguredRoleAndSaysWhereItCameFrom(t *testin
 	if r.CreatedVia != "mattermost" || r.CreatedBy != "mattermost:alice" {
 		t.Errorf("created %s via %s", r.CreatedBy, r.CreatedVia)
 	}
-	if got := h.prompt(t, r.ID); got != "restart the ingress on staging" {
-		t.Errorf("prompt = %q, want the message without the mention", got)
+	got := h.prompt(t, r.ID)
+	if !strings.HasSuffix(got, "--- end of chat message ---\n\nrestart the ingress on staging") {
+		t.Errorf("prompt = %q, want the chat header and then the message without the mention", got)
+	}
+	for _, want := range []string{"platform: mattermost\n", "message_id: post0000000000000000000001\n",
+		"channel_id: " + mmChannel + "\n", "sender: @alice (user id user-alice)\n"} {
+		if !strings.Contains(got, want) {
+			t.Errorf("the chat header is missing %q:\n%s", want, got)
+		}
 	}
 
 	eventually(t, "the acknowledgement", func() bool { return len(f.postsOfKind(app.ChatPostAck)) == 1 })
@@ -751,7 +768,8 @@ func TestADirectMessageNeedsNoMentionAndOtherAutomationStartsNothing(t *testing.
 		t.Fatalf("outcomes = %v, want the direct message started", outcomes)
 	}
 	runs := h.runs(t)
-	if len(runs) != 1 || h.prompt(t, runs[0].ID) != "which pods are crashlooping?" {
+	if len(runs) != 1 || !strings.HasSuffix(h.prompt(t, runs[0].ID), "\nwhich pods are crashlooping?") ||
+		!strings.Contains(h.prompt(t, runs[0].ID), ", type D\n") {
 		t.Errorf("runs = %+v", runs)
 	}
 }

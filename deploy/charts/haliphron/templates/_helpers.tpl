@@ -130,6 +130,12 @@ file, never as a variable.
 {{- define "haliphron.mattermostSecretKey" -}}
 {{- if .Values.mattermost.existingSecret -}}{{ .Values.mattermost.existingSecretKey }}{{- else -}}mattermostToken{{- end -}}
 {{- end -}}
+{{- define "haliphron.mattermostWebhook" -}}
+{{- if and (include "haliphron.mattermostEnabled" .) (ne .Values.mattermost.transport "websocket") -}}true{{- end -}}
+{{- end -}}
+{{- define "haliphron.mattermostWebhookKey" -}}
+{{- if .Values.mattermost.existingSecret -}}{{ .Values.mattermost.existingSecretWebhookKey }}{{- else -}}mattermostWebhookToken{{- end -}}
+{{- end -}}
 
 {{/*
 Which half of the ArtifactStore port is in force. Empty means relay, which is
@@ -470,6 +476,15 @@ variable.
 {{- end -}}
 {{- if and .Values.mattermost.runURL (not (contains "{id}" .Values.mattermost.runURL)) -}}
 {{- fail (printf "mattermost.runURL is %q and has no {id} for the run identifier" .Values.mattermost.runURL) -}}
+{{- end -}}
+{{- if not (has .Values.mattermost.transport (list "websocket" "webhook" "both")) -}}
+{{- fail (printf "mattermost.transport is %q; it is websocket, webhook or both" .Values.mattermost.transport) -}}
+{{- end -}}
+{{- if not (has .Values.mattermost.replyPolicy (list "always" "if_unanswered")) -}}
+{{- fail (printf "mattermost.replyPolicy is %q; it is always or if_unanswered" .Values.mattermost.replyPolicy) -}}
+{{- end -}}
+{{- if and (ne .Values.mattermost.transport "websocket") (not .Values.mattermost.existingSecret) (not .Values.mattermost.webhookToken) -}}
+{{- fail (printf "mattermost.transport is %s, which needs the outgoing webhook's token: set mattermost.webhookToken, or put it in mattermost.existingSecret under mattermost.existingSecretWebhookKey" .Values.mattermost.transport) -}}
 {{- end -}}
 {{- end -}}
 

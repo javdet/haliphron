@@ -1,5 +1,5 @@
 // Package restapi is the public API on :8080 — the listener clients, the UI
-// and the Slack adapter speak to.
+// and the chat adapters speak to.
 //
 // It is transport and nothing else: every decision about what a run may be
 // lives in app, so that a run started from REST, from MCP and from Slack is the
@@ -7,6 +7,11 @@
 // wire — snake_case, cursor pagination, Idempotency-Key, an error envelope with
 // a field name in it — and the authentication model, which is a bearer token
 // with scopes rather than the self-signed cluster JWTs of the other listener.
+//
+// One exception to the bearer token: a chat server's outgoing webhook cannot
+// hold one, and authenticates with the shared secret the chat server issued
+// instead. Such a handler is mounted by the package that owns the platform
+// (Mount), and checks that secret itself.
 package restapi
 
 import (
@@ -27,6 +32,23 @@ import (
 type Server struct {
 	app *app.Service
 	log *slog.Logger
+	// mounts are handlers another package serves on this listener under its
+	// own authentication: today, the chat platforms' webhooks.
+	mounts []mount
+}
+
+type mount struct {
+	pattern string
+	handler http.Handler
+}
+
+// Mount serves a handler on this listener outside the bearer-token scheme.
+// It is for a caller that cannot hold one of this API's tokens — a chat
+// server's outgoing webhook, which authenticates with a shared secret of its
+// own that the handler checks — and the handler is the whole of the check.
+func (s *Server) Mount(pattern string, h http.Handler) *Server {
+	s.mounts = append(s.mounts, mount{pattern: pattern, handler: h})
+	return s
 }
 
 // New builds it over the use cases.
@@ -89,6 +111,12 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("PUT "+BasePath+"/model-credential", s.scoped(store.ScopeAdmin, s.putModelCredential))
 	mux.HandleFunc("GET "+BasePath+"/git-credential", s.scoped(store.ScopeRunsRead, s.getGitCredential))
 	mux.HandleFunc("PUT "+BasePath+"/git-credential", s.scoped(store.ScopeAdmin, s.putGitCredential))
+
+	mux.HandleFunc("GET "+BasePath+"/integrations/mattermost", s.scoped(store.ScopeAdmin, s.getMattermost))
+	mux.HandleFunc("PUT "+BasePath+"/integrations/mattermost", s.scoped(store.ScopeAdmin, s.putMattermost))
+	for _, m := range s.mounts {
+		mux.Handle(m.pattern, m.handler)
+	}
 
 	mux.HandleFunc("POST "+BasePath+"/tokens", s.scoped(store.ScopeAdmin, s.createToken))
 	mux.HandleFunc("GET "+BasePath+"/tokens", s.scoped(store.ScopeAdmin, s.listTokens))
@@ -224,6 +252,10 @@ func (s *Server) failFor(w http.ResponseWriter, r *http.Request, err error) {
 		// would hand back the result of work nobody ordered.
 		s.fail(w, http.StatusUnprocessableEntity, "idempotency_conflict",
 			"this Idempotency-Key was used with a different request body", "Idempotency-Key")
+	case errors.Is(err, app.ErrChatIntegrationManaged):
+		s.fail(w, http.StatusConflict, "managed_by_environment",
+			"this integration is configured by the deployment's environment (HALIPHRON_MATTERMOST_*); "+
+				"change it there, or unset it to manage it here", "")
 	case errors.Is(err, app.ErrSubmissionInFlight):
 		w.Header().Set("Retry-After", "1")
 		s.fail(w, http.StatusConflict, "in_flight",
