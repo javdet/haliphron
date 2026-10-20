@@ -62,6 +62,12 @@ type Submitted struct {
 
 // Submit admits a run.
 func (s *Service) Submit(ctx context.Context, req run.SubmitRequest, opts SubmitOptions) (Submitted, error) {
+	return s.admit(ctx, req, opts, submitLinks{})
+}
+
+// admit is Submit with the links a run is admitted on behalf of: the
+// idempotency claim around the admission that every caller with a key shares.
+func (s *Service) admit(ctx context.Context, req run.SubmitRequest, opts SubmitOptions, links submitLinks) (Submitted, error) {
 	scope := opts.Scope
 	if scope == "" {
 		scope = "runs.create"
@@ -86,7 +92,7 @@ func (s *Service) Submit(ctx context.Context, req run.SubmitRequest, opts Submit
 		}
 	}
 
-	submitted, err := s.submit(ctx, req, nil)
+	submitted, err := s.submit(ctx, req, links)
 	if err != nil {
 		// The claim is released so the caller's retry is a retry rather than a
 		// permanent replay of a failure.
@@ -105,24 +111,51 @@ func (s *Service) Submit(ctx context.Context, req run.SubmitRequest, opts Submit
 // still being admitted.
 var ErrSubmissionInFlight = errors.New("app: a request with this idempotency key is in flight")
 
-// submit admits one run. chat, when set, is the claimed chat message the run
-// answers, linked to it in the run's own insert.
-func (s *Service) submit(ctx context.Context, req run.SubmitRequest, chat *store.ChatTriggerKey) (Submitted, error) {
+// submitLinks are what a run answers to, each written in the run's own insert
+// so that a run never commits without them.
+type submitLinks struct {
+	// chat is the claimed chat message the run answers.
+	chat *store.ChatTriggerKey
+	// schedule is the schedule the run was admitted from; fire, when set,
+	// makes the admission that schedule's fenced fire rather than a "run now".
+	schedule runv1.ULID
+	fire     *store.ScheduleFire
+}
+
+// prepare applies admission's rules to a request and renders its spec,
+// writing nothing. It is the half of admission a schedule is checked against
+// when it is saved, so that a schedule which saves is one whose fires admit.
+func (s *Service) prepare(ctx context.Context, req run.SubmitRequest) (runv1.ULID, runv1.RenderedRunSpec, error) {
 	var role *run.Role
 	if req.Role != "" {
 		stored, err := s.store.RoleByName(ctx, req.Role)
 		if err != nil {
 			if errors.Is(err, store.ErrNotFound) {
-				return Submitted{}, &run.InvalidRequestError{
+				return "", runv1.RenderedRunSpec{}, &run.InvalidRequestError{
 					Field: "role", Detail: fmt.Sprintf("no role named %q", req.Role)}
 			}
-			return Submitted{}, err
+			return "", runv1.RenderedRunSpec{}, err
 		}
 		if role, err = parseRole(stored); err != nil {
-			return Submitted{}, err
+			return "", runv1.RenderedRunSpec{}, err
 		}
 	}
 
+	id, err := run.NewULID(s.now())
+	if err != nil {
+		return "", runv1.RenderedRunSpec{}, err
+	}
+
+	spec, err := run.Render(id, req, role, s.defaults)
+	if err != nil {
+		return "", runv1.RenderedRunSpec{}, err
+	}
+	return id, spec, nil
+}
+
+// submit admits one run, with whatever it answers to linked in its own insert.
+func (s *Service) submit(ctx context.Context, req run.SubmitRequest, links submitLinks) (Submitted, error) {
+	chat := links.chat
 	if req.ParentRunID != "" && chat == nil {
 		// A child of a run started from chat answers the same person, and is
 		// told where they are the way its parent was. Done here rather than
@@ -137,12 +170,7 @@ func (s *Service) submit(ctx context.Context, req run.SubmitRequest, chat *store
 		}
 	}
 
-	id, err := run.NewULID(s.now())
-	if err != nil {
-		return Submitted{}, err
-	}
-
-	spec, err := run.Render(id, req, role, s.defaults)
+	id, spec, err := s.prepare(ctx, req)
 	if err != nil {
 		return Submitted{}, err
 	}
@@ -186,6 +214,8 @@ func (s *Service) submit(ctx context.Context, req run.SubmitRequest, chat *store
 		ClusterID:      cluster,
 		MaxChildren:    s.defaults.ChildLimit(),
 		ChatTrigger:    chat,
+		ScheduleID:     links.schedule,
+		ScheduleFire:   links.fire,
 	}); err != nil {
 		if errors.Is(err, store.ErrTooManyChildren) {
 			// Worth a line of its own: a run that hits this is either a
@@ -206,6 +236,7 @@ func (s *Service) submit(ctx context.Context, req run.SubmitRequest, chat *store
 		Payload: map[string]any{
 			"agent": spec.Agent, "model": spec.Model, "role": req.Role,
 			"repo": spec.Repo.URL, "via": req.CreatedVia, "parent": string(req.ParentRunID),
+			"schedule": string(links.schedule),
 		},
 	}); err != nil {
 		return Submitted{}, err
@@ -245,6 +276,10 @@ func actorKindFor(via string) string {
 		return "agent"
 	case "ui", "slack", "mattermost":
 		return "user"
+	case "schedule":
+		// The fire is the scheduler's own; the person who created the
+		// schedule is in its audit record and in created_by, not here.
+		return "system"
 	default:
 		return "token"
 	}

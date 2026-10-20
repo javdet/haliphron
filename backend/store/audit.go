@@ -44,6 +44,11 @@ const (
 
 	AuditTokenRemoved = "token.removed"
 
+	AuditScheduleCreated   = "schedule.created"
+	AuditScheduleUpdated   = "schedule.updated"
+	AuditScheduleDeleted   = "schedule.deleted"
+	AuditScheduleTriggered = "schedule.triggered"
+
 	AuditChatIntegrationSaved = "chat_integration.saved"
 	AuditRoleSeeded           = "role.seeded"
 )

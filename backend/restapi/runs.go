@@ -19,6 +19,19 @@ import (
 
 // createRunRequest is run_agent as a REST body.
 type createRunRequest struct {
+	runFields
+
+	// Async false waits for the run to finish. The default is true, because a
+	// synchronous agent run holds a connection open for minutes and most
+	// callers — Slack, n8n, the UI — would rather have an identifier.
+	Async *bool `json:"async,omitempty"`
+	// WaitSeconds bounds a synchronous call.
+	WaitSeconds int32 `json:"wait_seconds,omitempty"`
+}
+
+// runFields are what a run is, as opposed to how the caller wants to be
+// answered about it. A schedule's template is the same object.
+type runFields struct {
 	Prompt string `json:"prompt"`
 
 	Agent string `json:"agent,omitempty"`
@@ -34,13 +47,40 @@ type createRunRequest struct {
 	MaxCostUSD     string `json:"max_cost_usd,omitempty"`
 	MaxTurns       int32  `json:"max_turns,omitempty"`
 	Priority       int32  `json:"priority,omitempty"`
+}
 
-	// Async false waits for the run to finish. The default is true, because a
-	// synchronous agent run holds a connection open for minutes and most
-	// callers — Slack, n8n, the UI — would rather have an identifier.
-	Async *bool `json:"async,omitempty"`
-	// WaitSeconds bounds a synchronous call.
-	WaitSeconds int32 `json:"wait_seconds,omitempty"`
+func (f runFields) submitRequest() run.SubmitRequest {
+	return run.SubmitRequest{
+		Prompt:         f.Prompt,
+		Agent:          runv1.AgentType(f.Agent),
+		Model:          f.Model,
+		Role:           f.Role,
+		RepoURL:        f.Repo,
+		BaseBranch:     f.BaseBranch,
+		TargetBranch:   f.TargetBranch,
+		CreatePR:       f.CreatePR,
+		TimeoutSeconds: f.TimeoutSeconds,
+		MaxCostUSD:     runv1.MoneyUSD(f.MaxCostUSD),
+		MaxTurns:       f.MaxTurns,
+		Priority:       f.Priority,
+	}
+}
+
+func runFieldsOf(req run.SubmitRequest) runFields {
+	return runFields{
+		Prompt:         req.Prompt,
+		Agent:          string(req.Agent),
+		Model:          req.Model,
+		Role:           req.Role,
+		Repo:           req.RepoURL,
+		BaseBranch:     req.BaseBranch,
+		TargetBranch:   req.TargetBranch,
+		CreatePR:       req.CreatePR,
+		TimeoutSeconds: req.TimeoutSeconds,
+		MaxCostUSD:     string(req.MaxCostUSD),
+		MaxTurns:       req.MaxTurns,
+		Priority:       req.Priority,
+	}
 }
 
 // runResponse is a run as the API shows it.
@@ -78,6 +118,7 @@ type runResponse struct {
 
 	ParentRunID string `json:"parent_run_id,omitempty"`
 	Depth       int16  `json:"depth"`
+	ScheduleID  string `json:"schedule_id,omitempty"`
 
 	CreatedBy  string     `json:"created_by"`
 	CreatedVia string     `json:"created_via"`
@@ -120,6 +161,7 @@ func RunView(r store.Run) runResponse {
 		NumTurns:      r.NumTurns,
 		ParentRunID:   string(r.ParentRunID),
 		Depth:         r.Depth,
+		ScheduleID:    string(r.ScheduleID),
 		CreatedBy:     r.CreatedBy,
 		CreatedVia:    r.CreatedVia,
 		CreatedAt:     r.CreatedAt,
@@ -135,22 +177,9 @@ func (s *Server) createRun(w http.ResponseWriter, r *http.Request, c caller) {
 		return
 	}
 
-	submit := run.SubmitRequest{
-		Prompt:         req.Prompt,
-		Agent:          runv1.AgentType(req.Agent),
-		Model:          req.Model,
-		Role:           req.Role,
-		RepoURL:        req.Repo,
-		BaseBranch:     req.BaseBranch,
-		TargetBranch:   req.TargetBranch,
-		CreatePR:       req.CreatePR,
-		TimeoutSeconds: req.TimeoutSeconds,
-		MaxCostUSD:     runv1.MoneyUSD(req.MaxCostUSD),
-		MaxTurns:       req.MaxTurns,
-		Priority:       req.Priority,
-		CreatedBy:      c.Name(),
-		CreatedVia:     c.Via(),
-	}
+	submit := req.submitRequest()
+	submit.CreatedBy = c.Name()
+	submit.CreatedVia = c.Via()
 	if c.Parent != nil {
 		// A run started from inside an agent inherits its parent's identity in
 		// the two ways that make it accountable: it is bound to the parent,
@@ -216,13 +245,14 @@ func (s *Server) createRun(w http.ResponseWriter, r *http.Request, c caller) {
 func (s *Server) listRuns(w http.ResponseWriter, r *http.Request, _ caller) {
 	query := r.URL.Query()
 	filter := store.RunFilter{
-		Role:    query.Get("role"),
-		Agent:   runv1.AgentType(query.Get("agent")),
-		Cluster: runv1.ULID(query.Get("cluster_id")),
-		Parent:  runv1.ULID(query.Get("parent_run_id")),
-		Query:   query.Get("q"),
-		Limit:   intParam(r, "limit", 50),
-		Before:  runv1.ULID(query.Get("before")),
+		Role:     query.Get("role"),
+		Agent:    runv1.AgentType(query.Get("agent")),
+		Cluster:  runv1.ULID(query.Get("cluster_id")),
+		Parent:   runv1.ULID(query.Get("parent_run_id")),
+		Schedule: runv1.ULID(query.Get("schedule_id")),
+		Query:    query.Get("q"),
+		Limit:    intParam(r, "limit", 50),
+		Before:   runv1.ULID(query.Get("before")),
 	}
 	if statuses, ok := query["status"]; ok {
 		filter.Status = statuses

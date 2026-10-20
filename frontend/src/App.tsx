@@ -4,6 +4,8 @@ import { useGitCredential, useModelCredential } from './api/hooks'
 import { gitProblems } from './api/gitToken'
 import { RunsPage } from './pages/RunsPage'
 import { RunDetailPage } from './pages/RunDetailPage'
+import { SchedulesPage } from './pages/SchedulesPage'
+import { ScheduleDetailPage } from './pages/ScheduleDetailPage'
 import { ClustersPage } from './pages/ClustersPage'
 import { StatsPage } from './pages/StatsPage'
 import { RolesPage } from './pages/RolesPage'
@@ -24,6 +26,7 @@ function Sidebar() {
 
       <nav className="nav">
         <NavLink to="/runs">Runs</NavLink>
+        <NavLink to="/schedules">Schedules</NavLink>
         <NavLink to="/clusters">Clusters</NavLink>
         <NavLink to="/stats">Statistics</NavLink>
         <div className="nav-group">
@@ -151,6 +154,8 @@ export default function App() {
           <Route path="/" element={<RunsPage />} />
           <Route path="/runs" element={<RunsPage />} />
           <Route path="/runs/:id" element={<RunDetailPage />} />
+          <Route path="/schedules" element={<SchedulesPage />} />
+          <Route path="/schedules/:id" element={<ScheduleDetailPage />} />
           <Route path="/clusters" element={<ClustersPage />} />
           <Route path="/stats" element={<StatsPage />} />
           <Route path="/roles" element={<RolesPage />} />

@@ -75,6 +75,7 @@ Every failure returns this envelope:
 | 409 | `in_flight` | a request with this `Idempotency-Key` is still being processed; `Retry-After: 1` is set |
 | 409 | `no_kek` | a managed secret was sent to an installation with no key encryption key |
 | 409 | `managed_by_environment` | the integration is configured by the deployment's environment and cannot be saved here |
+| 409 | `name_taken` | another schedule has this name |
 | 413 | `too_large` | the request body exceeds 8 MiB, or the prompt exceeds 512 KiB |
 | 422 | `invalid_request` | the request is well formed and refused |
 | 422 | `idempotency_conflict` | this `Idempotency-Key` was used with a different body |
@@ -84,7 +85,8 @@ Every failure returns this envelope:
 
 ## Idempotency
 
-`POST /api/v1/runs` accepts an `Idempotency-Key` request header. A repeat with
+`POST /api/v1/runs` and `POST /api/v1/schedules/{id}/run` accept an
+`Idempotency-Key` request header. A repeat with
 the same key and the same body returns the first request's response verbatim
 with status `200`. The same key with a different body is refused with `422`
 `idempotency_conflict`.
@@ -138,6 +140,7 @@ Scope: `runs:read`. Most recent first.
 | `agent` | string | all | |
 | `cluster_id` | ULID | all | |
 | `parent_run_id` | ULID | all | |
+| `schedule_id` | ULID | all | the runs a schedule fired or was run now for |
 | `q` | string | — | free text |
 | `limit` | integer | 50 | |
 | `before` | ULID | — | cursor |
@@ -268,8 +271,9 @@ Runs can also be deleted automatically, some time after they finish. See
 | `input_tokens`, `output_tokens`, `num_turns` | integer | |
 | `parent_run_id` | ULID | omitted when the run has no parent |
 | `depth` | integer | 0 for a run with no parent |
-| `created_by` | string | the token subject, its name, `run:<id>`, or `mattermost:<username>` |
-| `created_via` | string | `api`, `mcp`, `agent` or `mattermost` |
+| `schedule_id` | ULID | the schedule that fired the run or was run now; omitted otherwise, and cleared when the schedule is deleted |
+| `created_by` | string | the token subject, its name, `run:<id>`, `mattermost:<username>`, or `schedule:<id>` for a scheduled fire |
+| `created_via` | string | `api`, `mcp`, `agent`, `mattermost` or `schedule` |
 | `created_at`, `started_at`, `finished_at` | timestamp | the last two omitted until they exist |
 
 `status` is the reported status, not the stored one. A terminal run whose
@@ -292,6 +296,93 @@ report has not been collected reads `CompletedWithoutResult`. See
 | `declared_duration_ms` | integer | what the pod reported |
 | `observed_duration_ms` | integer | the window the lease covered |
 | `started_at`, `finished_at`, `completion_received_at` | timestamp | |
+
+---
+
+## Schedules
+
+A schedule is a run template admitted on a cron expression, by the backend.
+Every replica fires due schedules every `HALIPHRON_SCHEDULE_INTERVAL` (10 s),
+and each slot admits at most one run however many replicas there are. The
+schedule endpoints refuse a `run-mcp` token with `403 forbidden`: a schedule
+outlives the run that would have created it.
+
+### `POST /api/v1/schedules`
+
+Scope: `runs:write`. Returns `201` and a [schedule object](#the-schedule-object).
+
+| Field | Type | Required | Default | Notes |
+|---|---|---|---|---|
+| `name` | string | yes | — | `^[a-z0-9]([-a-z0-9_.]*[a-z0-9])?$`, unique; `409 name_taken` otherwise |
+| `description` | string | no | empty | at most 1024 bytes |
+| `cron` | string | yes | — | five fields (`minute hour day-of-month month day-of-week`), or `@hourly`, `@daily`, `@weekly`, `@monthly`, `@yearly`. `@every` and a `CRON_TZ=` prefix are refused |
+| `timezone` | string | no | `UTC` | an IANA name such as `Europe/Berlin`; the cron is read in it, across daylight saving |
+| `enabled` | boolean | no | `true` | |
+| `concurrency_policy` | string | no | `Forbid` | `Allow`, `Forbid` (skip a fire while an earlier run is live) or `Replace` (cancel the earlier live runs) |
+| `starting_deadline_seconds` | integer | no | none | a fire later than this after its slot — after an outage — is dropped as `missed` |
+| `run` | object | yes | — | the template: the fields of [`POST /api/v1/runs`](#post-apiv1runs) except `async` and `wait_seconds` |
+
+The template is checked by the same rules as `POST /api/v1/runs` when the
+schedule is saved. A refusal names the field with a `run.` prefix, for example
+`run.role` for a role that does not exist.
+
+Missed slots are not replayed: after an outage a schedule fires once, and then
+on its next slot.
+
+### `GET /api/v1/schedules`
+
+Scope: `runs:read`. Every schedule, by name; not paged.
+
+```json
+{"schedules": [ /* schedule objects */ ]}
+```
+
+### `GET /api/v1/schedules/{id}`
+
+Scope: `runs:read`. Returns a [schedule object](#the-schedule-object).
+
+### `PATCH /api/v1/schedules/{id}`
+
+Scope: `runs:write`. The fields of the create body, all optional. An absent
+field is unchanged; `run`, when present, replaces the whole template; a
+`starting_deadline_seconds` of `0` clears the deadline. Returns `200` and the
+schedule.
+
+`next_run_at` is recomputed from now when `cron`, `timezone` or `enabled`
+changes, and kept otherwise. An edit made while a fire is in flight wins: the
+fire is discarded.
+
+### `DELETE /api/v1/schedules/{id}`
+
+Scope: `runs:write`. Returns `204`. The runs it started are kept, with
+`schedule_id` cleared.
+
+### `POST /api/v1/schedules/{id}/run`
+
+Scope: `runs:write`. No body. Run now: admits the template at once and returns
+`202` and a [run object](#the-run-object), with `schedule_id` set and
+`created_by` and `created_via` naming the caller. It ignores
+`concurrency_policy`, works on a disabled schedule, and leaves `next_run_at`
+alone. Accepts an `Idempotency-Key`; one key used on two schedules is a
+`422 idempotency_conflict`.
+
+### The schedule object
+
+| Field | Type | Notes |
+|---|---|---|
+| `id` | ULID | |
+| `name`, `description` | string | |
+| `cron`, `timezone` | string | |
+| `enabled` | boolean | |
+| `concurrency_policy` | string | |
+| `starting_deadline_seconds` | integer | omitted when none |
+| `run` | object | the template |
+| `next_run_at` | timestamp | omitted exactly when the schedule is disabled |
+| `last_fired_at` | timestamp | the last fire, whether or not it admitted a run |
+| `last_outcome` | string | `submitted`, `skipped` (the policy), `missed` (the deadline) or `refused` (admission) |
+| `last_error` | string | why the last fire admitted no run |
+| `last_run_id` | ULID | the run the last submitted fire admitted |
+| `created_by`, `created_at`, `updated_by`, `updated_at` | string, timestamp | |
 
 ---
 

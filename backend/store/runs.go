@@ -66,6 +66,15 @@ type NewRun struct {
 	// ClaimChatTrigger. It is linked in the same transaction as the insert: a
 	// run that commits without its link is a run nobody will reply about.
 	ChatTrigger *ChatTriggerKey
+
+	// ScheduleID is the schedule the run was admitted from, by a fire or by
+	// an operator's "run now".
+	ScheduleID runv1.ULID
+	// ScheduleFire, when set, is the scheduled fire this run is: the schedule
+	// is advanced in the same transaction, fenced on what the scheduler read,
+	// and the insert is rolled back with ErrScheduleSettled if the fence is
+	// lost. Unset for "run now", which leaves the schedule's slot alone.
+	ScheduleFire *ScheduleFire
 }
 
 // ErrTooManyChildren is a child run refused because its parent has already
@@ -86,6 +95,10 @@ var ErrTooManyChildren = errors.New("store: the parent run has started its full 
 // was answered in the meantime. A child of a run started from chat inherits
 // its parent's reply as a follow-up, in the same transaction for the same
 // reason.
+//
+// A scheduled fire advances its schedule here too, and for the same reason
+// again: a fire whose run committed without the advance would be fired a
+// second time by the next replica to look.
 func (s *Store) InsertRun(ctx context.Context, r NewRun) error {
 	return s.inTx(ctx, func(tx *sql.Tx) error {
 		if r.ParentRunID != "" && r.MaxChildren > 0 {
@@ -93,8 +106,22 @@ func (s *Store) InsertRun(ctx context.Context, r NewRun) error {
 				return err
 			}
 		}
+		if r.ScheduleFire != nil {
+			if err := linkScheduleFire(ctx, tx, r.ScheduleID, *r.ScheduleFire); err != nil {
+				return err
+			}
+		}
 		if err := insertRun(ctx, tx, r); err != nil {
+			if r.ScheduleID != "" && isForeignKeyViolation(err) {
+				// "Run now" on a schedule deleted under it.
+				return ErrNotFound
+			}
 			return err
+		}
+		if r.ScheduleFire != nil {
+			if err := recordScheduleRun(ctx, tx, r.ScheduleID, r.ID); err != nil {
+				return err
+			}
 		}
 		if r.ChatTrigger != nil {
 			return linkChatTrigger(ctx, tx, *r.ChatTrigger, r.ID)
@@ -139,13 +166,14 @@ func insertRun(ctx context.Context, tx *sql.Tx, r NewRun) error {
 		INSERT INTO runs (id, parent_run_id, depth, created_by, created_via, priority,
 		                  spec, prompt, prompt_sha256, agent, model, role_name,
 		                  repo_url, repo_provider, base_branch, target_branch,
-		                  timeout_seconds, max_cost_usd, cluster_id, status)
+		                  timeout_seconds, max_cost_usd, cluster_id, schedule_id, status)
 		VALUES ($1, $2, $3, $4, $5, $6, $7::jsonb, $8, $9, $10, $11, $12,
-		        $13, $14, $15, $16, $17, $18::numeric, $19, 'Queued')`,
+		        $13, $14, $15, $16, $17, $18::numeric, $19, $20, 'Queued')`,
 		r.ID, nullString(string(r.ParentRunID)), r.Depth, r.CreatedBy, r.CreatedVia, r.Priority,
 		[]byte(r.Spec), r.Prompt, r.PromptSHA256, string(r.Agent), r.Model, nullString(r.Role),
 		nullString(r.RepoURL), string(provider), nullString(r.BaseBranch), nullString(r.TargetBranch),
-		r.TimeoutSeconds, nullString(string(r.MaxCostUSD)), nullString(string(r.ClusterID)))
+		r.TimeoutSeconds, nullString(string(r.MaxCostUSD)), nullString(string(r.ClusterID)),
+		nullString(string(r.ScheduleID)))
 	if err != nil {
 		return fmt.Errorf("store: insert run %s: %w", r.ID, err)
 	}
@@ -161,6 +189,7 @@ type Run struct {
 	CreatedBy  string
 	CreatedVia string
 	Priority   int32
+	ScheduleID runv1.ULID
 
 	Spec         json.RawMessage
 	PromptSHA256 []byte
@@ -230,7 +259,7 @@ func (r Run) ReportedStatus() string {
 }
 
 const runColumns = `
-	SELECT id, parent_run_id, depth, created_by, created_via, priority,
+	SELECT id, parent_run_id, depth, created_by, created_via, priority, schedule_id,
 	       spec, prompt_sha256, agent, model, role_name,
 	       repo_url, repo_provider, base_branch, target_branch,
 	       timeout_seconds, max_cost_usd,
@@ -253,13 +282,14 @@ func (s *Store) RunByID(ctx context.Context, id runv1.ULID) (Run, error) {
 
 // RunFilter is the run list as the API and the UI ask for it.
 type RunFilter struct {
-	Status  []string
-	Role    string
-	Agent   runv1.AgentType
-	Cluster runv1.ULID
-	Parent  runv1.ULID
-	Query   string
-	Limit   int
+	Status   []string
+	Role     string
+	Agent    runv1.AgentType
+	Cluster  runv1.ULID
+	Parent   runv1.ULID
+	Schedule runv1.ULID
+	Query    string
+	Limit    int
 	// Before pages backwards through identifiers. ULIDs sort by mint time, so
 	// a cursor is the last id of the previous page and needs no sort key of
 	// its own.
@@ -302,6 +332,9 @@ func (s *Store) ListRuns(ctx context.Context, f RunFilter) ([]Run, error) {
 	}
 	if f.Parent != "" {
 		add("parent_run_id = $%d", string(f.Parent))
+	}
+	if f.Schedule != "" {
+		add("schedule_id = $%d", string(f.Schedule))
 	}
 	if f.Before != "" {
 		add("id < $%d", string(f.Before))
@@ -715,6 +748,7 @@ func scanRun(row rowScanner) (Run, error) {
 	var (
 		r          Run
 		parent     sql.NullString
+		schedule   sql.NullString
 		role       sql.NullString
 		repoURL    sql.NullString
 		baseBranch sql.NullString
@@ -740,7 +774,7 @@ func scanRun(row rowScanner) (Run, error) {
 		startedAt  sql.NullTime
 		finishedAt sql.NullTime
 	)
-	err := row.Scan(&r.ID, &parent, &r.Depth, &r.CreatedBy, &r.CreatedVia, &r.Priority,
+	err := row.Scan(&r.ID, &parent, &r.Depth, &r.CreatedBy, &r.CreatedVia, &r.Priority, &schedule,
 		&r.Spec, &r.PromptSHA256, &r.Agent, &r.Model, &role,
 		&repoURL, &r.RepoProvider, &baseBranch, &target,
 		&r.TimeoutSeconds, &maxCost,
@@ -758,6 +792,7 @@ func scanRun(row rowScanner) (Run, error) {
 	}
 
 	r.ParentRunID = runv1.ULID(parent.String)
+	r.ScheduleID = runv1.ULID(schedule.String)
 	r.Role = role.String
 	r.RepoURL = repoURL.String
 	r.BaseBranch = baseBranch.String

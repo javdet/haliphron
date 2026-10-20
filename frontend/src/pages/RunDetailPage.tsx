@@ -109,6 +109,17 @@ function Summary({ run }: { run: Run }) {
               </dd>
             </>
           )}
+          {run.schedule_id && (
+            <>
+              <dt>Schedule</dt>
+              <dd>
+                <Link className="mono small" to={`/schedules/${run.schedule_id}`}>
+                  {run.schedule_id}
+                </Link>{' '}
+                <span className="faint">{run.created_via === 'schedule' ? 'fired' : 'run now'}</span>
+              </dd>
+            </>
+          )}
         </dl>
       </Card>
 

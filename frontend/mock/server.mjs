@@ -196,6 +196,57 @@ const deletedClusters = new Set()
 
 // A refusal the real backend answers with, in its error envelope.
 const conflict = (code, message) => ({ status: 409, error: { code, message } })
+const invalid = (field, message) => ({ status: 422, error: { code: 'invalid_request', message, field } })
+
+// Schedules are state, unlike the run fixtures: the page is about editing
+// them. next_run_at is a rough "the next whole hour" — enough to look alive,
+// and the cron itself is the backend's to interpret.
+const nextHour = () => {
+  const d = new Date()
+  d.setUTCMinutes(0, 0, 0)
+  d.setUTCHours(d.getUTCHours() + 1)
+  return d.toISOString()
+}
+let scheduleSeq = 0
+const schedules = [
+  {
+    id: '01JD9S0000SCHEDULE000NIGHT', name: 'nightly-deps', description: 'Bump dependencies and open a PR',
+    cron: '0 3 * * *', timezone: 'Europe/Berlin', enabled: true, concurrency_policy: 'Forbid',
+    starting_deadline_seconds: 3600,
+    run: { prompt: 'Update outdated dependencies, run the tests, and open a pull request.',
+      agent: 'claude-code', role: 'coder', repo: 'https://github.com/acme/checkout', create_pr: true,
+      max_cost_usd: '5' },
+    next_run_at: nextHour(), last_fired_at: iso(21 * 3600000), last_run_id: '01JD8Q7NN9GG8HH7II6JJ5KKLL',
+    last_outcome: 'submitted', created_by: 'maria', created_at: iso(10 * 86400000),
+    updated_by: 'maria', updated_at: iso(2 * 86400000),
+  },
+  {
+    id: '01JD9S0000SCHEDULE00REVIEW', name: 'weekday-review', description: '',
+    cron: '30 9 * * 1-5', timezone: 'UTC', enabled: false, concurrency_policy: 'Replace',
+    run: { prompt: 'Review the open pull requests and comment on blocking issues.', agent: 'claude-code',
+      role: 'code-reviewer', repo: 'https://github.com/acme/platform' },
+    last_fired_at: iso(3 * 86400000), last_outcome: 'refused', last_error: 'role: no role named "reviewer"',
+    created_by: 'dmitri', created_at: iso(30 * 86400000), updated_by: 'dmitri', updated_at: iso(86400000),
+  },
+]
+const triggeredRuns = []
+
+function saveSchedule(target, payload) {
+  const next = { ...target, ...payload, run: payload?.run ?? target.run }
+  if (!/^[a-z0-9]([-a-z0-9_.]*[a-z0-9])?$/.test(next.name ?? '')) {
+    return invalid('name', "a name is lower-case letters, digits, '-', '_' and '.'")
+  }
+  if (!next.cron?.trim()) return invalid('cron', 'a cron expression is required')
+  if (!next.run?.prompt?.trim()) return invalid('run.prompt', 'a run without a prompt has no task')
+  if (schedules.some((s) => s.name === next.name && s.id !== next.id)) {
+    return conflict('name_taken', 'a schedule with this name exists')
+  }
+  if (!next.starting_deadline_seconds) delete next.starting_deadline_seconds
+  next.next_run_at = next.enabled ? target.next_run_at ?? nextHour() : undefined
+  next.updated_by = 'maria-admin'
+  next.updated_at = iso(0)
+  return next
+}
 
 const ACTIVE = new Set(['Leased', 'Dispatched', 'Starting', 'Running', 'Unknown'])
 const liveRuns = (runs) => runs.filter((r) => !deletedRuns.has(r.run_id))
@@ -248,8 +299,10 @@ const routes = [
     const role = url.searchParams.get('role')
     const agent = url.searchParams.get('agent')
     const cluster = url.searchParams.get('cluster_id')
+    const schedule = url.searchParams.get('schedule_id')
     const q = (url.searchParams.get('q') ?? '').toLowerCase()
-    let out = runs.filter((r) => !deletedRuns.has(r.run_id))
+    let out = [...triggeredRuns, ...runs].filter((r) => !deletedRuns.has(r.run_id))
+    if (schedule) out = out.filter((r) => r.schedule_id === schedule)
     if (wanted.length) out = out.filter((r) => wanted.includes(r.status))
     if (role) out = out.filter((r) => r.role === role)
     if (agent) out = out.filter((r) => r.agent === agent)
@@ -258,7 +311,7 @@ const routes = [
     return { runs: out }
   }],
   ['GET', /^\/api\/v1\/runs\/([^/]+)$/, (m, _u, { runs }) =>
-    (!deletedRuns.has(m[1]) && runs.find((r) => r.run_id === m[1])) || 404],
+    (!deletedRuns.has(m[1]) && [...triggeredRuns, ...runs].find((r) => r.run_id === m[1])) || 404],
   ['DELETE', /^\/api\/v1\/runs\/([^/]+)$/, (m, _u, { runs }) => {
     if (deletedRuns.has(m[1]) || !runs.some((r) => r.run_id === m[1])) return 404
     deletedRuns.add(m[1])
@@ -276,6 +329,43 @@ const routes = [
   ['POST', /^\/api\/v1\/runs\/([^/]+)\/(cancel|retry)$/, (m, _u, { runs }) => runs.find((r) => r.run_id === m[1]) ?? 404],
   ['POST', /^\/api\/v1\/runs$/, (_m, _u, { runs }) => runs[0]],
   ['GET', /^\/api\/v1\/roles$/, (_m, _u, { roles }) => ({ roles })],
+  ['GET', /^\/api\/v1\/schedules$/, () => ({ schedules: [...schedules].sort((a, b) => a.name.localeCompare(b.name)) })],
+  ['GET', /^\/api\/v1\/schedules\/([^/]+)$/, (m) => schedules.find((s) => s.id === m[1]) ?? 404],
+  ['POST', /^\/api\/v1\/schedules$/, (_m, _u, _fx, payload) => {
+    const id = `01JD9S0000SCHEDULE${String(++scheduleSeq).padStart(8, '0')}`
+    const saved = saveSchedule({
+      id, description: '', timezone: 'UTC', enabled: true, concurrency_policy: 'Forbid',
+      created_by: 'maria-admin', created_at: iso(0),
+    }, payload)
+    if (!saved.error) schedules.push(saved)
+    return saved
+  }],
+  ['PATCH', /^\/api\/v1\/schedules\/([^/]+)$/, (m, _u, _fx, payload) => {
+    const i = schedules.findIndex((s) => s.id === m[1])
+    if (i < 0) return 404
+    const saved = saveSchedule(schedules[i], payload)
+    if (!saved.error) schedules[i] = saved
+    return saved
+  }],
+  ['DELETE', /^\/api\/v1\/schedules\/([^/]+)$/, (m) => {
+    const i = schedules.findIndex((s) => s.id === m[1])
+    if (i < 0) return 404
+    schedules.splice(i, 1)
+    return {}
+  }],
+  ['POST', /^\/api\/v1\/schedules\/([^/]+)\/run$/, (m) => {
+    const schedule = schedules.find((s) => s.id === m[1])
+    if (!schedule) return 404
+    const run = {
+      run_id: `01JD9R${String(Date.now()).slice(-20).padStart(20, '0')}`, status: 'Queued',
+      agent: schedule.run.agent ?? 'claude-code', model: schedule.run.model ?? 'claude-opus-5',
+      role: schedule.run.role, repo: schedule.run.repo, epoch: 0, attempt: 0, cost_usd: '0.0000',
+      input_tokens: 0, output_tokens: 0, num_turns: 0, depth: 0, schedule_id: schedule.id,
+      created_by: 'maria-admin', created_via: 'api', created_at: iso(0),
+    }
+    triggeredRuns.unshift(run)
+    return run
+  }],
   ['GET', /^\/api\/v1\/clusters$/, (_m, _u, { runs, clusters }) => ({
     clusters: clusters
       .filter((c) => !deletedClusters.has(c.cluster_id))
@@ -375,7 +465,7 @@ createServer(async (req, res) => {
       return res.end(JSON.stringify({ error: { code: 'unauthenticated', message: 'a bearer token is required' } }))
     }
     let payload
-    if (req.method === 'PUT' || req.method === 'POST') {
+    if (req.method === 'PUT' || req.method === 'POST' || req.method === 'PATCH') {
       let raw = ''
       for await (const chunk of req) raw += chunk
       try {

@@ -29,8 +29,10 @@ default-deny NetworkPolicy.
 
 Phase 1 of five: the vertical `run_agent` slice, complete through every layer.
 
-There is no workflow engine and no scheduler. Both are designed — see section
-19 of [docs/architecture.md](docs/architecture.md) — and neither is built.
+The scheduler is built ahead of its phase: a schedule is a run template on a
+cron expression and timezone, managed from the UI or `/api/v1/schedules`, with
+a "run now". There is no workflow engine. It is designed — see section 19 of
+[docs/architecture.md](docs/architecture.md) — and not built.
 
 ## Documentation
 

@@ -547,6 +547,49 @@ included. A default an operator edits keeps the edits, one an operator deletes
 stays deleted across restarts, and one statement does the check and the insert,
 so replicas starting together seed it once.
 
+### Schedules
+
+**A schedule is a run template, a cron expression and an IANA timezone**
+(0010). `run` is the template in the public API's own snake_case request shape,
+checked against admission's rules when the schedule is saved, so a schedule that
+saves is one whose fires admit. The backend fires it; there is no schedule
+custom resource (architecture ADR 2).
+
+**`next_run_at` is the fence, and it is advanced only inside `InsertRun`.** A
+fire reads a due schedule (`enabled AND next_run_at <= now`, no lock), and
+admits its run with the `next_run_at` and `revision` it read. In the run's own
+transaction, before the run row is written, `linkScheduleFire` runs
+
+```sql
+UPDATE schedules SET next_run_at = $next, last_fired_at = $at, last_outcome = 'submitted', …
+WHERE id = $id AND enabled AND next_run_at = $expected AND revision = $revision
+```
+
+and a statement that changes no row rolls the whole insert back with
+`ErrScheduleSettled`. That is what makes N replicas safe with no leader: two
+replicas due on one slot admit one run between them. `revision` is raised by
+every edit, so a fire computed from a schedule that has since been edited loses
+to the edit even when the edit kept the slot. The UPDATE takes the schedule's
+row lock, so a concurrent `DELETE` waits for the fire and then clears the new
+run's `schedule_id` rather than failing the insert. `last_run_id` is written by a
+second statement in the same transaction, once the run exists for its foreign
+key. A fire that admits nothing — skipped by the policy, missed past the
+deadline, refused by admission — advances by the same fenced statement
+(`AdvanceSchedule`). Never write `next_run_at` from another path: a run
+committed without its advance is a slot the next replica fires again.
+
+**`next_run_at` is NULL exactly when the schedule is disabled**, and a CHECK
+says so. It is stored in whole seconds, UTC, because the fence compares it for
+equality.
+
+**`runs.schedule_id`** links a run to the schedule that fired it, or that an
+operator ran now. It is not part of the admission group and `runs_guard` does
+not freeze it, which is what lets `ON DELETE SET NULL` clear it on a terminal
+run when the schedule is deleted. `schedules.last_run_id` is `ON DELETE SET
+NULL` for the same reason in the other direction: run retention deletes runs.
+The partial index `runs_schedule` serves the Forbid and Replace policies and
+the UI's list of a schedule's runs.
+
 ---
 
 ## 12. There is no table of downward commands
@@ -572,7 +615,6 @@ The schema covers `run_agent` end to end and nothing beyond it.
 | Not created | When | Why not now |
 |---|---|---|
 | `workflows`, `workflow_versions`, `workflow_instances`, `workflow_steps` | phase 3 | the engine is a separate piece of work; the shape of a step depends on decisions about branch joins, and there is nothing to guess it from four months ahead |
-| `schedules` | phase 4 | |
 | `mcp_servers` | phase 2 | in phase 1 MCP servers are declared inside `roles.spec`; the registry appears together with the role resolution chain |
 | `budgets` | phase 4 | `runs.max_cost_usd` covers the ceiling of a single run, and that is all phase 1 admission checks |
 | users and RBAC | phase 4 | `api_tokens.scopes` is enough for the three v1 roles |
@@ -610,6 +652,7 @@ architecture document says what it says, and what to look at during review.
 | D15 | The retry checkpoint | `runs/{id}/state.json`, written and read by the pod | `run_attempts.completed_phases`, unioned on write | progress is already this schema's to hold; a second copy meant two writers for one fact. It is also queryable now — "how far did this get" is a `SELECT` |
 | D16 | Duplicate attempts | a convention plus `backoffLimit: 0` | `run_attempts_one_live`, a partial unique index, plus `runs_close_attempt` | `backoffLimit` constrains one Job, not two controllers. The trigger is what keeps the index from becoming a trap that makes a run permanently unrunnable |
 | D17 | Where the result is | implied to be S3 | `runs.result_ref`, a URI carrying its scheme | an installation that switches artifact modes keeps its old runs readable instead of orphaning them |
+| D18 | The scheduler's single runner | a Postgres advisory lock for leadership | no leader; each fire fenced on `next_run_at` and `revision` inside `InsertRun` | the fence and the run commit or roll back together, so a lost lock, a pool connection that held it, or a fire racing an edit cannot produce a second run (section 11, Schedules) |
 
 ---
 

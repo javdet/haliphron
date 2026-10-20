@@ -10,8 +10,8 @@ tenant, delivered as two Helm charts.
 
 The repository is currently phase 1 of five (see section 19 of `docs/architecture.md`): the
 vertical `run_agent` slice. `frontend/` is the React UI, served by nginx that proxies `/api`
-to the backend. There is no workflow engine or scheduler yet — the domain model for both is
-designed but unimplemented.
+to the backend. The scheduler (section 12.4) is built ahead of its phase and targets runs only;
+there is no workflow engine yet — its domain model is designed but unimplemented.
 
 ## Commands
 
@@ -189,6 +189,15 @@ follow-up row (`message_id` `run:<child id>`, `origin_message_id` set). Both are
 inside `InsertRun`'s transaction (`linkChatTrigger`, `linkChatFollowUp` in
 `backend/store/chat.go`). A run committed without its row is a run whose end nobody is told
 about — never insert a run, or one of these rows, from another path.
+
+**A scheduled fire advances its schedule only inside `InsertRun`.** There is no scheduler
+leader: every replica running the background loops fires due schedules, and what makes a slot
+one run is `linkScheduleFire` (`backend/store/schedules.go`) — an `UPDATE … WHERE next_run_at =
+<read> AND revision = <read>` in the run's own transaction, which rolls the run back when it
+changes no row. A fire that admits nothing advances through the same fenced statement
+(`AdvanceSchedule`). Never write `next_run_at` from another path, and keep it whole-second UTC:
+the fence compares it for equality. `Replace` cancels the earlier runs only after its own run has
+won the fence, or a replica that lost would cancel the winner's run.
 
 **In the image, `persist` runs before the git phases** — what has been paid for is made durable
 before anything allowed to fail, so a retry never pays for the model twice.

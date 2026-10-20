@@ -681,11 +681,15 @@ secrets(id, name, kind, kek_id, dek_wrapped, nonce, ciphertext, ref_uri, ...)
 api_tokens(id, name, kind, token_sha256, scopes, run_id, expires_at, last_used_at)
 idempotency_keys(tenant_id, scope, key, request_sha256, run_id, expires_at)
 
--- phases 3 and 4
-workflows, workflow_versions, workflow_instances, workflow_steps, schedules, mcp_servers
+-- scheduling
+schedules(id, name, cron, timezone, enabled, concurrency_policy, starting_deadline_seconds,
+          run, next_run_at, revision, last_fired_at, last_run_id, last_outcome, last_error)
+
+-- phases 2 and 3
+workflows, workflow_versions, workflow_instances, workflow_steps, mcp_servers
 
 -- execution
-runs(id, tenant_id, parent_run_id, depth, cluster_id,
+runs(id, tenant_id, parent_run_id, depth, schedule_id, cluster_id,
      lease_epoch, attempt, ack_deadline, lease_deadline,
      spec jsonb, prompt, prompt_sha256, agent, model, role_name,
      repo_url, repo_provider, base_branch, target_branch, timeout_seconds,
@@ -1057,12 +1061,16 @@ sequenceDiagram
 
 ### 12.4 `run_job` (schedule)
 
-The backend's scheduler, one implementation for agents and workflows alike:
+The backend's scheduler, one implementation for agents and workflows alike. It shipped ahead of the workflow engine, so today a schedule's target is a run; a WorkflowInstance target arrives with phase 3.
 
-1. Leadership is leased through a Postgres advisory lock (several replicas are safe).
-2. `SELECT ... FROM schedules WHERE enabled AND next_run_at <= now() FOR UPDATE SKIP LOCKED`.
-3. Apply the `concurrencyPolicy` (`Allow` / `Forbid` / `Replace`), create a Run or a WorkflowInstance, recompute `next_run_at`.
-4. `startingDeadlineSeconds`: missed runs after an outage are dropped rather than executed in an avalanche — the semantics of `batch/v1 CronJob`.
+A schedule is a run template, a five-field cron expression (or an `@hourly`-style descriptor) and an IANA timezone, so `0 9 * * 1-5` means nine local time across daylight saving.
+
+1. **No leader.** Every replica that runs the background loops runs the scheduler. It reads `SELECT ... FROM schedules WHERE enabled AND next_run_at <= now()` without a lock, every 10 seconds by default.
+2. **The fence.** A fire admits its run through the ordinary admission path (`created_via = 'schedule'`), and inside the transaction that inserts the run it advances the schedule with `UPDATE ... WHERE next_run_at = <read> AND revision = <read>`. A fire whose UPDATE changes no row is rolled back, run and all. Two replicas therefore admit one run per slot, and a fire computed before an edit loses to the edit (`docs/contracts/run-store.md`, section 11).
+3. **`concurrencyPolicy`** — `Allow`, `Forbid` (the default: an agent run costs money), or `Replace`, which cancels the earlier live runs only once its own run has won the fence.
+4. **Missed slots collapse.** `next_run_at` is recomputed from the time of the fire, never from the slot that was due, so an outage produces at most one catch-up run rather than an avalanche. `startingDeadlineSeconds` drops even that one when it is later than the deadline — the semantics of `batch/v1 CronJob`.
+5. A fire admission refuses (a deleted role) spends its slot and records why on the schedule; a fire that fails for any other reason stays due and is retried on the next pass.
+6. **Run now** admits the template at once, attributed to the caller, outside the policy, and leaves `next_run_at` where it was.
 
 ---
 
@@ -1086,7 +1094,10 @@ GET    /api/v1/workflow-runs/{id}       the graph with each step's state
 
 POST   /api/v1/schedules                run_job
 GET    /api/v1/schedules
-PATCH  /api/v1/schedules/{id}           enable/disable, change the cron
+GET    /api/v1/schedules/{id}
+PATCH  /api/v1/schedules/{id}           enable/disable, change the cron or the template
+DELETE /api/v1/schedules/{id}
+POST   /api/v1/schedules/{id}/run       run now
 
 GET/POST/PUT/DELETE /api/v1/roles
 GET/POST/DELETE     /api/v1/clusters    bootstrap token registration, viewing, revocation
@@ -1408,7 +1419,7 @@ The split is fundamental: a target cluster needs neither the database, nor the U
 
 1. **Helm does not update CRDs from `crds/`.** Decided: the CRD lives in `templates/` with `helm.sh/resource-policy: keep`. Otherwise the very first additive schema change silently fails to reach the cluster, and it surfaces as pruned fields in `spec` — that is, runs with a silently lost setting.
 2. **The conversion webhook is needed from the very beginning.** `v1alpha1` → `v1` cannot be done without it, and adding a webhook and certificate issuance to a working installation is more expensive than building it in up front.
-3. **Several backend replicas.** The engine, the dispatcher and lease issuance are safe thanks to `FOR UPDATE SKIP LOCKED`; the scheduler requires an advisory lock. Without it two replicas will create two runs for one schedule.
+3. **Several backend replicas.** The engine, the dispatcher and lease issuance are safe thanks to `FOR UPDATE SKIP LOCKED`; the scheduler is safe because each fire is fenced on the schedule's `next_run_at` inside the transaction that inserts its run (12.4). Without the fence two replicas would create two runs for one schedule.
 4. **Long polls and proxies.** A lease hangs for up to 30 seconds. The ingress and any intermediate proxies must have a `proxy_read_timeout` greater than that, or the controller will get disconnects instead of empty responses.
 5. **Database migrations** — a built-in runner at startup with an advisory lock, so that replicas do not migrate simultaneously.
 6. **A ResourceQuota on `haliphron-agents`** — the only thing that stops a burst of runs from taking down the customer's cluster. Installed by default.
@@ -1504,7 +1515,7 @@ The full role resolution chain including repository files, the policy ceiling, t
 The engine, the dispatcher, a static DAG, joining, dynamic fan-out, the `writes` attribute, an init container for input artifacts, a workflow editor in the UI, graph visualization with step states.
 
 **Phase 4 — schedules and operations.**
-The scheduler, multi-cluster assignment by labels and capacity, tracing, dashboards, budgets, RBAC, auditing, the `haliphron-runtime` chart as a separate release.
+The scheduler (shipped early, targeting runs; workflow targets follow phase 3), multi-cluster assignment by labels and capacity, tracing, dashboards, budgets, RBAC, auditing, the `haliphron-runtime` chart as a separate release.
 
 **Phase 5 — opencode, approval steps, `run_agent(wait=true)`, parallel code editing with a conflict resolver.**
 

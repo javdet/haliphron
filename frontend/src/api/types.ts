@@ -79,6 +79,8 @@ export interface Run {
 
   parent_run_id?: string
   depth: number
+  /** The schedule that fired it, or that an operator ran now. */
+  schedule_id?: string
 
   created_by: string
   created_via: string
@@ -92,7 +94,8 @@ export interface RunList {
   next_before?: string
 }
 
-export interface CreateRunRequest {
+/** What a run is, as opposed to how the caller wants to be answered about it. */
+export interface RunTemplate {
   prompt: string
   agent?: string
   model?: string
@@ -105,8 +108,63 @@ export interface CreateRunRequest {
   max_cost_usd?: string
   max_turns?: number
   priority?: number
+}
+
+export interface CreateRunRequest extends RunTemplate {
   async?: boolean
   wait_seconds?: number
+}
+
+/** batch/v1 CronJob's policies, with its names. */
+export type ConcurrencyPolicy = 'Allow' | 'Forbid' | 'Replace'
+
+export const CONCURRENCY_POLICIES: { value: ConcurrencyPolicy; label: string }[] = [
+  { value: 'Forbid', label: 'Forbid — skip while a run is live' },
+  { value: 'Allow', label: 'Allow — runs may overlap' },
+  { value: 'Replace', label: 'Replace — cancel the live run' },
+]
+
+/** What a schedule's last fire did. */
+export type ScheduleOutcome = 'submitted' | 'skipped' | 'missed' | 'refused'
+
+export interface Schedule {
+  id: string
+  name: string
+  description: string
+
+  cron: string
+  timezone: string
+  enabled: boolean
+
+  concurrency_policy: ConcurrencyPolicy
+  starting_deadline_seconds?: number
+
+  run: RunTemplate
+
+  /** Absent exactly when the schedule is disabled. */
+  next_run_at?: string
+  last_fired_at?: string
+  last_run_id?: string
+  last_outcome?: ScheduleOutcome
+  /** Why the last fire admitted no run. */
+  last_error?: string
+
+  created_by: string
+  created_at: string
+  updated_by: string
+  updated_at: string
+}
+
+export interface ScheduleRequest {
+  name: string
+  description?: string
+  cron: string
+  timezone?: string
+  enabled?: boolean
+  concurrency_policy?: ConcurrencyPolicy
+  /** On a PATCH, 0 clears the deadline. */
+  starting_deadline_seconds?: number
+  run: RunTemplate
 }
 
 export interface Attempt {

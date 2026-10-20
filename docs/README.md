@@ -63,5 +63,6 @@ reasoning; read the pages above for what was built.
 ## Status
 
 This is phase 1 of five: the vertical `run_agent` slice, complete through
-every layer. There is no workflow engine and no scheduler — both are designed
-and neither is implemented. The documentation describes what is built.
+every layer, plus the scheduler, built ahead of its phase. There is no workflow
+engine — it is designed and not implemented. The documentation describes what
+is built.

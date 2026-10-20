@@ -163,6 +163,19 @@ func testTimings() clusterv1.Timings {
 	}
 }
 
+// testDefaults are the installation defaults every harness admits with.
+func testDefaults() run.Defaults {
+	return run.Defaults{
+		Image:           "ghcr.io/automagicops/agent-runtime@sha256:" + strings.Repeat("a", 64),
+		ImagePullPolicy: "IfNotPresent",
+		Model:           "anthropic/claude-opus-5",
+		Agent:           runv1.AgentClaudeCode,
+		TimeoutSeconds:  3600,
+		TTLSeconds:      86400,
+		MaxInfraRetries: 3,
+	}
+}
+
 func newHarness(t *testing.T) *harness {
 	t.Helper()
 
@@ -181,15 +194,7 @@ func newHarness(t *testing.T) *harness {
 		Git:       app.StoredGitToken{Store: st, Name: "git-token"},
 		Logger:    slog.New(logs),
 		Timings:   testTimings(),
-		Defaults: run.Defaults{
-			Image:           "ghcr.io/automagicops/agent-runtime@sha256:" + strings.Repeat("a", 64),
-			ImagePullPolicy: "IfNotPresent",
-			Model:           "anthropic/claude-opus-5",
-			Agent:           runv1.AgentClaudeCode,
-			TimeoutSeconds:  3600,
-			TTLSeconds:      86400,
-			MaxInfraRetries: 3,
-		},
+		Defaults:  testDefaults(),
 		Limits: app.Limits{
 			LLMAPIKeySecret: "llm-api-key",
 			GitTokenSecret:  "git-token",

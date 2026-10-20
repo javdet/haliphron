@@ -29,6 +29,8 @@ import {
   type Run,
   type RunList,
   type RunStats,
+  type Schedule,
+  type ScheduleRequest,
   type Secret,
 } from './types'
 
@@ -38,6 +40,7 @@ export interface RunFilter {
   agent?: string
   cluster_id?: string
   parent_run_id?: string
+  schedule_id?: string
   q?: string
   limit?: number
 }
@@ -49,6 +52,8 @@ export const keys = {
   logs: (id: string) => ['run', id, 'logs'] as const,
   result: (id: string, key?: string) => ['run', id, 'result', key ?? ''] as const,
   roles: () => ['roles'] as const,
+  schedules: () => ['schedules'] as const,
+  schedule: (id: string) => ['schedules', id] as const,
   clusters: () => ['clusters'] as const,
   runStats: (since: string | null) => ['stats', 'runs', since ?? 'all'] as const,
   bootstrapTokens: () => ['bootstrap-tokens'] as const,
@@ -198,6 +203,81 @@ export function useDeleteRun() {
   return useMutation({
     mutationFn: (id: string) => request<void>(`/runs/${encodeURIComponent(id)}`, { method: 'DELETE' }),
     onSuccess: () => void qc.invalidateQueries({ queryKey: ['runs'] }),
+  })
+}
+
+// ---------------------------------------------------------------------------
+// schedules
+// ---------------------------------------------------------------------------
+
+/**
+ * Re-read on a timer like the run list: next_run_at and the last outcome move
+ * on their own, and a schedule page left open should show the fire happen.
+ */
+const SCHEDULE_MS = 15000
+
+export function useSchedules() {
+  return useQuery({
+    queryKey: keys.schedules(),
+    queryFn: ({ signal }) =>
+      request<{ schedules: Schedule[] }>('/schedules', { signal }).then((r) => r.schedules),
+    refetchInterval: SCHEDULE_MS,
+  })
+}
+
+export function useSchedule(id: string) {
+  return useQuery({
+    queryKey: keys.schedule(id),
+    queryFn: ({ signal }) => request<Schedule>(`/schedules/${encodeURIComponent(id)}`, { signal }),
+    refetchInterval: SCHEDULE_MS,
+  })
+}
+
+export function useCreateSchedule() {
+  const qc = useQueryClient()
+  return useMutation({
+    mutationFn: (body: ScheduleRequest) => request<Schedule>('/schedules', { method: 'POST', body }),
+    onSuccess: () => void qc.invalidateQueries({ queryKey: keys.schedules() }),
+  })
+}
+
+/** A partial edit: what is sent changes, what is left out stays. */
+export function useUpdateSchedule() {
+  const qc = useQueryClient()
+  return useMutation({
+    mutationFn: ({ id, patch }: { id: string; patch: Partial<ScheduleRequest> }) =>
+      request<Schedule>(`/schedules/${encodeURIComponent(id)}`, { method: 'PATCH', body: patch }),
+    onSuccess: (saved) => {
+      qc.setQueryData(keys.schedule(saved.id), saved)
+      void qc.invalidateQueries({ queryKey: keys.schedules() })
+    },
+  })
+}
+
+export function useDeleteSchedule() {
+  const qc = useQueryClient()
+  return useMutation({
+    mutationFn: (id: string) =>
+      request<void>(`/schedules/${encodeURIComponent(id)}`, { method: 'DELETE' }),
+    // The list only: the schedule's own page may still be mounted, and
+    // refetching it would draw a 404 in the moment before it navigates away.
+    onSuccess: () => void qc.invalidateQueries({ queryKey: keys.schedules(), exact: true }),
+  })
+}
+
+/** "Run now": the template admitted at once, outside the cron and the policy. */
+export function useTriggerSchedule() {
+  const qc = useQueryClient()
+  return useMutation({
+    mutationFn: (id: string) =>
+      request<Run>(`/schedules/${encodeURIComponent(id)}/run`, {
+        method: 'POST',
+        idempotencyKey: newIdempotencyKey(),
+      }),
+    onSuccess: (run) => {
+      qc.setQueryData(keys.run(run.run_id), run)
+      void qc.invalidateQueries({ queryKey: ['runs'] })
+    },
   })
 }
 

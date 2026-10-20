@@ -92,6 +92,15 @@ func (s *Server) Handler() http.Handler {
 
 	mux.HandleFunc("GET "+BasePath+"/stats/runs", s.scoped(store.ScopeRunsRead, s.runStats))
 
+	// runs:write, like starting a run, and refused to a run's own token in
+	// app: a schedule outlives the run that would have created it.
+	mux.HandleFunc("GET "+BasePath+"/schedules", s.scoped(store.ScopeRunsRead, s.listSchedules))
+	mux.HandleFunc("POST "+BasePath+"/schedules", s.scoped(store.ScopeRunsWrite, s.createSchedule))
+	mux.HandleFunc("GET "+BasePath+"/schedules/{id}", s.scoped(store.ScopeRunsRead, s.getSchedule))
+	mux.HandleFunc("PATCH "+BasePath+"/schedules/{id}", s.scoped(store.ScopeRunsWrite, s.patchSchedule))
+	mux.HandleFunc("DELETE "+BasePath+"/schedules/{id}", s.scoped(store.ScopeRunsWrite, s.deleteSchedule))
+	mux.HandleFunc("POST "+BasePath+"/schedules/{id}/run", s.scoped(store.ScopeRunsWrite, s.triggerSchedule))
+
 	mux.HandleFunc("GET "+BasePath+"/roles", s.scoped(store.ScopeRunsRead, s.listRoles))
 	mux.HandleFunc("PUT "+BasePath+"/roles/{name}", s.scoped(store.ScopeAdmin, s.putRole))
 	mux.HandleFunc("GET "+BasePath+"/roles/{name}", s.scoped(store.ScopeRunsRead, s.getRole))
@@ -218,12 +227,20 @@ func (s *Server) fail(w http.ResponseWriter, status int, code, message, field st
 // answers, in one place rather than per handler.
 func (s *Server) failFor(w http.ResponseWriter, r *http.Request, err error) {
 	var (
-		invalid *run.InvalidRequestError
-		inUse   *store.ClusterInUseError
+		invalid  *run.InvalidRequestError
+		tooLarge *run.PromptTooLargeError
+		inUse    *store.ClusterInUseError
 	)
 	switch {
 	case errors.As(err, &invalid):
 		s.fail(w, http.StatusUnprocessableEntity, "invalid_request", invalid.Detail, invalid.Field)
+	case errors.As(err, &tooLarge):
+		s.fail(w, http.StatusRequestEntityTooLarge, "too_large", tooLarge.Error(), "prompt")
+	case errors.Is(err, store.ErrScheduleNameTaken):
+		s.fail(w, http.StatusConflict, "name_taken", "a schedule with this name exists", "name")
+	case errors.Is(err, app.ErrScheduleFromAgent):
+		s.fail(w, http.StatusForbidden, "forbidden",
+			"schedules are managed by operators; a run's own token cannot create, change or start one", "")
 	case errors.Is(err, store.ErrNotFound):
 		s.fail(w, http.StatusNotFound, "not_found", "no such object", "")
 	case errors.Is(err, store.ErrNoKEK):

@@ -30,6 +30,8 @@ is the one component that has to change when that arrives.
 |---|---|
 | Runs | Filter by status, role, agent and text; submit a run; delete a finished run; page with the `before` cursor |
 | Run | Status, accounting, source; result, logs and the attempt ledger; cancel, retry, delete |
+| Schedules | Create, edit, enable/disable and delete schedules (cron, timezone, concurrency policy, starting deadline, the run template); run now; next fire and what the last fire did |
+| Schedule | One schedule's definition and template, and every run it started |
 | Clusters | Registered clusters with heartbeat and slots; revoke; delete a revoked one no run ran on; mint bootstrap tokens |
 | Statistics | Runs per cluster and status over 24 hours, 7 days, 30 days or all time; duration and queue-wait p50/p95; active runs, free slots and heartbeat per cluster |
 | Roles | Create, edit and soft-delete role specs |

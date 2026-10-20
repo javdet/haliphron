@@ -168,6 +168,7 @@ in, which is capped at 1 MiB across all its keys together.
 |---|---|---|
 | `HALIPHRON_SWEEP_INTERVAL` | `5s` | lease and ack expiry scan |
 | `HALIPHRON_REAP_INTERVAL` | `1h` | artifact retention scan (relay mode) and run retention scan |
+| `HALIPHRON_SCHEDULE_INTERVAL` | `10s` | how often due schedules are fired; the most a fire can be late |
 | `HALIPHRON_RUN_RETENTION` | `0` (keep forever) | delete a run this long after it finished, e.g. `720h` for 30 days |
 | `HALIPHRON_LOG_LEVEL` | `info` | |
 | `HALIPHRON_LOG_FORMAT` | `json` | |

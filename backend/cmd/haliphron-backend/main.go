@@ -19,6 +19,9 @@ import (
 	"sync"
 	"syscall"
 	"time"
+	// The scheduler resolves IANA timezones. Embedded so a fire's local time
+	// does not depend on whether the runtime image ships zoneinfo.
+	_ "time/tzdata"
 
 	runv1 "github.com/automagicops/haliphron/api/run/v1"
 	"github.com/automagicops/haliphron/backend/app"
@@ -240,9 +243,16 @@ func run() error {
 	// not sweep, so two replicas do not both expire the same lease — which
 	// would be harmless, since both statements are idempotent, but doubles the
 	// scan for nothing.
+	//
+	// The scheduler is the one loop here whose duplicate would not be harmless
+	// by idempotence alone — two replicas firing one slot would be two runs —
+	// and it is safe for a different reason: each fire is fenced on the
+	// schedule's next_run_at inside the transaction that inserts its run, so
+	// the replica that loses has its run rolled back.
 	if cfg.Mode.Serves(config.ModeCluster) {
-		wg.Add(4)
+		wg.Add(5)
 		go func() { defer wg.Done(); service.RunSweeper(ctx, cfg.SweepInterval) }()
+		go func() { defer wg.Done(); service.RunScheduler(ctx, cfg.ScheduleInterval) }()
 		go func() { defer wg.Done(); service.RunReaper(ctx, cfg.ReapInterval) }()
 		// Retention for runs. A no-op unless HALIPHRON_RUN_RETENTION is set.
 		go func() { defer wg.Done(); service.ReapRuns(ctx, cfg.ReapInterval, cfg.RunRetention) }()

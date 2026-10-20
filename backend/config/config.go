@@ -73,6 +73,9 @@ type Config struct {
 
 	SweepInterval time.Duration
 	ReapInterval  time.Duration
+	// ScheduleInterval is how often due schedules are looked for, and so how
+	// late a fire may be.
+	ScheduleInterval time.Duration
 
 	// RunRetention deletes a run this long after it finished, together with
 	// its attempts and its stored objects. Zero keeps runs forever and is the
@@ -273,9 +276,10 @@ func Load() (Config, error) {
 			MaxAckExpiries: intEnv("HALIPHRON_MAX_ACK_EXPIRIES", clusterv1.DefaultMaxAckExpiries),
 		},
 
-		SweepInterval: durationEnv("HALIPHRON_SWEEP_INTERVAL", 5*time.Second),
-		ReapInterval:  durationEnv("HALIPHRON_REAP_INTERVAL", time.Hour),
-		RunRetention:  durationEnv("HALIPHRON_RUN_RETENTION", 0),
+		SweepInterval:    durationEnv("HALIPHRON_SWEEP_INTERVAL", 5*time.Second),
+		ReapInterval:     durationEnv("HALIPHRON_REAP_INTERVAL", time.Hour),
+		ScheduleInterval: durationEnv("HALIPHRON_SCHEDULE_INTERVAL", 10*time.Second),
+		RunRetention:     durationEnv("HALIPHRON_RUN_RETENTION", 0),
 
 		LogLevel:  env("HALIPHRON_LOG_LEVEL", "info"),
 		LogFormat: env("HALIPHRON_LOG_FORMAT", "json"),

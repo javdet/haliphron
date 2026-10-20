@@ -219,7 +219,10 @@ What does not exist, and is designed but unimplemented:
 - **The workflow engine.** Chains of agents, branching, joining parallel
   branches. The domain model is worked out — it is the largest section of the
   design document — and none of it is built.
-- **The scheduler.** Running on a schedule.
+- **Schedules that start workflows.** The scheduler itself is built — a
+  schedule admits a run from a template on a cron expression, fenced so that
+  several replicas fire each slot once — but its only target is a run until
+  the engine exists.
 - **Multi-cluster placement by labels and capacity**, beyond the basic
   selector.
 - **Tracing, dashboards, budgets, auditing as a product surface.**

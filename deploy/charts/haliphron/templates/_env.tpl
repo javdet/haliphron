@@ -236,6 +236,8 @@ encryption key is not even that: it is a file, because a variable is visible in
   value: {{ .Values.backend.sweepInterval | quote }}
 - name: HALIPHRON_REAP_INTERVAL
   value: {{ .Values.backend.reapInterval | quote }}
+- name: HALIPHRON_SCHEDULE_INTERVAL
+  value: {{ .Values.backend.scheduleInterval | default "10s" | quote }}
 {{- with .Values.backend.runRetention }}
 - name: HALIPHRON_RUN_RETENTION
   value: {{ . | quote }}

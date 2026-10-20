@@ -292,7 +292,7 @@ func (c *Chat) Handle(ctx context.Context, m ChatMessage) (ChatOutcome, error) {
 		BaseBranch: c.cfg.BaseBranch,
 		CreatedBy:  chatActor(c.platform.Name(), m),
 		CreatedVia: c.platform.Name(),
-	}, &key)
+	}, submitLinks{chat: &key})
 	if errors.Is(err, store.ErrChatTriggerSettled) {
 		// The reply loop took the claim for dead and has already answered.
 		return ChatDuplicate, nil

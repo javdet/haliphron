@@ -65,6 +65,9 @@ backend:
   # reaper deletes runs past their TTL.
   sweepInterval: 5s
   reapInterval: 1h
+  # How often due schedules are fired, and so how late a fire may be. Cron's
+  # resolution is a minute.
+  scheduleInterval: 10s
 
   # Delete a run this long after it finished — its row, its attempt ledger and
   # its stored logs, results and artifacts — checked every reapInterval. A Go
