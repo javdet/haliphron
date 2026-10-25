@@ -175,6 +175,14 @@ let mattermost = {
   max_post_runes: 16383, max_thread_bytes: 65536, bot_token_configured: false,
   webhook_token_configured: false, webhook_path: '/api/v1/integrations/mattermost/webhook',
   bot_token_secret: 'mattermost-bot-token', webhook_token_secret: 'mattermost-webhook-token',
+  app_token_configured: false, app_token_secret: '',
+}
+let slack = {
+  platform: 'slack', source: 'none', enabled: false, transport: 'websocket', url: '',
+  role: 'classificator', repo: '', base_branch: '', run_url: '', reply_policy: 'always',
+  max_post_runes: 4000, max_thread_bytes: 65536, bot_token_configured: false,
+  webhook_token_configured: false, app_token_configured: false, webhook_path: '',
+  bot_token_secret: 'slack-bot-token', webhook_token_secret: '', app_token_secret: 'slack-app-token',
 }
 
 // Starts empty, so the prompt to set one is what the mock shows first.
@@ -431,6 +439,16 @@ const routes = [
       webhook_token_configured: mattermost.webhook_token_configured || !!webhook_tokens,
     }
     return mattermost
+  }],
+  ['GET', /^\/api\/v1\/integrations\/slack$/, () => slack],
+  ['PUT', /^\/api\/v1\/integrations\/slack$/, (_m, _url, _fx, payload) => {
+    const { bot_token, app_token, webhook_tokens: _ignored, ...rest } = payload ?? {}
+    slack = {
+      ...slack, ...rest, source: 'database', updated_by: 'maria-admin', updated_at: iso(0),
+      bot_token_configured: slack.bot_token_configured || !!bot_token,
+      app_token_configured: slack.app_token_configured || !!app_token,
+    }
+    return slack
   }],
   ['GET', /^\/api\/v1\/git-credential$/, () => gitCredential()],
   ['PUT', /^\/api\/v1\/git-credential$/, (_m, _url, _fx, payload) => {

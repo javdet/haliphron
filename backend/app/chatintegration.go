@@ -26,15 +26,52 @@ import (
 // they are encrypted like every other credential, listed with the others, and
 // never returned by a read.
 
-// The secrets the integration's credentials are kept in.
+// The chat platforms, as the chat_integrations and chat_triggers keys spell
+// them. Each adapter's Name is one of these.
 const (
-	// ChatBotTokenSecret is the bot account's access token: the WebSocket, the
-	// thread reads, the reactions and the backend's own posts.
+	ChatPlatformMattermost = "mattermost"
+	ChatPlatformSlack      = "slack"
+)
+
+// The secrets the integrations' credentials are kept in.
+const (
+	// ChatBotTokenSecret is the Mattermost bot account's access token: the
+	// WebSocket, the thread reads, the reactions and the backend's own posts.
 	ChatBotTokenSecret = "mattermost-bot-token"
 	// ChatWebhookTokenSecret holds the outgoing webhooks' tokens, one per line.
 	// Mattermost issues a token per webhook, and one bot may be fed by several.
 	ChatWebhookTokenSecret = "mattermost-webhook-token"
+	// SlackBotTokenSecret is the Slack app's bot token (xoxb-): the thread
+	// reads, the reactions and the backend's own posts.
+	SlackBotTokenSecret = "slack-bot-token"
+	// SlackAppTokenSecret is the Slack app's app-level token (xapp-). It opens
+	// the Socket Mode connection and is used for nothing else.
+	SlackAppTokenSecret = "slack-app-token"
 )
+
+// ChatSecrets names the secrets a platform's credentials are kept in. Webhook
+// and App are empty for a platform without that credential: Mattermost has no
+// app token, and Slack no outgoing webhooks.
+type ChatSecrets struct {
+	Bot     string
+	Webhook string
+	App     string
+}
+
+// ChatSecretsFor is where a platform's credentials are kept.
+func ChatSecretsFor(platform string) ChatSecrets {
+	if platform == ChatPlatformSlack {
+		return ChatSecrets{Bot: SlackBotTokenSecret, App: SlackAppTokenSecret}
+	}
+	return ChatSecrets{Bot: ChatBotTokenSecret, Webhook: ChatWebhookTokenSecret}
+}
+
+// ChatCredentials is which of a platform's credentials are present.
+type ChatCredentials struct {
+	Bot     bool
+	Webhook bool
+	App     bool
+}
 
 // Where a chat integration's configuration comes from.
 const (
@@ -58,6 +95,7 @@ type ChatIntegration struct {
 	Source                 string
 	BotTokenConfigured     bool
 	WebhookTokenConfigured bool
+	AppTokenConfigured     bool
 }
 
 // ResolvedChatIntegration is what a running bot needs, credentials included.
@@ -66,6 +104,8 @@ type ResolvedChatIntegration struct {
 	store.ChatIntegration
 	BotToken      string
 	WebhookTokens []string
+	// AppToken opens Slack's Socket Mode connection; empty for Mattermost.
+	AppToken string
 }
 
 // WebSocket reports whether the bot holds a WebSocket connection.
@@ -93,6 +133,7 @@ type ChatIntegrationRequest struct {
 	MaxThreadBytes int
 	BotToken       *string
 	WebhookTokens  *string
+	AppToken       *string
 }
 
 // chatEnvironment is the integration the deployment's environment configures,
@@ -129,6 +170,7 @@ func (s *Service) ChatIntegration(ctx context.Context, platform string) (ChatInt
 			Source:                 ChatSourceEnvironment,
 			BotTokenConfigured:     env.BotToken != "",
 			WebhookTokenConfigured: len(env.WebhookTokens) > 0,
+			AppTokenConfigured:     env.AppToken != "",
 		}, nil
 	}
 
@@ -143,24 +185,58 @@ func (s *Service) ChatIntegration(ctx context.Context, platform string) (ChatInt
 	default:
 		return ChatIntegration{}, err
 	}
-	if out.BotTokenConfigured, err = s.store.SecretExists(ctx, ChatBotTokenSecret); err != nil {
+	have, err := s.chatCredentials(ctx, platform)
+	if err != nil {
 		return ChatIntegration{}, err
 	}
-	if out.WebhookTokenConfigured, err = s.store.SecretExists(ctx, ChatWebhookTokenSecret); err != nil {
-		return ChatIntegration{}, err
-	}
+	out.BotTokenConfigured, out.WebhookTokenConfigured, out.AppTokenConfigured = have.Bot, have.Webhook, have.App
 	return out, nil
 }
 
+// chatCredentials reports which of a platform's stored credentials exist.
+func (s *Service) chatCredentials(ctx context.Context, platform string) (ChatCredentials, error) {
+	var (
+		have    ChatCredentials
+		err     error
+		secrets = ChatSecretsFor(platform)
+	)
+	for _, c := range []struct {
+		name string
+		into *bool
+	}{{secrets.Bot, &have.Bot}, {secrets.Webhook, &have.Webhook}, {secrets.App, &have.App}} {
+		if c.name == "" {
+			continue
+		}
+		if *c.into, err = s.store.SecretExists(ctx, c.name); err != nil {
+			return ChatCredentials{}, err
+		}
+	}
+	return have, nil
+}
+
 func defaultChatIntegration(platform string) store.ChatIntegration {
-	return store.ChatIntegration{
+	c := store.ChatIntegration{
 		Platform:       platform,
 		Transport:      store.ChatTransportWebSocket,
 		Role:           DefaultChatRole,
-		ReplyPolicy:    store.ChatReplyIfUnanswered,
+		ReplyPolicy:    defaultChatReplyPolicy(platform),
 		MaxPostRunes:   DefaultChatPostRunes,
 		MaxThreadBytes: DefaultChatThreadBytes,
 	}
+	if platform == ChatPlatformSlack {
+		c.MaxPostRunes = DefaultSlackPostRunes
+	}
+	return c
+}
+
+// defaultChatReplyPolicy is the policy an integration saved without one gets.
+// On Slack the backend speaks for the agents, which hold no Slack credentials,
+// so it acknowledges and reports every run itself.
+func defaultChatReplyPolicy(platform string) string {
+	if platform == ChatPlatformSlack {
+		return store.ChatReplyAlways
+	}
+	return store.ChatReplyIfUnanswered
 }
 
 // PutChatIntegration validates and saves a platform's integration.
@@ -193,48 +269,57 @@ func (s *Service) PutChatIntegration(ctx context.Context, platform string, req C
 		c.Transport = store.ChatTransportWebSocket
 	}
 	if c.ReplyPolicy == "" {
-		c.ReplyPolicy = store.ChatReplyIfUnanswered
+		c.ReplyPolicy = defaultChatReplyPolicy(platform)
 	}
 	if c.Role == "" {
 		c.Role = DefaultChatRole
 	}
 	if c.MaxPostRunes == 0 {
-		c.MaxPostRunes = DefaultChatPostRunes
+		c.MaxPostRunes = defaultChatIntegration(platform).MaxPostRunes
+	}
+
+	secrets := ChatSecretsFor(platform)
+	if secrets.Webhook == "" && trimmedToken(req.WebhookTokens) != "" {
+		return ChatIntegration{}, &run.InvalidRequestError{Field: "webhook_tokens",
+			Detail: platform + " has no outgoing webhooks"}
+	}
+	if secrets.App == "" && trimmedToken(req.AppToken) != "" {
+		return ChatIntegration{}, &run.InvalidRequestError{Field: "app_token",
+			Detail: platform + " has no app-level token"}
 	}
 
 	var webhookTokens []string
 	if req.WebhookTokens != nil {
 		webhookTokens = SplitChatWebhookTokens(*req.WebhookTokens)
 	}
-	botTokenSet := req.BotToken != nil && strings.TrimSpace(*req.BotToken) != ""
-	webhookSet := len(webhookTokens) > 0
+	botToken := trimmedToken(req.BotToken)
+	appToken := trimmedToken(req.AppToken)
 
-	if !botTokenSet {
-		exists, err := s.store.SecretExists(ctx, ChatBotTokenSecret)
-		if err != nil {
-			return ChatIntegration{}, err
-		}
-		botTokenSet = exists
+	have, err := s.chatCredentials(ctx, platform)
+	if err != nil {
+		return ChatIntegration{}, err
 	}
-	if !webhookSet && req.WebhookTokens == nil {
-		exists, err := s.store.SecretExists(ctx, ChatWebhookTokenSecret)
-		if err != nil {
-			return ChatIntegration{}, err
-		}
-		webhookSet = exists
+	have.Bot = have.Bot || botToken != ""
+	have.App = have.App || appToken != ""
+	if req.WebhookTokens != nil {
+		have.Webhook = len(webhookTokens) > 0
 	}
-	if err := ValidateChatIntegration(c, botTokenSet, webhookSet); err != nil {
+	if err := ValidateChatIntegration(c, have); err != nil {
 		return ChatIntegration{}, err
 	}
 
-	if req.BotToken != nil && strings.TrimSpace(*req.BotToken) != "" {
-		if _, err := s.store.PutManagedSecret(ctx, ChatBotTokenSecret,
-			[]byte(strings.TrimSpace(*req.BotToken)), "", by); err != nil {
+	if botToken != "" {
+		if _, err := s.store.PutManagedSecret(ctx, secrets.Bot, []byte(botToken), "", by); err != nil {
+			return ChatIntegration{}, err
+		}
+	}
+	if appToken != "" {
+		if _, err := s.store.PutManagedSecret(ctx, secrets.App, []byte(appToken), "", by); err != nil {
 			return ChatIntegration{}, err
 		}
 	}
 	if len(webhookTokens) > 0 {
-		if _, err := s.store.PutManagedSecret(ctx, ChatWebhookTokenSecret,
+		if _, err := s.store.PutManagedSecret(ctx, secrets.Webhook,
 			[]byte(strings.Join(webhookTokens, "\n")), "", by); err != nil {
 			return ChatIntegration{}, err
 		}
@@ -250,7 +335,7 @@ func (s *Service) PutChatIntegration(ctx context.Context, platform string, req C
 		Payload: map[string]any{
 			"enabled": c.Enabled, "transport": c.Transport, "url": c.URL, "role": c.Role,
 			"reply_policy": c.ReplyPolicy, "bot_token_replaced": req.BotToken != nil,
-			"webhook_tokens_replaced": len(webhookTokens) > 0,
+			"webhook_tokens_replaced": len(webhookTokens) > 0, "app_token_replaced": appToken != "",
 		},
 	}); err != nil {
 		return ChatIntegration{}, err
@@ -258,9 +343,17 @@ func (s *Service) PutChatIntegration(ctx context.Context, platform string, req C
 	return ChatIntegration{
 		ChatIntegration:        stored,
 		Source:                 ChatSourceDatabase,
-		BotTokenConfigured:     botTokenSet,
-		WebhookTokenConfigured: webhookSet,
+		BotTokenConfigured:     have.Bot,
+		WebhookTokenConfigured: have.Webhook,
+		AppTokenConfigured:     have.App,
 	}, nil
+}
+
+func trimmedToken(p *string) string {
+	if p == nil {
+		return ""
+	}
+	return strings.TrimSpace(*p)
 }
 
 // ChatIntegrationVersion is what a replica polls: it moves whenever the
@@ -292,14 +385,22 @@ func (s *Service) ResolveChatIntegration(ctx context.Context, platform string) (
 		return ResolvedChatIntegration{ChatIntegration: stored}, false, nil
 	}
 
+	secrets := ChatSecretsFor(platform)
 	c = ResolvedChatIntegration{ChatIntegration: stored}
-	token, err := s.store.ResolveSecret(ctx, ChatBotTokenSecret)
+	token, err := s.store.ResolveSecret(ctx, secrets.Bot)
 	if err != nil {
 		return ResolvedChatIntegration{}, false, fmt.Errorf("resolve the bot token: %w", err)
 	}
 	c.BotToken = strings.TrimSpace(string(token))
-	if c.Webhook() {
-		raw, err := s.store.ResolveSecret(ctx, ChatWebhookTokenSecret)
+	if secrets.App != "" {
+		token, err := s.store.ResolveSecret(ctx, secrets.App)
+		if err != nil {
+			return ResolvedChatIntegration{}, false, fmt.Errorf("resolve the app token: %w", err)
+		}
+		c.AppToken = strings.TrimSpace(string(token))
+	}
+	if secrets.Webhook != "" && c.Webhook() {
+		raw, err := s.store.ResolveSecret(ctx, secrets.Webhook)
 		switch {
 		case err == nil:
 			c.WebhookTokens = SplitChatWebhookTokens(string(raw))
@@ -330,12 +431,18 @@ func SplitChatWebhookTokens(raw string) []string {
 // ValidateChatIntegration is the rule for an integration's configuration, from
 // whichever source. A switched-off integration is held to the shape rules only:
 // an operator may save half a configuration and finish it later.
-func ValidateChatIntegration(c store.ChatIntegration, botToken, webhookToken bool) error {
+func ValidateChatIntegration(c store.ChatIntegration, have ChatCredentials) error {
 	invalid := func(field, format string, args ...any) error {
 		return &run.InvalidRequestError{Field: field, Detail: fmt.Sprintf(format, args...)}
 	}
-	switch c.Transport {
-	case store.ChatTransportWebSocket, store.ChatTransportWebhook, store.ChatTransportBoth:
+	slack := c.Platform == ChatPlatformSlack
+	switch {
+	case slack && c.Transport != store.ChatTransportWebSocket:
+		// Socket Mode is the only way in: the backend dials Slack, and Slack
+		// never calls the backend.
+		return invalid("transport", "%q is not websocket, the only transport Slack has here", c.Transport)
+	case c.Transport == store.ChatTransportWebSocket, c.Transport == store.ChatTransportWebhook,
+		c.Transport == store.ChatTransportBoth:
 	default:
 		return invalid("transport", "%q is not websocket, webhook or both", c.Transport)
 	}
@@ -365,7 +472,8 @@ func ValidateChatIntegration(c store.ChatIntegration, botToken, webhookToken boo
 	if !c.Enabled {
 		return nil
 	}
-	if c.URL == "" {
+	// Slack's address is optional: empty is slack.com.
+	if c.URL == "" && !slack {
 		return invalid("url", "an enabled integration needs the server's address")
 	}
 	if c.Role == "" {
@@ -373,10 +481,14 @@ func ValidateChatIntegration(c store.ChatIntegration, botToken, webhookToken boo
 		// anyone who can reach the bot may do, and that is a decision.
 		return invalid("role", "an enabled integration needs a role")
 	}
-	if !botToken {
+	if !have.Bot {
 		return invalid("bot_token", "an enabled integration needs the bot's access token")
 	}
-	if (c.Transport == store.ChatTransportWebhook || c.Transport == store.ChatTransportBoth) && !webhookToken {
+	if slack && !have.App {
+		return invalid("app_token", "an enabled Slack integration needs the app-level token "+
+			"that opens its Socket Mode connection")
+	}
+	if (c.Transport == store.ChatTransportWebhook || c.Transport == store.ChatTransportBoth) && !have.Webhook {
 		return invalid("webhook_tokens", "a webhook transport needs at least one outgoing-webhook token, "+
 			"or every delivery would be refused")
 	}

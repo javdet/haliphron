@@ -7,6 +7,26 @@ of `VERSION`, and it is the tag of the published images.
 
 ### Added
 
+- **Slack.** A Slack app in Socket Mode turns mentions, and direct messages,
+  into runs, the way the Mattermost bot does. Before it acts, the bot reads the
+  whole thread the message was posted in and quotes it into the prompt. The
+  run goes to the `classificator`, which starts the agent that fits, and the
+  bot posts the classificator's answer and the result of every run it started
+  in the same thread. The backend opens the connection, so nothing has to
+  reach it. It is configured under Integrations → Slack, with
+  `GET` and `PUT /api/v1/integrations/slack` (`admin`), or with
+  `HALIPHRON_SLACK_*` and the chart's `slack` values. The tokens are write-only
+  and stored as the managed secrets `slack-bot-token` and `slack-app-token`.
+  The default reply policy on Slack is `always`, because the agents hold no
+  Slack credentials. See `docs/how-to/connect-a-slack-bot.md`.
+- **The `classificator` works on any chat platform.** It posts in the thread
+  itself only when it has tools for the platform the header names. Otherwise
+  it leaves the reply to the bot and makes its final answer the routing note.
+  Default roles are seeded once, so an installation that already has a
+  `classificator` keeps the old prompt until an operator replaces it from
+  `backend/app/defaults/classificator.json`.
+- Migration `0011_slack` lets `chat_triggers` and `chat_integrations` hold
+  Slack's rows.
 - **Mattermost from the UI.** The Integrations page configures the bot:
   server, bot token, transport, role, reply policy, and an optional repository,
   run link and limits. Every API replica picks up a saved change within 15

@@ -686,6 +686,26 @@ key; `409 managed_by_environment` when `HALIPHRON_MATTERMOST_URL` is set. Each
 save is audited as `chat_integration.saved`, without the tokens. Returns `200`
 with the same body as the `GET`.
 
+### `GET` and `PUT /api/v1/integrations/slack`
+
+Scope: `admin`. The Slack bot's configuration, with the shape and the rules of
+the Mattermost endpoints above, and these differences:
+
+- `platform` is `slack`, and `source` is `environment` when
+  `HALIPHRON_SLACK_ENABLED` is set.
+- `transport` is always `websocket`: Socket Mode, which the backend opens.
+  `webhook_path`, `webhook_token_secret` and `webhook_token_configured` are
+  empty, and a `PUT` with `webhook_tokens` is refused.
+- `url` is optional; empty is `https://slack.com/api`.
+- The `GET` adds `app_token_configured` and `app_token_secret`
+  (`slack-app-token`); `bot_token_secret` is `slack-bot-token`. The `PUT` takes
+  a write-only `app_token`, the app-level token (`xapp-`), which an enabled
+  configuration needs beside the bot token (`xoxb-`).
+- Defaults: `reply_policy` `always`, because the agents hold no Slack
+  credentials and the bot speaks for them, and `max_post_runes` `4000`.
+
+Each save is audited as `chat_integration.saved`, without the tokens.
+
 ### `POST /api/v1/integrations/mattermost/webhook`
 
 **No bearer token.** This is Mattermost's outgoing webhook calling in, on the

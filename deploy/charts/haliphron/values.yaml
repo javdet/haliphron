@@ -466,6 +466,70 @@ mattermost:
   replyPolicy: always
 
 # -----------------------------------------------------------------------------
+# The Slack bot
+# -----------------------------------------------------------------------------
+#
+# Like the Mattermost bot, it can be configured here or in the UI (Integrations
+# → Slack), and the UI is the usual answer. Set `enabled` here only to pin the
+# configuration to the release; while it is set the UI shows it read-only.
+#
+# A Slack app in Socket Mode. A mention of the app in a channel it was invited
+# to, or any direct message to it, starts a run under `role` below. The whole
+# thread the message was posted in is quoted into the prompt as context. The
+# default role, the classificator, picks the role that fits and starts that
+# agent; the bot acknowledges the request, then posts the result of the
+# classificator and of every run it started, in the same thread.
+#
+# Socket Mode is a WebSocket the backend opens to Slack: nothing needs to reach
+# the backend, but the backend needs to reach slack.com (and wss-*.slack.com).
+# With networkPolicy.enabled, allow that egress.
+#
+# Anyone who can reach the app can use the role. Make it a least-privilege one.
+#
+# The bot runs beside the public API (backend.mode all or api).
+#
+# See docs/how-to/connect-a-slack-bot.md.
+slack:
+  enabled: false
+
+  # The Web API's address. Empty is https://slack.com/api; set it only for
+  # another Slack deployment, such as GovSlack.
+  apiURL: ""
+
+  # The role every run from the bot is admitted under. Required. The UI seeds
+  # `classificator`; with the chart, create the role you name here.
+  role: ""
+
+  # The repository runs are pointed at, and its base branch. Empty suits the
+  # classificator, which starts the runs that need one.
+  repo: ""
+  baseBranch: ""
+
+  # A link to a run in the UI, with {id} where the run identifier goes.
+  runURL: ""
+
+  # The app's bot token (xoxb-) and app-level token (xapp-, with
+  # connections:write). existingSecret is the better answer, for the reason it
+  # is for Mattermost. Both are read once at startup.
+  botToken: ""
+  appToken: ""
+  existingSecret: ""
+  existingSecretBotTokenKey: botToken
+  existingSecretAppTokenKey: appToken
+
+  # The longest reply posted. Slack recommends 4000; a longer result is cut,
+  # with a note saying where the rest is.
+  maxPostRunes: 4000
+  # How much of a thread is quoted into the prompt as context.
+  maxThreadBytes: 65536
+
+  # always: the bot acknowledges each request and posts every run's result.
+  # The agents hold no Slack credentials, so this is the policy that gets the
+  # person an answer. if_unanswered suits only roles that bring Slack tools of
+  # their own.
+  replyPolicy: always
+
+# -----------------------------------------------------------------------------
 # The UI
 # -----------------------------------------------------------------------------
 #

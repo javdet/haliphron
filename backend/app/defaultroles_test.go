@@ -38,6 +38,11 @@ func TestTheClassificatorRunsWithoutARepositoryAndReadsTheBotToken(t *testing.T)
 		!strings.Contains(role.SystemPrompt, "list_roles") {
 		t.Error("the classificator's prompt does not say how to route")
 	}
+	// On Slack the agent holds no chat tools and the backend speaks for it,
+	// so the prompt must not make posting a step it cannot skip.
+	if !strings.Contains(role.SystemPrompt, "Slack") || !strings.Contains(role.SystemPrompt, "final answer") {
+		t.Error("the classificator's prompt does not say what to do without chat tools")
+	}
 	if len(role.SecretEnv) != 1 || role.SecretEnv[0].Name != "MATTERMOST_TOKEN" {
 		t.Errorf("secretEnv is %+v", role.SecretEnv)
 	}

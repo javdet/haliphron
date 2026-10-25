@@ -9,15 +9,13 @@ import (
 
 // The chat integrations, as an operator configures them from the UI. The rules
 // — validation, which source is in force, where the tokens are kept — are
-// app's; this is the wire shape.
+// app's; this is the wire shape. Both platforms share it: a field a platform
+// has no use for — Mattermost's app token, Slack's webhook — is empty.
 
-// mattermostPlatform is the platform's identifier, the same string the adapter
-// uses. Spelled here rather than imported, because this package does not import
-// the adapter: the adapter mounts its webhook here, not the other way round.
-const mattermostPlatform = "mattermost"
-
-// mattermostWebhookPath is where the adapter's webhook is mounted, reported
-// so the UI can show the address to paste into Mattermost.
+// mattermostWebhookPath is where the Mattermost adapter's webhook is mounted,
+// reported so the UI can show the address to paste into Mattermost. Spelled
+// here rather than imported, because this package does not import the
+// adapter: the adapter mounts its webhook here, not the other way round.
 const mattermostWebhookPath = BasePath + "/integrations/mattermost/webhook"
 
 type chatIntegrationRequest struct {
@@ -34,6 +32,7 @@ type chatIntegrationRequest struct {
 	// Write-only. Absent keeps what is stored.
 	BotToken      *string `json:"bot_token,omitempty"`
 	WebhookTokens *string `json:"webhook_tokens,omitempty"`
+	AppToken      *string `json:"app_token,omitempty"`
 }
 
 type chatIntegrationBody struct {
@@ -51,28 +50,46 @@ type chatIntegrationBody struct {
 	MaxThreadBytes         int        `json:"max_thread_bytes"`
 	BotTokenConfigured     bool       `json:"bot_token_configured"`
 	WebhookTokenConfigured bool       `json:"webhook_token_configured"`
+	AppTokenConfigured     bool       `json:"app_token_configured"`
 	WebhookPath            string     `json:"webhook_path"`
 	BotTokenSecret         string     `json:"bot_token_secret"`
 	WebhookTokenSecret     string     `json:"webhook_token_secret"`
+	AppTokenSecret         string     `json:"app_token_secret"`
 	UpdatedBy              string     `json:"updated_by,omitempty"`
 	UpdatedAt              *time.Time `json:"updated_at,omitempty"`
 }
 
 func (s *Server) getMattermost(w http.ResponseWriter, r *http.Request, _ caller) {
-	c, err := s.app.ChatIntegration(r.Context(), mattermostPlatform)
+	s.getChatIntegration(w, r, app.ChatPlatformMattermost)
+}
+
+func (s *Server) putMattermost(w http.ResponseWriter, r *http.Request, c caller) {
+	s.putChatIntegration(w, r, c, app.ChatPlatformMattermost)
+}
+
+func (s *Server) getSlack(w http.ResponseWriter, r *http.Request, _ caller) {
+	s.getChatIntegration(w, r, app.ChatPlatformSlack)
+}
+
+func (s *Server) putSlack(w http.ResponseWriter, r *http.Request, c caller) {
+	s.putChatIntegration(w, r, c, app.ChatPlatformSlack)
+}
+
+func (s *Server) getChatIntegration(w http.ResponseWriter, r *http.Request, platform string) {
+	c, err := s.app.ChatIntegration(r.Context(), platform)
 	if err != nil {
 		s.failFor(w, r, err)
 		return
 	}
-	s.write(w, http.StatusOK, chatIntegrationResponse(c))
+	s.write(w, http.StatusOK, chatIntegrationResponse(platform, c))
 }
 
-func (s *Server) putMattermost(w http.ResponseWriter, r *http.Request, c caller) {
+func (s *Server) putChatIntegration(w http.ResponseWriter, r *http.Request, c caller, platform string) {
 	var req chatIntegrationRequest
 	if _, ok := s.decode(w, r, &req); !ok {
 		return
 	}
-	saved, err := s.app.PutChatIntegration(r.Context(), mattermostPlatform, app.ChatIntegrationRequest{
+	saved, err := s.app.PutChatIntegration(r.Context(), platform, app.ChatIntegrationRequest{
 		Enabled:        req.Enabled,
 		Transport:      req.Transport,
 		URL:            req.URL,
@@ -85,17 +102,19 @@ func (s *Server) putMattermost(w http.ResponseWriter, r *http.Request, c caller)
 		MaxThreadBytes: req.MaxThreadBytes,
 		BotToken:       req.BotToken,
 		WebhookTokens:  req.WebhookTokens,
+		AppToken:       req.AppToken,
 	}, c.Name())
 	if err != nil {
 		s.failFor(w, r, err)
 		return
 	}
-	s.write(w, http.StatusOK, chatIntegrationResponse(saved))
+	s.write(w, http.StatusOK, chatIntegrationResponse(platform, saved))
 }
 
-func chatIntegrationResponse(c app.ChatIntegration) chatIntegrationBody {
+func chatIntegrationResponse(platform string, c app.ChatIntegration) chatIntegrationBody {
+	secrets := app.ChatSecretsFor(platform)
 	body := chatIntegrationBody{
-		Platform:               mattermostPlatform,
+		Platform:               platform,
 		Source:                 c.Source,
 		Enabled:                c.Enabled,
 		Transport:              c.Transport,
@@ -109,10 +128,14 @@ func chatIntegrationResponse(c app.ChatIntegration) chatIntegrationBody {
 		MaxThreadBytes:         c.MaxThreadBytes,
 		BotTokenConfigured:     c.BotTokenConfigured,
 		WebhookTokenConfigured: c.WebhookTokenConfigured,
-		WebhookPath:            mattermostWebhookPath,
-		BotTokenSecret:         app.ChatBotTokenSecret,
-		WebhookTokenSecret:     app.ChatWebhookTokenSecret,
+		AppTokenConfigured:     c.AppTokenConfigured,
+		BotTokenSecret:         secrets.Bot,
+		WebhookTokenSecret:     secrets.Webhook,
+		AppTokenSecret:         secrets.App,
 		UpdatedBy:              c.UpdatedBy,
+	}
+	if platform == app.ChatPlatformMattermost {
+		body.WebhookPath = mattermostWebhookPath
 	}
 	if !c.UpdatedAt.IsZero() {
 		at := c.UpdatedAt

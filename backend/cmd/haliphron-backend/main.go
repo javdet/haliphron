@@ -32,6 +32,7 @@ import (
 	"github.com/automagicops/haliphron/backend/mcp"
 	"github.com/automagicops/haliphron/backend/metrics"
 	"github.com/automagicops/haliphron/backend/restapi"
+	"github.com/automagicops/haliphron/backend/slack"
 	"github.com/automagicops/haliphron/backend/store"
 	"github.com/automagicops/haliphron/backend/version"
 )
@@ -180,6 +181,25 @@ func run() error {
 			WebhookTokens: cfg.Mattermost.WebhookTokens,
 		})
 	}
+	if cfg.Slack.Enabled() {
+		service.UseEnvironmentChat(app.ResolvedChatIntegration{
+			ChatIntegration: store.ChatIntegration{
+				Platform:       slack.Name,
+				Enabled:        true,
+				Transport:      store.ChatTransportWebSocket,
+				URL:            cfg.Slack.APIURL,
+				Role:           cfg.Slack.Role,
+				RepoURL:        cfg.Slack.RepoURL,
+				BaseBranch:     cfg.Slack.BaseBranch,
+				RunURL:         cfg.Slack.RunURL,
+				ReplyPolicy:    cfg.Slack.ReplyPolicy,
+				MaxPostRunes:   cfg.Slack.MaxPostRunes,
+				MaxThreadBytes: cfg.Slack.MaxThreadBytes,
+			},
+			BotToken: cfg.Slack.BotToken,
+			AppToken: cfg.Slack.AppToken,
+		})
+	}
 
 	var wg sync.WaitGroup
 	serve := func(name, addr string, handler http.Handler) {
@@ -220,15 +240,28 @@ func run() error {
 	// to reach a chat server. Every API replica runs it; the claim in the
 	// store makes that one run per message. Its webhook is served on the
 	// public listener, because that is the one a chat server can reach.
-	var bot *mattermost.Supervisor
+	//
+	// The Slack bot needs nothing served: Socket Mode is a connection the
+	// backend opens, and Slack never calls in.
+	var (
+		bot      *mattermost.Supervisor
+		slackBot *slack.Supervisor
+	)
 	if cfg.Mode.Serves(config.ModeAPI) {
 		bot = mattermost.NewSupervisor(service, log, nil)
+		slackBot = slack.NewSupervisor(service, log, nil)
 		serve("public", cfg.PublicAddr, restapi.New(service, log).
 			Mount("POST "+restapi.BasePath+"/integrations/mattermost/webhook", bot).
 			Handler())
-	} else if cfg.Mattermost.Enabled() {
-		log.Warn("the Mattermost bot is configured but this process does not serve the public API; "+
-			"it is not started here", "mode", cfg.Mode)
+	} else {
+		if cfg.Mattermost.Enabled() {
+			log.Warn("the Mattermost bot is configured but this process does not serve the public API; "+
+				"it is not started here", "mode", cfg.Mode)
+		}
+		if cfg.Slack.Enabled() {
+			log.Warn("the Slack bot is configured but this process does not serve the public API; "+
+				"it is not started here", "mode", cfg.Mode)
+		}
 	}
 	if cfg.Mode.Serves(config.ModeMCP) {
 		serve("mcp", cfg.MCPAddr, mcp.New(service, log).WithRunRetention(cfg.RunRetention).Handler())
@@ -277,8 +310,9 @@ func run() error {
 		} else if len(created) > 0 {
 			log.Info("seeded default roles", "roles", created)
 		}
-		wg.Add(1)
+		wg.Add(2)
 		go func() { defer wg.Done(); bot.Run(ctx) }()
+		go func() { defer wg.Done(); slackBot.Run(ctx) }()
 	}
 
 	<-ctx.Done()

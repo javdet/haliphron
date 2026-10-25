@@ -25,6 +25,10 @@ import (
 // DefaultChatPostRunes is Mattermost's default ceiling on a post.
 const DefaultChatPostRunes = 16383
 
+// DefaultSlackPostRunes is the longest message Slack recommends. It truncates
+// at ten times that, but a reply past it reads as a wall in the thread.
+const DefaultSlackPostRunes = 4000
+
 func renderAck(id runv1.ULID, role, link string) string {
 	text := fmt.Sprintf("Started run `%s`", id)
 	if role != "" {

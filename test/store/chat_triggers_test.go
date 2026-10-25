@@ -102,3 +102,29 @@ func TestARunAdmittedFromMattermostSaysSo(t *testing.T) {
 		t.Errorf("created_via refuses mattermost: %v", err)
 	}
 }
+
+func TestASlackMessageIsClaimedUnderItsOwnPlatform(t *testing.T) {
+	t.Parallel()
+	conn := newDB(t)
+	claim := func(platform string) error {
+		_, err := conn.Exec(`
+			INSERT INTO chat_triggers (platform, message_id, channel_id, thread_id, user_id, username,
+			                           next_attempt_at)
+			VALUES ($1, 'C0123ABC:1712345678.000100', 'C0123ABC', 'C0123ABC:1712345678.000100',
+			        'U0456DEF', 'alice', now())`, platform)
+		return err
+	}
+	if err := claim("slack"); err != nil {
+		t.Fatalf("a Slack message could not be claimed: %v", err)
+	}
+	// The same identifier on another platform is another message.
+	if err := claim("mattermost"); err != nil {
+		t.Errorf("the key is not scoped by platform: %v", err)
+	}
+	if err := claim("teams"); err == nil {
+		t.Error("an unknown platform was accepted")
+	}
+	if _, err := conn.Exec(`INSERT INTO chat_integrations (platform, updated_by) VALUES ('slack', 'test')`); err != nil {
+		t.Errorf("a Slack integration could not be saved: %v", err)
+	}
+}
