@@ -232,6 +232,42 @@ encryption key is not even that: it is a file, because a variable is visible in
 {{- end }}
 {{- end }}
 
+{{- if (include "haliphron.slackEnabled" .) }}
+{{- /*
+  The Slack bot. Both tokens are files, for the reason the Mattermost one is.
+*/}}
+- name: HALIPHRON_SLACK_ENABLED
+  value: "true"
+{{- with .Values.slack.apiURL }}
+- name: HALIPHRON_SLACK_API_URL
+  value: {{ . | quote }}
+{{- end }}
+- name: HALIPHRON_SLACK_BOT_TOKEN_FILE
+  value: /haliphron/slack/{{ include "haliphron.slackBotTokenKey" . }}
+- name: HALIPHRON_SLACK_APP_TOKEN_FILE
+  value: /haliphron/slack/{{ include "haliphron.slackAppTokenKey" . }}
+- name: HALIPHRON_SLACK_ROLE
+  value: {{ .Values.slack.role | quote }}
+{{- with .Values.slack.repo }}
+- name: HALIPHRON_SLACK_REPO
+  value: {{ . | quote }}
+{{- end }}
+{{- with .Values.slack.baseBranch }}
+- name: HALIPHRON_SLACK_BASE_BRANCH
+  value: {{ . | quote }}
+{{- end }}
+{{- with .Values.slack.runURL }}
+- name: HALIPHRON_SLACK_RUN_URL
+  value: {{ . | quote }}
+{{- end }}
+- name: HALIPHRON_SLACK_MAX_POST_RUNES
+  value: {{ .Values.slack.maxPostRunes | quote }}
+- name: HALIPHRON_SLACK_MAX_THREAD_BYTES
+  value: {{ .Values.slack.maxThreadBytes | quote }}
+- name: HALIPHRON_SLACK_REPLY_POLICY
+  value: {{ .Values.slack.replyPolicy | quote }}
+{{- end }}
+
 - name: HALIPHRON_SWEEP_INTERVAL
   value: {{ .Values.backend.sweepInterval | quote }}
 - name: HALIPHRON_REAP_INTERVAL

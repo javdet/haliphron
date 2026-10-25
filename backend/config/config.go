@@ -93,6 +93,51 @@ type Config struct {
 
 	// Mattermost is the chat bot. Off unless a server is named.
 	Mattermost MattermostConfig
+	// Slack is the Slack bot. Off unless switched on.
+	Slack SlackConfig
+}
+
+// SlackConfig is the installation's Slack bot: one Slack app in Socket Mode,
+// whose mentions and direct messages become runs under one role.
+type SlackConfig struct {
+	// On turns the bot on. Slack needs no address, so unlike Mattermost
+	// nothing else can stand for the switch.
+	On bool
+	// APIURL is the Web API's address; empty is slack.com.
+	APIURL string
+	// BotToken (xoxb-) reads threads and posts; AppToken (xapp-) opens the
+	// Socket Mode connection. Both are read from files in a deployment.
+	BotToken string
+	AppToken string
+	// Role is the role every run from the bot is admitted under. Anyone who
+	// can reach the bot can use it, so it is the access boundary.
+	Role       string
+	RepoURL    string
+	BaseBranch string
+	// RunURL links a reply to the run in the UI, with {id} for the run.
+	RunURL string
+
+	MaxPostRunes   int
+	MaxThreadBytes int
+	// ReplyPolicy is always by default: the agents hold no Slack credentials,
+	// so the backend acknowledges and reports every run.
+	ReplyPolicy string
+}
+
+// Enabled reports whether the bot is configured.
+func (s SlackConfig) Enabled() bool { return s.On }
+
+// LogValue keeps the tokens out of any log line the configuration ends up in.
+func (s SlackConfig) LogValue() slog.Value {
+	return slog.GroupValue(
+		slog.Bool("enabled", s.On),
+		slog.String("api_url", s.APIURL),
+		slog.String("role", s.Role),
+		slog.String("repo", s.RepoURL),
+		slog.String("reply_policy", s.ReplyPolicy),
+		slog.Bool("bot_token_set", s.BotToken != ""),
+		slog.Bool("app_token_set", s.AppToken != ""),
+	)
 }
 
 // MattermostConfig is the installation's Mattermost bot: one bot account,
@@ -296,6 +341,18 @@ func Load() (Config, error) {
 			Transport:      env("HALIPHRON_MATTERMOST_TRANSPORT", store.ChatTransportWebSocket),
 			ReplyPolicy:    env("HALIPHRON_MATTERMOST_REPLY_POLICY", store.ChatReplyAlways),
 		},
+
+		Slack: SlackConfig{
+			On:             boolEnv("HALIPHRON_SLACK_ENABLED", false),
+			APIURL:         strings.TrimRight(strings.TrimSpace(os.Getenv("HALIPHRON_SLACK_API_URL")), "/"),
+			Role:           os.Getenv("HALIPHRON_SLACK_ROLE"),
+			RepoURL:        os.Getenv("HALIPHRON_SLACK_REPO"),
+			BaseBranch:     os.Getenv("HALIPHRON_SLACK_BASE_BRANCH"),
+			RunURL:         os.Getenv("HALIPHRON_SLACK_RUN_URL"),
+			MaxPostRunes:   intEnv("HALIPHRON_SLACK_MAX_POST_RUNES", app.DefaultSlackPostRunes),
+			MaxThreadBytes: intEnv("HALIPHRON_SLACK_MAX_THREAD_BYTES", app.DefaultChatThreadBytes),
+			ReplyPolicy:    env("HALIPHRON_SLACK_REPLY_POLICY", store.ChatReplyAlways),
+		},
 	}
 
 	if raw := os.Getenv("HALIPHRON_TOOL_DENY"); raw != "" {
@@ -340,6 +397,14 @@ func Load() (Config, error) {
 			return Config{}, err
 		}
 		cfg.Mattermost.WebhookTokens = app.SplitChatWebhookTokens(webhook)
+	}
+	if cfg.Slack.Enabled() {
+		if cfg.Slack.BotToken, err = loadSecret("HALIPHRON_SLACK_BOT_TOKEN"); err != nil {
+			return Config{}, err
+		}
+		if cfg.Slack.AppToken, err = loadSecret("HALIPHRON_SLACK_APP_TOKEN"); err != nil {
+			return Config{}, err
+		}
 	}
 
 	return cfg, cfg.validate()
@@ -471,6 +536,9 @@ func (c Config) validate() error {
 	if err := c.Mattermost.validate(); err != nil {
 		return err
 	}
+	if err := c.Slack.validate(); err != nil {
+		return err
+	}
 	if c.Timings.MaxWaitSeconds > 30 {
 		// The ingress's proxy_read_timeout must be greater than this, and 30
 		// is what the contract states. A longer wait turns expired polls into
@@ -526,6 +594,47 @@ func (m MattermostConfig) validate() error {
 	}
 	if m.MaxThreadBytes < 0 {
 		return fmt.Errorf("config: HALIPHRON_MATTERMOST_MAX_THREAD_BYTES cannot be negative")
+	}
+	return nil
+}
+
+func (s SlackConfig) validate() error {
+	if !s.Enabled() {
+		return nil
+	}
+	if s.APIURL != "" {
+		u, err := url.Parse(s.APIURL)
+		if err != nil || (u.Scheme != "https" && u.Scheme != "http") || u.Host == "" {
+			return fmt.Errorf("config: HALIPHRON_SLACK_API_URL is %q; it is the Web API's http(s) address", s.APIURL)
+		}
+	}
+	if s.BotToken == "" {
+		return fmt.Errorf("config: the Slack bot needs HALIPHRON_SLACK_BOT_TOKEN_FILE or HALIPHRON_SLACK_BOT_TOKEN")
+	}
+	if s.AppToken == "" {
+		return fmt.Errorf("config: the Slack bot needs HALIPHRON_SLACK_APP_TOKEN_FILE or HALIPHRON_SLACK_APP_TOKEN, " +
+			"the app-level token that opens its Socket Mode connection")
+	}
+	if s.Role == "" {
+		// Required rather than defaulted, for the reason Mattermost's is.
+		return fmt.Errorf("config: the Slack bot needs HALIPHRON_SLACK_ROLE")
+	}
+	switch s.ReplyPolicy {
+	case store.ChatReplyAlways, store.ChatReplyIfUnanswered:
+	default:
+		return fmt.Errorf("config: HALIPHRON_SLACK_REPLY_POLICY is %q; it is always or if_unanswered", s.ReplyPolicy)
+	}
+	if s.BaseBranch != "" && s.RepoURL == "" {
+		return fmt.Errorf("config: HALIPHRON_SLACK_BASE_BRANCH is set without HALIPHRON_SLACK_REPO")
+	}
+	if s.RunURL != "" && !strings.Contains(s.RunURL, "{id}") {
+		return fmt.Errorf("config: HALIPHRON_SLACK_RUN_URL has no {id} for the run identifier")
+	}
+	if s.MaxPostRunes < 1000 || s.MaxPostRunes > 65535 {
+		return fmt.Errorf("config: HALIPHRON_SLACK_MAX_POST_RUNES is %d; it is between 1000 and 65535", s.MaxPostRunes)
+	}
+	if s.MaxThreadBytes < 0 {
+		return fmt.Errorf("config: HALIPHRON_SLACK_MAX_THREAD_BYTES cannot be negative")
 	}
 	return nil
 }

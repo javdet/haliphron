@@ -16,3 +16,8 @@ mattermost:
   url: https://chat.example.com
   role: oncall
   token: lint-mattermost-token
+slack:
+  enabled: true
+  role: classificator
+  botToken: xoxb-lint-token
+  appToken: xapp-lint-token

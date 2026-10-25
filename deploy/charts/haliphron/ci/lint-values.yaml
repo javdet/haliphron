@@ -57,3 +57,9 @@ mattermost:
   repo: https://github.com/example/infra
   runURL: https://haliphron.example.com/runs/{id}
   existingSecret: haliphron-mattermost
+# The Slack bot, through an existing Secret as well.
+slack:
+  enabled: true
+  role: classificator
+  runURL: https://haliphron.example.com/runs/{id}
+  existingSecret: haliphron-slack

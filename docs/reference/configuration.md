@@ -216,6 +216,34 @@ from the UI defaults to `if_unanswered` instead; the environment keeps
 refused until it is created. See [connect a Mattermost
 bot](../how-to/connect-a-mattermost-bot.md).
 
+### Slack bot
+
+The Slack bot follows the same rule: configured here or from the UI
+(Integrations → Slack), never both. When `HALIPHRON_SLACK_ENABLED` is `true`,
+these variables are the configuration and the UI shows it read-only. It runs
+only in a process that serves the public API. Slack is reached over Socket
+Mode, a connection the backend opens, so nothing has to reach the backend.
+
+| Variable | Default | Meaning |
+|---|---|---|
+| `HALIPHRON_SLACK_ENABLED` | `false` | turns the bot on; Slack needs no address, so nothing else can |
+| `HALIPHRON_SLACK_API_URL` | — | the Web API's address; empty is `https://slack.com/api` |
+| `HALIPHRON_SLACK_BOT_TOKEN_FILE` | — | path to the app's bot token (`xoxb-`); checked first |
+| `HALIPHRON_SLACK_BOT_TOKEN` | — | the bot token itself |
+| `HALIPHRON_SLACK_APP_TOKEN_FILE` | — | path to the app-level token (`xapp-`, `connections:write`); checked first |
+| `HALIPHRON_SLACK_APP_TOKEN` | — | the app-level token itself |
+| `HALIPHRON_SLACK_ROLE` | — | required; the role every run from the bot is admitted under |
+| `HALIPHRON_SLACK_REPO` | — | the repository runs are pointed at; empty runs without one |
+| `HALIPHRON_SLACK_BASE_BRANCH` | — | needs `HALIPHRON_SLACK_REPO` |
+| `HALIPHRON_SLACK_RUN_URL` | — | a link to a run in the UI, with `{id}` for the run identifier |
+| `HALIPHRON_SLACK_MAX_POST_RUNES` | `4000` | the longest reply; between 1000 and 65535 |
+| `HALIPHRON_SLACK_MAX_THREAD_BYTES` | `65536` | how much thread history is quoted into a prompt |
+| `HALIPHRON_SLACK_REPLY_POLICY` | `always` | `always`, or `if_unanswered` for a role that brings Slack tools of its own |
+
+The process refuses to start when the bot is enabled and either token or the
+role is missing, or when a value is not one of its values. See [connect a Slack
+bot](../how-to/connect-a-slack-bot.md).
+
 ---
 
 ## Controller

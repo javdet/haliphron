@@ -541,6 +541,16 @@ nothing is still a restart an operator can ask for. The credentials are written
 before the row, so a replica that sees the version move finds the credentials
 it is about to read.
 
+**Slack is the second platform** (0011). `chat_triggers.platform` and
+`chat_integrations.platform` accept `slack` beside `mattermost`; nothing else
+about either table changes, and `created_via` has accepted `slack` since 0007.
+A Slack message is identified by its channel and its timestamp together, so the
+adapter writes `message_id` and `thread_id` as `<channel>:<ts>`, within the
+existing 64-character bound. Slack's credentials are the managed secrets
+`slack-bot-token` (`xoxb-`, every read and post) and `slack-app-token` (`xapp-`,
+which only opens the Socket Mode connection). The down migration deletes Slack's
+rows before narrowing the constraints back.
+
 **A default role is seeded once.** The `classificator` role is inserted at
 startup by `INSERT … WHERE NOT EXISTS` over any row of that name, deleted ones
 included. A default an operator edits keeps the edits, one an operator deletes
@@ -685,6 +695,7 @@ real PostgreSQL — generated columns, domains, partial indexes,
 - [x] a chat trigger cannot carry both a run and a refusal, nor be both replied and abandoned; one run answers at most one message
 - [x] deleting a run deletes the chat trigger linked to it
 - [x] `created_via` accepts `mattermost`
+- [x] a Slack message is claimed under its own platform, and an unknown platform is refused
 - [x] the migrations apply from scratch, roll back to an empty database and apply again
 - [x] `Migrate` is idempotent (every replica calls it at startup)
 - [x] every contract query `PREPARE`s against the schema it ships with
@@ -698,6 +709,14 @@ same real PostgreSQL rather than here:
 - [x] under `if_unanswered` a run that did not succeed is reported even if the agent posted first
 - [x] a child and a grandchild of a chat run are told where the message came from, and a child that fails without a word is reported in the parent's thread even though the parent's routing note answered the parent
 - [x] a run not started from chat gives its children no chat header
+
+The Slack adapter is exercised end to end in the same suite
+(`slack_test.go`), against a fake workspace:
+
+- [x] a mention inside a thread starts a classificator run whose prompt quotes the whole thread
+- [x] the classificator's result and the result of the run it started are both posted in the thread, as mrkdwn, with mentions defused
+- [x] the same event handled by two replicas starts one run
+- [x] the integration keeps both tokens write-only
 - [x] the default roles are seeded once and stay deleted when deleted
 - [x] an integration configured by the environment cannot be saved from the UI, and its tokens are never returned
 

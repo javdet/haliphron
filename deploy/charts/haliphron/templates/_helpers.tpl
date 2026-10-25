@@ -138,6 +138,24 @@ file, never as a variable.
 {{- end -}}
 
 {{/*
+The Slack bot's two tokens, the same way: an existing Secret when one is named,
+otherwise the literals written into the credentials Secret, and files either
+way.
+*/}}
+{{- define "haliphron.slackEnabled" -}}
+{{- if and .Values.slack.enabled (include "haliphron.servesAPI" .) -}}true{{- end -}}
+{{- end -}}
+{{- define "haliphron.slackSecretName" -}}
+{{- default (include "haliphron.secretName" .) .Values.slack.existingSecret -}}
+{{- end -}}
+{{- define "haliphron.slackBotTokenKey" -}}
+{{- if .Values.slack.existingSecret -}}{{ .Values.slack.existingSecretBotTokenKey }}{{- else -}}slackBotToken{{- end -}}
+{{- end -}}
+{{- define "haliphron.slackAppTokenKey" -}}
+{{- if .Values.slack.existingSecret -}}{{ .Values.slack.existingSecretAppTokenKey }}{{- else -}}slackAppToken{{- end -}}
+{{- end -}}
+
+{{/*
 Which half of the ArtifactStore port is in force. Empty means relay, which is
 what an installation gets without configuration.
 */}}
@@ -485,6 +503,36 @@ variable.
 {{- end -}}
 {{- if and (ne .Values.mattermost.transport "websocket") (not .Values.mattermost.existingSecret) (not .Values.mattermost.webhookToken) -}}
 {{- fail (printf "mattermost.transport is %s, which needs the outgoing webhook's token: set mattermost.webhookToken, or put it in mattermost.existingSecret under mattermost.existingSecretWebhookKey" .Values.mattermost.transport) -}}
+{{- end -}}
+{{- end -}}
+
+{{/*
+The Slack bot, refused here for whatever the backend would refuse at startup.
+*/}}
+{{- if .Values.slack.enabled -}}
+{{- if not (include "haliphron.servesAPI" .) -}}
+{{- fail (printf "slack.enabled needs the public API listener, and backend.mode is %q: the bot runs beside it. Set backend.mode to all or api, or enable the bot in the release that serves the API" .Values.backend.mode) -}}
+{{- end -}}
+{{- if and .Values.slack.apiURL (not (regexMatch "^https?://[^/]+" .Values.slack.apiURL)) -}}
+{{- fail (printf "slack.apiURL is %q; it is the Web API's http(s) address, or empty for slack.com" .Values.slack.apiURL) -}}
+{{- end -}}
+{{- if not .Values.slack.role -}}
+{{- fail "slack.role is empty: every run the bot starts is admitted under it, and anyone who can reach the bot can use it. Name a role, and make it a least-privilege one" -}}
+{{- end -}}
+{{- if and (or .Values.slack.botToken .Values.slack.appToken) .Values.slack.existingSecret -}}
+{{- fail "slack.botToken or slack.appToken is set together with slack.existingSecret; the pods read the existing Secret, so the literal would be written and never used. Keep one." -}}
+{{- end -}}
+{{- if and (not .Values.slack.existingSecret) (not (and .Values.slack.botToken .Values.slack.appToken)) -}}
+{{- fail "slack.enabled needs the bot token and the app-level token: set slack.existingSecret (preferred) or both slack.botToken and slack.appToken" -}}
+{{- end -}}
+{{- if and .Values.slack.baseBranch (not .Values.slack.repo) -}}
+{{- fail "slack.baseBranch is set without slack.repo" -}}
+{{- end -}}
+{{- if and .Values.slack.runURL (not (contains "{id}" .Values.slack.runURL)) -}}
+{{- fail (printf "slack.runURL is %q and has no {id} for the run identifier" .Values.slack.runURL) -}}
+{{- end -}}
+{{- if not (has .Values.slack.replyPolicy (list "always" "if_unanswered")) -}}
+{{- fail (printf "slack.replyPolicy is %q; it is always or if_unanswered" .Values.slack.replyPolicy) -}}
 {{- end -}}
 {{- end -}}
 

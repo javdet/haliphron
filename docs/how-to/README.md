@@ -39,6 +39,9 @@ What callers do, whether that caller is a person, a script or another agent.
 - [Connect a Mattermost bot](connect-a-mattermost-bot.md) — mentions of a bot
   account become runs under one role, answered in the thread, by the bot or
   by the agent itself.
+- [Connect a Slack bot](connect-a-slack-bot.md) — mentions of a Slack app
+  become runs routed by the classificator, with the whole thread as context,
+  answered in the thread.
 
 ## When something has gone wrong
 

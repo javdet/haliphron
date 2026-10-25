@@ -59,23 +59,42 @@ httpRoute:
 
   # MCP is a second listener on a second port, and the UI's nginx does not
   # proxy it — only /api. Exposing it is a separate decision from exposing the
-  # UI, so it is written out here and left off: an MCP endpoint on the public
-  # internet accepts a bearer token from anyone who has one.
+  # UI, and this one is taken: an MCP endpoint on the public internet accepts a
+  # bearer token from anyone who has one, so the tokens issued for it carry
+  # runs:read and runs:write and never admin.
   #
-  # mcp:
-  #   enabled: true
-  #   hostnames:
-  #     - agent-gw.theinfranod.com
-  #   matches:
-  #     - path:
-  #         type: PathPrefix
-  #         value: /mcp
-  #   parentRefs:
-  #     - group: gateway.networking.k8s.io
-  #       kind: Gateway
-  #       name: infra-gateway
-  #       namespace: gateway-api
-  #       sectionName: infra
+  # The same hostname as the API, on a longer path prefix. Gateway API resolves
+  # the two by specificity — /mcp is longer than /, so it wins — and the UI's
+  # nginx knows nothing about /mcp, so there is no second claimant.
+  mcp:
+    enabled: true
+    hostnames:
+      - agent-gw.theinfranod.com
+    matches:
+      - path:
+          type: PathPrefix
+          value: /mcp
+    # run_agent with async: false, and get_run_result with wait_seconds, hold
+    # the request open for as long as the caller asked. Left empty this is the
+    # implementation's default — 30s or 60s in most of them — and a wait longer
+    # than that comes back as a gateway timeout while the run carries on.
+    timeouts:
+      request: 600s
+      backendRequest: 600s
+    parentRefs:
+      - group: gateway.networking.k8s.io
+        kind: Gateway
+        name: infra-gateway
+        namespace: gateway-api
+        sectionName: infra
+
+# The MCP route above, as an agent pod reaches it. Every lease then carries a
+# per-run token for it, which is what gives an agent run_agent: the
+# classificator the Mattermost bot runs under starts the agent that does the
+# work through it. Agent egress is public addresses only (RFC1918 is excluded
+# in the runtime chart), so this must be the public hostname, never the
+# in-cluster Service.
+mcpEndpoint: https://agent-gw.theinfranod.com/mcp
 
 # One node in the group, so there is nothing to spread across. Left at the
 # chart's default the constraint is satisfied trivially; it is stated here so

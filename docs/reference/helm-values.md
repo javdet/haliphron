@@ -233,6 +233,32 @@ fires only in public channels. With `networkPolicy.enabled`, the Mattermost
 server has to be added to `networkPolicy.egressTo` for the WebSocket, and its
 traffic admitted by `networkPolicy.ingressFrom` for the webhook.
 
+### Slack bot
+
+| Value | Default | Notes |
+|---|---|---|
+| `slack.enabled` | `false` | needs `backend.mode` `all` or `api` |
+| `slack.apiURL` | `""` | empty is `https://slack.com/api` |
+| `slack.role` | `""` | required when enabled; anyone who can reach the app can use it |
+| `slack.repo` | `""` | empty runs without a repository |
+| `slack.baseBranch` | `""` | needs `slack.repo` |
+| `slack.runURL` | `""` | must contain `{id}` |
+| `slack.botToken` | `""` | `xoxb-`; written to the credentials Secret |
+| `slack.appToken` | `""` | `xapp-`; written to the credentials Secret |
+| `slack.existingSecret` | `""` | preferred over the literals |
+| `slack.existingSecretBotTokenKey` | `botToken` | |
+| `slack.existingSecretAppTokenKey` | `appToken` | |
+| `slack.maxPostRunes` | `4000` | |
+| `slack.maxThreadBytes` | `65536` | |
+| `slack.replyPolicy` | `always` | `always` or `if_unanswered` |
+
+As with Mattermost, the UI (Integrations → Slack) is the other way to configure
+the bot, and is read-only while `slack.enabled` is on. Either
+`slack.existingSecret` or both literal tokens must be set, never both. The
+tokens are mounted as files at `/haliphron/slack/` and read once at startup.
+Socket Mode needs egress to `slack.com` and `wss-*.slack.com`; nothing calls
+in.
+
 ### Frontend
 
 | Value | Default |

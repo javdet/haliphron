@@ -123,6 +123,8 @@ func (s *Server) Handler() http.Handler {
 
 	mux.HandleFunc("GET "+BasePath+"/integrations/mattermost", s.scoped(store.ScopeAdmin, s.getMattermost))
 	mux.HandleFunc("PUT "+BasePath+"/integrations/mattermost", s.scoped(store.ScopeAdmin, s.putMattermost))
+	mux.HandleFunc("GET "+BasePath+"/integrations/slack", s.scoped(store.ScopeAdmin, s.getSlack))
+	mux.HandleFunc("PUT "+BasePath+"/integrations/slack", s.scoped(store.ScopeAdmin, s.putSlack))
 	for _, m := range s.mounts {
 		mux.Handle(m.pattern, m.handler)
 	}
@@ -271,7 +273,7 @@ func (s *Server) failFor(w http.ResponseWriter, r *http.Request, err error) {
 			"this Idempotency-Key was used with a different request body", "Idempotency-Key")
 	case errors.Is(err, app.ErrChatIntegrationManaged):
 		s.fail(w, http.StatusConflict, "managed_by_environment",
-			"this integration is configured by the deployment's environment (HALIPHRON_MATTERMOST_*); "+
+			"this integration is configured by the deployment's environment (HALIPHRON_MATTERMOST_* or HALIPHRON_SLACK_*); "+
 				"change it there, or unset it to manage it here", "")
 	case errors.Is(err, app.ErrSubmissionInFlight):
 		w.Header().Set("Retry-After", "1")

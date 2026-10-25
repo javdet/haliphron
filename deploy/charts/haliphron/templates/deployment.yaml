@@ -135,6 +135,11 @@ spec:
               mountPath: /haliphron/mattermost
               readOnly: true
             {{- end }}
+            {{- if (include "haliphron.slackEnabled" .) }}
+            - name: slack
+              mountPath: /haliphron/slack
+              readOnly: true
+            {{- end }}
             {{- if not (include "haliphron.objectStore" .) }}
             # The artifact volume. readOnlyRootFilesystem is on, so this is one
             # of exactly two writable paths the process has — and the one that
@@ -192,6 +197,17 @@ spec:
               - key: {{ include "haliphron.mattermostWebhookKey" . }}
                 path: {{ include "haliphron.mattermostWebhookKey" . }}
               {{- end }}
+        {{- end }}
+        {{- if (include "haliphron.slackEnabled" .) }}
+        - name: slack
+          secret:
+            secretName: {{ include "haliphron.slackSecretName" . }}
+            defaultMode: 0400
+            items:
+              - key: {{ include "haliphron.slackBotTokenKey" . }}
+                path: {{ include "haliphron.slackBotTokenKey" . }}
+              - key: {{ include "haliphron.slackAppTokenKey" . }}
+                path: {{ include "haliphron.slackAppTokenKey" . }}
         {{- end }}
         {{- with .Values.backend.extraVolumes }}
         {{- toYaml . | nindent 8 }}

@@ -465,9 +465,14 @@ export type ChatTransport = 'websocket' | 'webhook' | 'both'
  */
 export type ChatReplyPolicy = 'always' | 'if_unanswered'
 
-/** The Mattermost integration, tokens excluded: they are write-only. */
+export type ChatPlatform = 'mattermost' | 'slack'
+
+/**
+ * A chat integration, tokens excluded: they are write-only. A field the
+ * platform has no use for — Mattermost's app token, Slack's webhook — is empty.
+ */
 export interface ChatIntegration {
-  platform: string
+  platform: ChatPlatform
   /** environment: pinned by the deployment and read-only here. none: never saved. */
   source: 'environment' | 'database' | 'none'
   enabled: boolean
@@ -482,10 +487,13 @@ export interface ChatIntegration {
   max_thread_bytes: number
   bot_token_configured: boolean
   webhook_token_configured: boolean
-  /** Where the outgoing webhook is served, relative to this UI's origin. */
+  /** Slack's app-level token, which opens its Socket Mode connection. */
+  app_token_configured: boolean
+  /** Where the outgoing webhook is served, relative to this UI's origin. Empty for Slack. */
   webhook_path: string
   bot_token_secret: string
   webhook_token_secret: string
+  app_token_secret: string
   updated_by?: string
   updated_at?: string
 }
@@ -505,4 +513,6 @@ export interface ChatIntegrationRequest {
   bot_token?: string
   /** One per line. Absent keeps the stored tokens. */
   webhook_tokens?: string
+  /** Slack only. Absent keeps the stored token. */
+  app_token?: string
 }
