@@ -291,9 +291,15 @@ func (claudeCode) InstallPlugin(r *Run, id string) Command {
 	}
 }
 
+// Launch passes the prompt on stdin, as the contract requires. -p is --print, a
+// switch and not an option with a value: a prompt after it is a positional
+// argument, and one that opens with a dash — every chat prompt opens with
+// "--- chat message ---" — is refused as an unknown option before the model is
+// called. On the command line it would also be readable in /proc/<pid>/cmdline
+// and capped at MAX_ARG_STRLEN, which a long thread reaches.
 func (claudeCode) Launch(r *Run) Command {
 	args := []string{
-		"-p", string(r.prompt),
+		"-p",
 		"--output-format", "json",
 		"--append-system-prompt", systemPrompt(r),
 	}
@@ -315,7 +321,8 @@ func (claudeCode) Launch(r *Run) Command {
 	if r.hasMCPServers() {
 		args = append(args, "--mcp-config", r.mcpConfigPath())
 	}
-	return Command{Path: "claude", Args: args, Dir: r.layout.Workspace, Env: r.agentEnv}
+	return Command{Path: "claude", Args: args, Dir: r.layout.Workspace, Env: r.agentEnv,
+		Stdin: bytes.NewReader(r.prompt)}
 }
 
 // claudeResult is the shape of `claude -p --output-format json`.
@@ -470,8 +477,13 @@ func (codex) Launch(r *Run) Command {
 	// codex has no --append-system-prompt: the instruction becomes a prefix of
 	// the prompt itself. Same content, different carrier — and the difference is
 	// invisible to the role that asked for it, which is the point.
-	args = append(args, systemPrompt(r)+"\n\n"+string(r.prompt))
-	return Command{Path: "codex", Args: args, Dir: r.layout.Workspace, Env: r.agentEnv}
+	//
+	// Read from stdin, which "-" forces, for the reasons claude-code's is: an
+	// argument is visible in ps and capped in length.
+	args = append(args, "-")
+	prompt := systemPrompt(r) + "\n\n" + string(r.prompt)
+	return Command{Path: "codex", Args: args, Dir: r.layout.Workspace, Env: r.agentEnv,
+		Stdin: strings.NewReader(prompt)}
 }
 
 // codexGatewayProvider names the model provider a gateway is declared as.

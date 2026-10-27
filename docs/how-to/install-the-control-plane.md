@@ -21,6 +21,12 @@ You need:
 helm dependency build deploy/charts/haliphron   # or: make chart-deps
 ```
 
+The commands below install from a clone. Each release is also published, with
+the subcharts already vendored, as `oci://ghcr.io/javdet/charts/haliphron` and
+in the Helm repository at `https://javdet.github.io/haliphron`; either can
+stand in for `deploy/charts/haliphron`, with `--version`, and needs no
+`helm dependency build`. See [deploy/README.md](../../deploy/README.md#published-charts).
+
 ## Install with values
 
 The only credential you have to produce is the one only you know:

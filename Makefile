@@ -26,6 +26,10 @@ NODE_IMAGE         ?= node:22-alpine
 NPM_RUN         = docker run --rm -v haliphron-npm:/root/.npm \
                   -v $(PWD)/frontend:/w -w /w $(NODE_IMAGE)
 HELM               ?= helm
+# Empty packages the charts at the version their Chart.yaml says. A release
+# sets it from the tag, so v0.6.0 publishes 0.6.0 of both charts with
+# appVersion 0.6.0, whatever the files say: the same rule the images follow.
+CHART_VERSION      ?=
 CHART_CP           = deploy/charts/haliphron
 CHART_RT           = deploy/charts/haliphron-runtime
 PG_CONTAINER   = haliphron-contract-pg
@@ -204,11 +208,12 @@ chart-template: chart-gen chart-deps
 	$(HELM) template ci $(CHART_CP) -f $(CHART_CP)/ci/lint-values-generated.yaml >/dev/null
 	$(HELM) template ci $(CHART_RT) -f $(CHART_RT)/ci/lint-values.yaml >/dev/null
 
-## chart-package: the two .tgz, into dist/
+## chart-package: the two .tgz, into dist/. CHART_VERSION=x.y.z stamps both
+##                charts' version and appVersion.
 chart-package: chart-lint
 	mkdir -p dist
-	$(HELM) package $(CHART_CP) -d dist
-	$(HELM) package $(CHART_RT) -d dist
+	$(HELM) package $(CHART_CP) -d dist $(if $(CHART_VERSION),--version $(CHART_VERSION) --app-version $(CHART_VERSION))
+	$(HELM) package $(CHART_RT) -d dist $(if $(CHART_VERSION),--version $(CHART_VERSION) --app-version $(CHART_VERSION))
 
 ## chart-verify: fail if the chart's copies of the CRD and the RBAC are stale
 chart-verify: chart-gen

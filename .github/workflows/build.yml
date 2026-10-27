@@ -11,8 +11,13 @@ on:
 # The Docker Hub namespace. The charts' own defaults still say automagicops/…;
 # override image.repository at install time, or change the values files, if the
 # charts are meant to pull from these.
+#
+# The charts are published on v* tags only, two ways: as OCI artifacts under
+# CHART_REPO, and as a classic Helm repository on GitHub Pages at PAGES_URL.
 env:
   IMAGE_PREFIX: javdet
+  CHART_REPO: ghcr.io/${{ github.repository_owner }}/charts
+  PAGES_URL: https://${{ github.repository_owner }}.github.io/${{ github.event.repository.name }}
 
 # A second push to main supersedes the first. Tag builds are never cancelled:
 # a release that half-published is worse than one that waits.
@@ -182,3 +187,100 @@ jobs:
           provenance: false
           cache-from: type=gha,scope=${{ matrix.name }}
           cache-to: type=gha,scope=${{ matrix.name }},mode=${{ matrix.cache_mode || 'max' }}
+
+  # A release is a v* tag. The charts go out only after every image the tag
+  # names has been pushed: a published chart whose appVersion does not resolve
+  # is an install that fails at ImagePullBackOff.
+  #
+  # A version, once published, is never replaced. A re-run of the same tag
+  # skips what is already in GHCR and on gh-pages, because a chart re-packaged
+  # under the same version has a different digest, and the digest is what a
+  # consumer's Chart.lock and the repository index pin.
+  publish-charts:
+    name: Publish charts
+    runs-on: ubuntu-24.04
+    needs: [push-images]
+    if: startsWith(github.ref, 'refs/tags/v')
+    permissions:
+      contents: write   # gh-pages, and the GitHub release
+      packages: write   # the OCI charts on GHCR
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+
+      - name: Set up Helm
+        uses: azure/setup-helm@v4
+        with:
+          version: v4.1.0
+
+      - name: Resolve version
+        id: version
+        run: echo "value=${GITHUB_REF_NAME#v}" >> "$GITHUB_OUTPUT"
+
+      - name: Package
+        run: make chart-package CHART_VERSION=${{ steps.version.outputs.value }}
+
+      - name: Log in to GHCR
+        run: |
+          echo "${{ secrets.GITHUB_TOKEN }}" | \
+            helm registry login ghcr.io --username "${{ github.actor }}" --password-stdin
+
+      - name: Push to GHCR (OCI)
+        env:
+          VERSION: ${{ steps.version.outputs.value }}
+        run: |
+          for chart in haliphron haliphron-runtime; do
+            if helm show chart "oci://${CHART_REPO}/${chart}" --version "$VERSION" >/dev/null 2>&1; then
+              echo "${chart} ${VERSION} is already in ${CHART_REPO}, kept"
+            else
+              helm push "dist/${chart}-${VERSION}.tgz" "oci://${CHART_REPO}"
+            fi
+          done
+
+      # The branch is created on the first release. GitHub Pages still has to
+      # be pointed at it once, by hand, in the repository settings.
+      - name: Check out gh-pages
+        run: |
+          rc=0
+          git ls-remote --exit-code --heads origin gh-pages >/dev/null || rc=$?
+          case "$rc" in
+            0) git fetch --depth=1 origin gh-pages
+               git worktree add -B gh-pages gh-pages FETCH_HEAD ;;
+            2) git worktree add --orphan -b gh-pages gh-pages
+               touch gh-pages/.nojekyll ;;
+            *) exit "$rc" ;;
+          esac
+
+      # Only the new packages are indexed, then merged into the published
+      # index, so the entries already there keep their digests and timestamps.
+      # `helm repo index` over the whole branch would regenerate every one.
+      - name: Publish to the Helm repository (GitHub Pages)
+        env:
+          VERSION: ${{ steps.version.outputs.value }}
+        run: |
+          mkdir -p staging
+          for f in dist/*.tgz; do
+            if [ -e "gh-pages/$(basename "$f")" ]; then
+              echo "$(basename "$f") is already on gh-pages, kept"
+            else
+              cp "$f" staging/
+            fi
+          done
+          if [ -z "$(ls staging)" ]; then
+            echo "Nothing to publish."
+            exit 0
+          fi
+          helm repo index staging --url "$PAGES_URL" --merge gh-pages/index.yaml
+          mv staging/* gh-pages/
+          cd gh-pages
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add -A
+          git commit -m "Publish haliphron charts ${VERSION}"
+          git push origin gh-pages
+
+      - name: Create GitHub release
+        uses: softprops/action-gh-release@v3
+        with:
+          generate_release_notes: true
+          files: dist/*.tgz

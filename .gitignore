@@ -33,3 +33,6 @@ bin/
 
 # Helm dependencies are vendored by `make chart-deps`, never committed.
 deploy/charts/*/charts/
+
+# Packaged charts, from `make chart-package`.
+dist/

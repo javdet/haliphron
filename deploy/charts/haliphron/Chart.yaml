@@ -6,11 +6,12 @@ description: |
   Installed once. The target clusters get haliphron-runtime instead.
 type: application
 
-# The chart's own version. It moves when the templates move.
-version: 0.4.0
+# The chart's own version. It moves with every release, together with
+# appVersion and VERSION.
+version: 0.5.2
 # The backend it is written against. `helm upgrade` does not imply an image
 # bump: image.tag overrides this.
-appVersion: "0.4.0"
+appVersion: "0.5.2"
 
 keywords:
   - agents

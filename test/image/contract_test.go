@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"encoding/json"
 	"fmt"
+	"io"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -1071,6 +1072,64 @@ func TestUsageIsNormalisedForBothRuntimes(t *testing.T) {
 	})
 }
 
+// A prompt is never an argument: arguments are readable in ps and capped in
+// length, and a prompt that opens with a dash — every chat prompt opens with
+// "--- chat message ---" — is taken by the CLI for an unknown option, so the
+// model is never called and the run fails in no time at all.
+func TestThePromptReachesTheCLIOnStdinAndNeverAsAnArgument(t *testing.T) {
+	t.Parallel()
+	// One line: the harness stages the prompt in an env file.
+	const prompt = "--- chat message --- platform: mattermost --- end of chat message --- поехали"
+
+	for _, tc := range []struct {
+		agent  runv1.AgentType
+		path   string
+		launch string
+	}{
+		{runv1.AgentClaudeCode, "claude", "-p"},
+		{runv1.AgentCodex, "codex", "exec"},
+	} {
+		t.Run(tc.path, func(t *testing.T) {
+			t.Parallel()
+			h := newHarness(t, controlplane.RunRequest{Prompt: prompt, Agent: tc.agent})
+			var mu sync.Mutex
+			var args []string
+			var stdin string
+			script := agentScript(h, "done", "")
+			h.commander.handle = func(c entrypoint.Command) (entrypoint.CommandResult, error) {
+				if c.Path == tc.path && len(c.Args) > 0 && c.Args[0] == tc.launch {
+					var read []byte
+					if c.Stdin != nil {
+						read, _ = io.ReadAll(c.Stdin)
+					}
+					mu.Lock()
+					args, stdin = c.Args, string(read)
+					mu.Unlock()
+				}
+				return script(c)
+			}
+
+			run, code := h.executeRun()
+			if code != runv1.ExitSuccess {
+				t.Fatalf("exit %d (%v)", code, run.Failure())
+			}
+			mu.Lock()
+			defer mu.Unlock()
+			if args == nil {
+				t.Fatalf("%s was never launched", tc.path)
+			}
+			for _, arg := range args {
+				if strings.Contains(arg, "поехали") {
+					t.Errorf("the prompt is on the command line: %q", args)
+				}
+			}
+			if !strings.Contains(stdin, prompt) {
+				t.Errorf("stdin %q does not carry the prompt", stdin)
+			}
+		})
+	}
+}
+
 func TestARolesSystemPromptIsAppendedToTheBuiltInInstructionAndReplacesNothing(t *testing.T) {
 	t.Parallel()
 	const builtIn = "You are running as a haliphron agent run."
@@ -1131,8 +1190,9 @@ func TestARolesSystemPromptIsAppendedToTheBuiltInInstructionAndReplacesNothing(t
 		var sent string
 		h.commander.handle = func(c entrypoint.Command) (entrypoint.CommandResult, error) {
 			if c.Path == "codex" && len(c.Args) > 0 && c.Args[0] == "exec" {
+				stdin, _ := io.ReadAll(c.Stdin)
 				mu.Lock()
-				sent = c.Args[len(c.Args)-1]
+				sent = string(stdin)
 				mu.Unlock()
 				c.Stdout.Write([]byte(`{"type":"agent_message","session_id":"s1","message":"done"}` + "\n"))
 			}

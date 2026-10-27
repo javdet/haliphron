@@ -31,9 +31,37 @@ reference](../docs/reference/helm-values.md), and the reasoning behind the
 two-chart split is in [about the
 architecture](../docs/explanation/architecture.md).
 
-What remains below is what those guides do not cover: the images, where pods
-land, exposing an entrypoint through Gateway API, and working on the charts
-themselves.
+What remains below is what those guides do not cover: the published charts,
+the images, where pods land, exposing an entrypoint through Gateway API, and
+working on the charts themselves.
+
+## Published charts
+
+Every `v*` tag publishes both charts, at the tag's version with the same
+`appVersion`, once the tag's images are pushed. They go out two ways, with the
+same packages behind both:
+
+```sh
+# OCI, from GHCR
+helm install haliphron oci://ghcr.io/javdet/charts/haliphron --version 0.5.2 ...
+helm install haliphron-runtime oci://ghcr.io/javdet/charts/haliphron-runtime --version 0.5.2 ...
+
+# or a classic Helm repository, on GitHub Pages
+helm repo add haliphron https://javdet.github.io/haliphron
+helm install haliphron haliphron/haliphron --version 0.5.2 ...
+helm install haliphron-runtime haliphron/haliphron-runtime --version 0.5.2 ...
+```
+
+A published package carries the control plane chart's PostgreSQL and MinIO
+subcharts already vendored, so `helm dependency build` is only needed when
+installing from a clone. The `.tgz` files are also attached to the tag's GitHub
+release.
+
+The chart version comes from the tag, not from `Chart.yaml`, the same way the
+image tag does: `v0.6.0` publishes `0.6.0` whatever the file says. A version,
+once published, is never replaced — re-running a release skips what is already
+there, because a re-packaged chart has a new digest and consumers pin the old
+one.
 
 ## Images
 
@@ -176,7 +204,7 @@ runtime chart's own `serviceMonitor` scrapes the controller.
 make chart-gen        # regenerate the chart's copies of the CRD and the RBAC
 make chart-lint       # both charts, against each chart's ci/lint-values.yaml
 make chart-template   # render both, which catches what lint does not
-make chart-package    # two .tgz into dist/
+make chart-package    # two .tgz into dist/; CHART_VERSION=x.y.z stamps the version
 make verify           # fails if any generated artifact, chart copies included, is stale
 ```
 
