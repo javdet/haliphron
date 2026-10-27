@@ -3,9 +3,11 @@ package image_test
 import (
 	"bytes"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"sync"
 	"testing"
@@ -1384,6 +1386,113 @@ func TestMCPServersThatDidNotComeUpStopTheRunBeforeTheModel(t *testing.T) {
 	if run.Failure().Reason != "MCPServersUnavailable" {
 		t.Fatalf("reason %q, want MCPServersUnavailable", run.Failure().Reason)
 	}
+}
+
+func TestAnMCPServerListedAsFailedStopsTheRunEvenThoughTheListExitedZero(t *testing.T) {
+	t.Parallel()
+	h := newHarness(t, controlplane.RunRequest{
+		Prompt: "use your tools",
+		Secrets: map[string]string{runv1.SecretKeyMCPConfig: `{"mcpServers":{` +
+			`"jira":{"command":"jira-mcp"},"wiki":{"command":"wiki-mcp"}}}`},
+	})
+	// What the CLI really does: every server is checked, the broken one is
+	// marked, and the exit code says nothing.
+	h.commander.handle = func(c entrypoint.Command) (entrypoint.CommandResult, error) {
+		if c.Path == "claude" && slices.Equal(c.Args, []string{"mcp", "list"}) {
+			fmt.Fprintln(c.Stdout, "Checking MCP server health…")
+			fmt.Fprintln(c.Stdout)
+			fmt.Fprintln(c.Stdout, "jira: jira-mcp - ✘ Failed to connect — ENOTFOUND")
+			fmt.Fprintln(c.Stdout, "wiki: wiki-mcp - ✔ Connected")
+			return entrypoint.CommandResult{}, nil
+		}
+		if c.Path == "claude" && len(c.Args) > 0 && c.Args[0] == "-p" {
+			t.Error("the model was started without the tools it was promised")
+		}
+		return entrypoint.CommandResult{}, nil
+	}
+
+	run, code := h.executeRun()
+	if code != runv1.ExitConfig {
+		t.Fatalf("exit %d, want %d (%v)", code, runv1.ExitConfig, run.Failure())
+	}
+	if run.Failure().Reason != "MCPServersUnavailable" {
+		t.Fatalf("reason %q, want MCPServersUnavailable", run.Failure().Reason)
+	}
+	if msg := run.Failure().Message(); !strings.Contains(msg, "jira") || strings.Contains(msg, "wiki") {
+		t.Errorf("the message should name jira and only jira: %s", msg)
+	}
+}
+
+func TestMCPServersAreCheckedInAConfigOfTheirOwnWithTheirSecretsByReference(t *testing.T) {
+	t.Parallel()
+	const secret = "mcp-header-secret-value"
+	h := newHarness(t, controlplane.RunRequest{
+		Prompt: "use your tools",
+		Secrets: map[string]string{runv1.SecretKeyMCPConfig: `{"mcpServers":{"kiss":{"type":"http",` +
+			`"url":"https://mcp.invalid/mcp","headers":{"Authorization":"Bearer ` + secret + `"}}}}`},
+	})
+	agent := agentScript(h, "done", "")
+	var registered []string
+	h.commander.handle = func(c entrypoint.Command) (entrypoint.CommandResult, error) {
+		if c.Path == "claude" && len(c.Args) > 2 && c.Args[0] == "mcp" && c.Args[1] == "add-json" {
+			registered = append(registered, c.Args[2])
+			return entrypoint.CommandResult{}, nil
+		}
+		if c.Path == "claude" && slices.Equal(c.Args, []string{"mcp", "list"}) {
+			for _, name := range registered {
+				fmt.Fprintf(c.Stdout, "%s: https://mcp.invalid/mcp (HTTP) - ✔ Connected\n", name)
+			}
+			return entrypoint.CommandResult{}, nil
+		}
+		return agent(c)
+	}
+
+	run, code := h.executeRun()
+	if code != runv1.ExitSuccess {
+		t.Fatalf("exit %d, want 0 (%v)", code, run.Failure())
+	}
+	if !agentWasLaunched(h) {
+		t.Fatal("the agent was not started although every server came up")
+	}
+
+	var agentConfigDir string
+	var checks []entrypoint.Command
+	for _, c := range h.commander.invocations("claude") {
+		if len(c.Args) > 0 && c.Args[0] == "mcp" {
+			checks = append(checks, c)
+		} else if len(c.Args) > 0 && c.Args[0] == "-p" {
+			agentConfigDir = lastEnv(c.Env, "CLAUDE_CONFIG_DIR")
+		}
+	}
+	if len(checks) != 2 {
+		t.Fatalf("want one add-json and one list, got %d mcp commands", len(checks))
+	}
+	for _, c := range checks {
+		dir := lastEnv(c.Env, "CLAUDE_CONFIG_DIR")
+		if dir == "" || dir == agentConfigDir {
+			t.Errorf("%v ran against the agent's own config directory %q", c.Args, dir)
+		}
+		if c.Dir == h.layout.Workspace {
+			t.Errorf("%v ran in the workspace, where the repository's .mcp.json is", c.Args)
+		}
+		if strings.Contains(strings.Join(c.Args, " "), secret) {
+			t.Errorf("a header value reached the command line: %v", c.Args)
+		}
+	}
+	if added := checks[0].Args[3]; !strings.Contains(added, "${HALIPHRON_MCP_KISS_AUTHORIZATION}") {
+		t.Errorf("the server was registered without its header reference: %s", added)
+	}
+}
+
+// lastEnv is the value a process sees for a variable: the last one wins.
+func lastEnv(env []string, name string) string {
+	value := ""
+	for _, pair := range env {
+		if v, ok := strings.CutPrefix(pair, name+"="); ok {
+			value = v
+		}
+	}
+	return value
 }
 
 func TestAGitLabRunWithAGitHubMCPIsRefusedExplicitly(t *testing.T) {

@@ -334,7 +334,7 @@ func (s *Server) handleArtifact(w http.ResponseWriter, r *http.Request) {
 
 	q := r.URL.Query()
 	key := q.Get(runv1.QueryKey)
-	runID := runv1.ULID(q.Get(clusterv1.QueryRunID))
+	runID := runv1.ULID(q.Get(runv1.QueryRunID))
 	if runID == "" || key == "" {
 		http.Error(w, "an artifact must name its run and its key", http.StatusBadRequest)
 		return

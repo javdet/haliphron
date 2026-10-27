@@ -818,6 +818,12 @@ result existing only in the filesystem of a pod about to be deleted; it never
 required an object store to be one of the parties, and reading it as though it
 did is what made one look mandatory.
 
+The body is the object; everything else rides in the query: `runID`, `key`
+(relative to the run's prefix) and `attempt`. `runID` is required — it is how
+the controller finds the CR to check the bearer token against, and an upload
+without it is refused with 400. It does not choose where the object lands: the
+prefix is stamped from the CR the token was checked against.
+
 The digest goes in `X-Haliphron-SHA256` and is verified on the far side before
 anything is stored. A transfer that was cut is refused rather than kept: a
 half-written `result.md` under the right key is worse than none, because the

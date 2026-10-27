@@ -37,6 +37,11 @@ const (
 // wrapping in JSON, and base64 in a field would cost a third of the bytes on
 // the one path in the system that carries gigabytes.
 const (
+	// QueryRunID is the run the object belongs to. It names which CR the
+	// bearer token is checked against, and nothing more: the prefix the object
+	// lands under comes from that CR, not from this value. The same name as
+	// the Cluster API's, because the controller reads both.
+	QueryRunID = "runID"
 	// QueryKey is the object's key relative to the run's prefix — "result.md",
 	// "logs/chunks/7.log". Relative, and stamped with the run prefix by the
 	// controller from the CR it authenticated against: a pod that could name an

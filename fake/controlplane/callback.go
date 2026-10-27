@@ -269,11 +269,14 @@ func (c *ControlPlane) handlePhase(w http.ResponseWriter, r *http.Request) {
 //
 // The run prefix is stamped here, from the token this call authenticated —
 // exactly as the real controller stamps it from the CR. A pod that could name
-// an absolute key could name another run's.
+// an absolute key could name another run's. The run is still required in the
+// query, and must be the token's: the real controller finds the CR to check the
+// token against by it, and refuses an upload that does not name one.
 func (c *ControlPlane) handleRelay(w http.ResponseWriter, r *http.Request) {
+	runID := runv1.ULID(r.URL.Query().Get(runv1.QueryRunID))
 	key := r.URL.Query().Get(runv1.QueryKey)
-	if key == "" {
-		c.callbackError(w, http.StatusBadRequest, "MissingKey", "an artifact must name its key")
+	if runID == "" || key == "" {
+		c.callbackError(w, http.StatusBadRequest, "MissingKey", "an artifact must name its run and its key")
 		return
 	}
 	body, err := io.ReadAll(io.LimitReader(r.Body, maxObjectBytes+1))
@@ -287,6 +290,11 @@ func (c *ControlPlane) handleRelay(w http.ResponseWriter, r *http.Request) {
 
 	run, ok := c.authenticatedRun(w, r)
 	if !ok {
+		return
+	}
+	if runID != run.id {
+		c.callbackError(w, http.StatusConflict, "RunMismatch",
+			"the token is bound to "+string(run.id)+" and the upload names "+string(runID))
 		return
 	}
 	if c.artifactModeOrRelay() == runv1.ArtifactModeObjectStore {

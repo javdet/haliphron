@@ -46,9 +46,9 @@ type Runtime interface {
 	// referenced rather than inlined, and returns the values that must reach
 	// the child's environment for those references to resolve.
 	PrepareMCP(r *Run) (env []string, err error)
-	// VerifyMCP is the command that proves the servers came up, or false when
-	// this run declared none.
-	VerifyMCP(r *Run) (Command, bool)
+	// VerifyMCP is how to prove the servers came up, or nil when this runtime
+	// offers no way to check them.
+	VerifyMCP(r *Run) (*MCPCheck, error)
 	// Launch is the agent CLI itself.
 	Launch(r *Run) Command
 	// Parse normalises this CLI's own output format into text and usage.
@@ -309,26 +309,78 @@ func phaseMCPVerify(ctx context.Context, r *Run) error {
 	if err != nil {
 		return err
 	}
-	cmd, ok := rt.VerifyMCP(r)
-	if !ok {
+	check, err := rt.VerifyMCP(r)
+	if err != nil {
+		return err
+	}
+	if check == nil {
 		return skip("this runtime offers no way to check the servers")
 	}
+	if check.Scratch != "" {
+		if err := os.MkdirAll(check.Scratch, 0o700); err != nil {
+			return failWrap(runv1.ExitConfig, "LayoutUnwritable", err, "creating %s", check.Scratch)
+		}
+		defer func() { _ = os.RemoveAll(check.Scratch) }()
+	}
 
+	for _, cmd := range check.Setup {
+		if _, err := runMCPCheck(ctx, r, cmd); err != nil {
+			return err
+		}
+	}
+	out, err := runMCPCheck(ctx, r, check.List)
+	if err != nil {
+		return err
+	}
+	if check.Down == nil {
+		return nil
+	}
+	if down := check.Down(out); len(down) > 0 {
+		return fail(runv1.ExitConfig, "MCPServersUnavailable",
+			"the MCP servers %s did not come up; refusing to start an agent "+
+				"that would silently do something else", strings.Join(down, ", "))
+	}
+	return nil
+}
+
+// MCPCheck is how a runtime proves its MCP servers came up.
+//
+// More than one command, and more than an exit code, because claude-code says
+// neither: `claude mcp list` takes no configuration file — it lists what has
+// been registered in its config directory, one add-json at a time — and it
+// exits 0 with every server failing. The verdict is in its output.
+type MCPCheck struct {
+	// Scratch is a directory created before the commands and removed after
+	// them, or empty when the check needs none.
+	Scratch string
+	// Setup runs first, in order. Any of them exiting non-zero fails the phase.
+	Setup []Command
+	// List is the check itself. Exiting non-zero fails the phase.
+	List Command
+	// Down names the declared servers List's output does not show connected,
+	// or is nil when the exit code is the whole verdict.
+	Down func(output string) []string
+}
+
+// runMCPCheck runs one command of an MCPCheck and returns what it printed.
+func runMCPCheck(ctx context.Context, r *Run, cmd Command) (string, error) {
 	var out bytes.Buffer
 	cmd.Stdout = &out
 	cmd.Stderr = &out
 	result, err := r.commander.Run(ctx, cmd)
 	if err != nil {
-		return failWrap(runv1.ExitConfig, "MCPServersUnavailable", err,
+		return "", failWrap(runv1.ExitConfig, "MCPServersUnavailable", err,
 			"could not check the MCP servers")
 	}
-	r.logf("mcp check: %s", strings.TrimSpace(r.redactor.String(out.String())))
+	printed := r.redactor.String(out.String())
+	r.logf("mcp check: %s", strings.TrimSpace(printed))
 	if result.ExitCode != 0 {
-		return fail(runv1.ExitConfig, "MCPServersUnavailable",
-			"the MCP servers did not come up (%s exited %d); refusing to start an agent "+
-				"that would silently do something else", cmd.Path, result.ExitCode)
+		return "", fail(runv1.ExitConfig, "MCPServersUnavailable",
+			"the MCP servers did not come up (%s %s exited %d); refusing to start an agent "+
+				"that would silently do something else", cmd.Path, strings.Join(cmd.Args[:min(2, len(cmd.Args))], " "),
+			result.ExitCode)
 	}
-	return nil
+	return printed, nil
 }
 
 func (r *Run) mcpServers() map[string]json.RawMessage {

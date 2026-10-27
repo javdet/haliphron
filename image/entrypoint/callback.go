@@ -30,6 +30,9 @@ import (
 type Callback struct {
 	base  string
 	token string
+	// runID names the CR the controller checks the token against. Every
+	// message carries it: the JSON ones in the body, an artifact in its query.
+	runID runv1.ULID
 	// attempt is a property of the pod rather than of any one message, so it
 	// is held here rather than threaded through every call.
 	attempt int32
@@ -55,6 +58,7 @@ func NewCallback(cfg *Config, secrets *Secrets, redactor *Redactor, log func(str
 	return &Callback{
 		base:     strings.TrimSuffix(cfg.CallbackURL, "/"),
 		token:    secrets.CallbackToken,
+		runID:    cfg.RunID,
 		attempt:  cfg.Attempt,
 		client:   &http.Client{Timeout: 30 * time.Second},
 		stream:   &http.Client{},
@@ -123,6 +127,7 @@ func (c *Callback) Artifact(ctx context.Context, key string, attempt int32,
 	digest := hex.EncodeToString(sum[:])
 
 	q := url.Values{
+		runv1.QueryRunID:   {string(c.runID)},
 		runv1.QueryKey:     {key},
 		runv1.QueryAttempt: {strconv.Itoa(int(attempt))},
 	}

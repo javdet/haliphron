@@ -322,7 +322,7 @@ func (h *harness) postArtifactWithDigest(id runv1.ULID, key string, body []byte,
 
 	h.t.Helper()
 	q := url.Values{
-		"runID":            {string(id)},
+		runv1.QueryRunID:   {string(id)},
 		runv1.QueryKey:     {key},
 		runv1.QueryAttempt: {strconv.Itoa(1)},
 	}

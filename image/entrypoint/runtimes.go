@@ -184,13 +184,88 @@ func (claudeCode) PrepareMCP(r *Run) ([]string, error) {
 	return env, nil
 }
 
-func (claudeCode) VerifyMCP(r *Run) (Command, bool) {
-	return Command{
-		Path: "claude",
-		Args: []string{"mcp", "list", "--mcp-config", r.mcpConfigPath()},
-		Dir:  r.layout.Workspace,
-		Env:  r.agentEnv,
-	}, true
+// VerifyMCP registers the rendered servers in a config directory of their own
+// and asks `claude mcp list` to health-check them.
+//
+// A scratch CLAUDE_CONFIG_DIR rather than the agent's: the list would otherwise
+// also check whatever the plugins phase installed, and the registrations would
+// still be there when the agent starts with --mcp-config, naming every server
+// twice. Run from the scratch directory too, so that a .mcp.json the repository
+// brings along is not in the list. The rendered file is what is registered, so
+// header values stay ${VAR} references and the CLI resolves them from Env.
+func (claudeCode) VerifyMCP(r *Run) (*MCPCheck, error) {
+	rendered, err := os.ReadFile(r.mcpConfigPath())
+	if err != nil {
+		return nil, failWrap(runv1.ExitConfig, "LayoutUnwritable", err, "reading %s", r.mcpConfigPath())
+	}
+	var doc struct {
+		Servers map[string]json.RawMessage `json:"mcpServers"`
+	}
+	if err := json.Unmarshal(rendered, &doc); err != nil {
+		return nil, failWrap(runv1.ExitConfig, "MalformedSecret", err, "reading %s", r.mcpConfigPath())
+	}
+	names := make([]string, 0, len(doc.Servers))
+	for name := range doc.Servers {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+
+	scratch := filepath.Join(r.layout.RunPrivate, "mcp-verify")
+	env := make([]string, 0, len(r.agentEnv)+1)
+	for _, pair := range r.agentEnv {
+		if !strings.HasPrefix(pair, "CLAUDE_CONFIG_DIR=") {
+			env = append(env, pair)
+		}
+	}
+	env = append(env, "CLAUDE_CONFIG_DIR="+scratch)
+
+	check := &MCPCheck{
+		Scratch: scratch,
+		List:    Command{Path: "claude", Args: []string{"mcp", "list"}, Dir: scratch, Env: env},
+		Down:    func(output string) []string { return claudeServersDown(output, names) },
+	}
+	for _, name := range names {
+		check.Setup = append(check.Setup, Command{
+			Path: "claude",
+			Args: []string{"mcp", "add-json", name, string(doc.Servers[name]), "--scope", "user"},
+			Dir:  scratch,
+			Env:  env,
+		})
+	}
+	return check, nil
+}
+
+// claudeServersDown names the servers `claude mcp list` does not show as
+// connected.
+//
+// A row is "name: target - status", and the one status that means the agent
+// will have the tools is "✔ Connected". Every other — "✘ Failed to connect",
+// "! Needs authentication", "! Connected · tools fetch failed", or no row at all
+// — is a server the agent would start without. The mark is matched loosely
+// because it is a terminal glyph with fallbacks (✓, √) rather than an
+// interface.
+func claudeServersDown(output string, names []string) []string {
+	connected := map[string]bool{}
+	for _, line := range strings.Split(output, "\n") {
+		line = strings.TrimSpace(line)
+		for _, name := range names {
+			if !strings.HasPrefix(line, name+": ") {
+				continue
+			}
+			for _, mark := range []string{"✔", "✓", "√"} {
+				if strings.HasSuffix(line, " - "+mark+" Connected") {
+					connected[name] = true
+				}
+			}
+		}
+	}
+	var down []string
+	for _, name := range names {
+		if !connected[name] {
+			down = append(down, name)
+		}
+	}
+	return down
 }
 
 // AddMarketplace registers a cloned catalogue.
@@ -359,13 +434,13 @@ func (codex) InstallPlugin(r *Run, id string) Command {
 	}
 }
 
-func (codex) VerifyMCP(r *Run) (Command, bool) {
-	return Command{
+func (codex) VerifyMCP(r *Run) (*MCPCheck, error) {
+	return &MCPCheck{List: Command{
 		Path: "codex",
 		Args: []string{"mcp", "list"},
 		Dir:  r.layout.Workspace,
 		Env:  r.agentEnv,
-	}, true
+	}}, nil
 }
 
 // sandboxFor translates a permission mode into codex's sandbox. codex has no
