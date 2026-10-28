@@ -5,6 +5,8 @@ of `VERSION`, and it is the tag of the published images.
 
 ## Unreleased
 
+## 0.5.3 — 2026-10-28
+
 ### Added
 
 - **Failed runs are deleted after three days.** A run whose status is
