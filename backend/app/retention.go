@@ -2,11 +2,15 @@ package app
 
 import (
 	"context"
+	"errors"
+	"fmt"
 	"strings"
 	"time"
 
 	runv1 "github.com/automagicops/haliphron/api/run/v1"
 	"github.com/automagicops/haliphron/backend/artifacts"
+	"github.com/automagicops/haliphron/backend/run"
+	"github.com/automagicops/haliphron/backend/store"
 )
 
 // Retention for the artifact store.
@@ -128,22 +132,120 @@ func (s *Service) reapOnce(ctx context.Context, keep Retention) (int, error) {
 // the list, its ledger and its per-run token. The run's objects go with it, so
 // a run past retention does not survive as bytes the UI can no longer reach.
 // The audit log keeps a record of each deletion and is not subject to it.
+//
+// Two ages. Limits.RunRetention applies to every finished run, is set by the
+// deployment and is off unless set. The failed-run age applies to status
+// Failed alone, is set from the UI and is on by default: a failed run is
+// looked at once, and after that it is noise in the list. A failed run goes at
+// the shorter of the two.
 
 // runRetentionBatch bounds one DELETE. A first pass after retention is turned
 // on can find months of runs, and one statement over all of them holds row
 // locks the report path is waiting on for as long as it takes.
 const runRetentionBatch = 500
 
-// ReapRuns deletes finished runs older than keep, on an interval, until the
-// context ends.
-//
-// Zero means keep forever and is the default, for the same reason the artifact
-// ages default to keeping: deleting a customer's run history because a value
-// was left unset is not a failure mode worth having.
-func (s *Service) ReapRuns(ctx context.Context, interval, keep time.Duration) {
-	if keep <= 0 {
-		return
+const (
+	// DefaultFailedRunRetention is how long a Failed run is kept until an
+	// operator saves another number.
+	DefaultFailedRunRetention = 3 * 24 * time.Hour
+
+	// MinFailedRunRetention is the shortest age that may be saved, zero
+	// aside. A failed run still owes a chat reply and an MCP task result, and
+	// an operator is owed the time to look at it; an age that deletes it
+	// before any of that has happened is a typo, not a policy.
+	MinFailedRunRetention = time.Hour
+
+	// MaxFailedRunRetention bounds the number so it stays a duration.
+	MaxFailedRunRetention = 10 * 365 * 24 * time.Hour
+)
+
+// Where the failed-run age comes from.
+const (
+	RunRetentionDefault  = "default"
+	RunRetentionDatabase = "database"
+)
+
+// RunRetention is what is in force.
+type RunRetention struct {
+	// Failed is the age of a Failed run; zero keeps it for ever.
+	Failed time.Duration
+	// All is the deployment's age for every finished run; zero keeps them for
+	// ever. Read-only here.
+	All time.Duration
+	// Source says whether Failed was saved or is the default.
+	Source    string
+	UpdatedBy string
+	UpdatedAt *time.Time
+}
+
+// RunRetention reads the retention in force.
+func (s *Service) RunRetention(ctx context.Context) (RunRetention, error) {
+	out := RunRetention{
+		Failed: DefaultFailedRunRetention, All: s.limits.RunRetention, Source: RunRetentionDefault,
 	}
+	stored, err := s.store.RunRetention(ctx)
+	if errors.Is(err, store.ErrNotFound) {
+		return out, nil
+	}
+	if err != nil {
+		return RunRetention{}, err
+	}
+	out.Failed, out.Source = stored.Failed, RunRetentionDatabase
+	out.UpdatedBy, out.UpdatedAt = stored.UpdatedBy, &stored.UpdatedAt
+	return out, nil
+}
+
+// PutFailedRunRetention saves the age of a Failed run. Zero keeps them for
+// ever; anything else must be whole seconds between the bounds above.
+func (s *Service) PutFailedRunRetention(ctx context.Context, failed time.Duration, by string) (RunRetention, error) {
+	switch {
+	case failed < 0 || failed%time.Second != 0:
+		return RunRetention{}, &run.InvalidRequestError{Field: "failed_retention_seconds",
+			Detail: "must be a whole number of seconds, 0 to keep failed runs for ever"}
+	case failed != 0 && failed < MinFailedRunRetention:
+		return RunRetention{}, &run.InvalidRequestError{Field: "failed_retention_seconds",
+			Detail: fmt.Sprintf("must be at least %d (an hour), or 0 to keep failed runs for ever",
+				int64(MinFailedRunRetention/time.Second))}
+	case failed > MaxFailedRunRetention:
+		return RunRetention{}, &run.InvalidRequestError{Field: "failed_retention_seconds",
+			Detail: fmt.Sprintf("must be at most %d (ten years)", int64(MaxFailedRunRetention/time.Second))}
+	}
+	if _, err := s.store.PutRunRetention(ctx, failed, by); err != nil {
+		return RunRetention{}, err
+	}
+	return s.RunRetention(ctx)
+}
+
+// RunsKeptFor is how long any run is certain to be kept after it finished:
+// the shorter of the two ages, since a run not yet ended may still fail. Zero
+// means for ever.
+func (r RunRetention) RunsKeptFor() time.Duration {
+	switch {
+	case r.All <= 0:
+		return r.Failed
+	case r.Failed <= 0:
+		return r.All
+	default:
+		return min(r.All, r.Failed)
+	}
+}
+
+// RunsKeptFor is RunRetention(ctx).RunsKeptFor, for a caller that must answer
+// even when the store cannot: then with the shortest age an operator could
+// have saved, which is still true.
+func (s *Service) RunsKeptFor(ctx context.Context) time.Duration {
+	keep, err := s.RunRetention(ctx)
+	if err != nil {
+		s.log.Warn("could not read the failed-run retention", "error", err)
+		keep = RunRetention{All: s.limits.RunRetention, Failed: MinFailedRunRetention}
+	}
+	return keep.RunsKeptFor()
+}
+
+// ReapRuns deletes runs past either age, on an interval, until the context
+// ends. The failed-run age is read again on every pass, so a change saved on
+// one replica is applied by whichever replica runs the next one.
+func (s *Service) ReapRuns(ctx context.Context, interval time.Duration) {
 	if interval <= 0 {
 		interval = time.Hour
 	}
@@ -155,14 +257,35 @@ func (s *Service) ReapRuns(ctx context.Context, interval, keep time.Duration) {
 		case <-ctx.Done():
 			return
 		case <-ticker.C:
-			deleted, err := s.ExpireRuns(ctx, keep)
-			if err != nil && !ctxDone(ctx) {
-				s.log.Error("run retention failed", "error", err)
-			}
-			if deleted > 0 {
-				s.log.Info("expired runs deleted", "runs", deleted, "retention", keep)
-			}
+			s.reapRunsOnce(ctx)
 		}
+	}
+}
+
+func (s *Service) reapRunsOnce(ctx context.Context) {
+	keep, err := s.RunRetention(ctx)
+	if err != nil {
+		// The deployment's age does not depend on the read; the failed-run
+		// age waits for the next pass rather than falling back to a default
+		// the operator may have replaced.
+		if !ctxDone(ctx) {
+			s.log.Error("could not read the failed-run retention", "error", err)
+		}
+		keep = RunRetention{All: s.limits.RunRetention}
+	}
+	deleted, err := s.ExpireRuns(ctx, keep.All)
+	if err != nil && !ctxDone(ctx) {
+		s.log.Error("run retention failed", "error", err)
+	}
+	if deleted > 0 {
+		s.log.Info("expired runs deleted", "runs", deleted, "retention", keep.All)
+	}
+	deleted, err = s.ExpireFailedRuns(ctx, keep.Failed)
+	if err != nil && !ctxDone(ctx) {
+		s.log.Error("failed-run retention failed", "error", err)
+	}
+	if deleted > 0 {
+		s.log.Info("expired failed runs deleted", "runs", deleted, "retention", keep.Failed)
 	}
 }
 
@@ -170,6 +293,17 @@ func (s *Service) ReapRuns(ctx context.Context, interval, keep time.Duration) {
 // than keep ago, batch by batch, and returns how many went. A zero keep
 // deletes nothing.
 func (s *Service) ExpireRuns(ctx context.Context, keep time.Duration) (int, error) {
+	return s.expireRuns(ctx, keep, s.store.DeleteFinishedRuns)
+}
+
+// ExpireFailedRuns is ExpireRuns for runs whose status is Failed.
+func (s *Service) ExpireFailedRuns(ctx context.Context, keep time.Duration) (int, error) {
+	return s.expireRuns(ctx, keep, s.store.DeleteFailedRuns)
+}
+
+func (s *Service) expireRuns(ctx context.Context, keep time.Duration,
+	deleteBatch func(context.Context, time.Time, int) ([]runv1.ULID, error)) (int, error) {
+
 	if keep <= 0 {
 		return 0, nil
 	}
@@ -177,7 +311,7 @@ func (s *Service) ExpireRuns(ctx context.Context, keep time.Duration) (int, erro
 
 	var total int
 	for {
-		ids, err := s.store.DeleteFinishedRuns(ctx, cutoff, runRetentionBatch)
+		ids, err := deleteBatch(ctx, cutoff, runRetentionBatch)
 		if err != nil {
 			return total, err
 		}

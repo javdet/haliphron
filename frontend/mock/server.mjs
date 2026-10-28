@@ -185,6 +185,10 @@ let slack = {
   bot_token_secret: 'slack-bot-token', webhook_token_secret: '', app_token_secret: 'slack-app-token',
 }
 
+// Never saved: the backend's default of three days for failed runs, and no
+// retention for the rest.
+let runRetention = { failed_retention_seconds: 3 * 86400, retention_seconds: 0, source: 'default' }
+
 // Starts empty, so the prompt to set one is what the mock shows first.
 const gitTokens = [
   { secret_name: 'git-token', configured: false },
@@ -429,6 +433,21 @@ const routes = [
       secret_name: 'llm-api-key', configured: true, kind: 'managed', type: 'oauth_token', updated_at: iso(0),
     }
     return modelCredential
+  }],
+  ['GET', /^\/api\/v1\/run-retention$/, () => runRetention],
+  ['PUT', /^\/api\/v1\/run-retention$/, (_m, _url, _fx, payload) => {
+    const seconds = payload?.failed_retention_seconds
+    if (typeof seconds !== 'number') {
+      return invalid('failed_retention_seconds', 'failed_retention_seconds is required; 0 keeps failed runs for ever')
+    }
+    if (seconds < 0 || (seconds > 0 && seconds < 3600)) {
+      return invalid('failed_retention_seconds', 'must be at least 3600 (an hour), or 0 to keep failed runs for ever')
+    }
+    runRetention = {
+      ...runRetention, failed_retention_seconds: seconds, source: 'database',
+      updated_by: 'maria-admin', updated_at: iso(0),
+    }
+    return runRetention
   }],
   ['GET', /^\/api\/v1\/integrations\/mattermost$/, () => mattermost],
   ['PUT', /^\/api\/v1\/integrations\/mattermost$/, (_m, _url, _fx, payload) => {

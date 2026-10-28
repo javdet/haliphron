@@ -29,7 +29,7 @@ const TRANSPORT_HINT: Record<ChatTransport, string> = {
 }
 
 const POLICY_LABEL: Record<ChatReplyPolicy, string> = {
-  if_unanswered: 'The agent answers; the bot steps in only if nobody did',
+  if_unanswered: 'The agent answers; the bot reports only failures',
   always: 'The bot acknowledges and posts every result',
 }
 
@@ -244,7 +244,7 @@ function MattermostCard() {
           <RepliesField
             form={form}
             set={set}
-            unansweredHint="The bot reacts with 👀 and stays quiet; the agent replies in the thread through its own Mattermost tools. When a run fails, or ends without anything answering the thread, the bot posts how it ended."
+            unansweredHint="The bot reacts with 👀 and stays quiet; the agent replies in the thread through its own Mattermost tools. When a run fails, the bot posts how it ended; a run that succeeded gets no post from the bot."
           />
           <AdvancedSection form={form} set={set} postRunesHint="The server’s MaxPostSize." />
         </fieldset>
@@ -474,7 +474,7 @@ function SlackCard() {
           <RepliesField
             form={form}
             set={set}
-            unansweredHint="The bot reacts with 👀 and stays quiet; the agent must reply in the thread through Slack tools of its own. When a run fails, or ends without anything answering the thread, the bot posts how it ended."
+            unansweredHint="The bot reacts with 👀 and stays quiet; the agent must reply in the thread through Slack tools of its own. When a run fails, the bot posts how it ended; a run that succeeded gets no post from the bot."
           />
 
           <AdvancedSection form={form} set={set} postRunesHint="Slack recommends at most 4000." />

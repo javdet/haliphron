@@ -174,7 +174,11 @@ in, which is capped at 1 MiB across all its keys together.
 | `HALIPHRON_LOG_FORMAT` | `json` | |
 
 `HALIPHRON_RUN_RETENTION` deletes the run and everything stored for it:
-attempts, logs, result and artifacts. It counts from `finished_at`. Runs that
+attempts, logs, result and artifacts. It is separate from the retention of
+failed runs, which is not an environment variable: it is three days by default
+and set on the UI's Settings page or with
+[`PUT /api/v1/run-retention`](rest-api.md#run-retention). A failed run goes at
+whichever of the two comes first. It counts from `finished_at`. Runs that
 have not ended are never deleted. The scan runs where the Cluster API runs
 (`HALIPHRON_MODE` `all` or `cluster`), in both artifact modes, and writes a
 `run.deleted` audit record for every run it removes. The artifact retentions

@@ -9,6 +9,7 @@ import (
 
 	clusterv1 "github.com/automagicops/haliphron/api/cluster/v1"
 	runv1 "github.com/automagicops/haliphron/api/run/v1"
+	"github.com/automagicops/haliphron/backend/app"
 	"github.com/automagicops/haliphron/backend/artifacts"
 	"github.com/automagicops/haliphron/backend/run"
 	"github.com/automagicops/haliphron/backend/store"
@@ -253,5 +254,161 @@ func TestRetentionDeletesOnlyRunsThatFinishedLongerAgoThanItKeeps(t *testing.T) 
 
 	if n, err := h.App.ExpireRuns(ctx, 30*24*time.Hour); err != nil || n != 0 {
 		t.Errorf("a second pass deleted %d runs (err %v), want none", n, err)
+	}
+}
+
+// aFailedRun is a run refused by the only cluster there is: Failed, with
+// finished_at set, and nothing left running anywhere.
+func (h *harness) aFailedRun(p *probe) store.Run {
+	h.t.Helper()
+	admitted := h.Submit()
+	lease := p.LeaseOne()
+	if lease.RunID != admitted.ID {
+		h.t.Fatalf("leased %s, want %s", lease.RunID, admitted.ID)
+	}
+	_, problem := p.Reject(lease.RunID, lease.Epoch, clusterv1.RejectQuotaExhausted, "no quota")
+	fatalIfProblem(h.t, "reject", problem)
+	failed := h.Run(admitted.ID)
+	if failed.Status != clusterv1.StatusFailed {
+		h.t.Fatalf("status = %s, want Failed", failed.Status)
+	}
+	return failed
+}
+
+func (h *harness) finishedAgo(id runv1.ULID, ago time.Duration) {
+	h.t.Helper()
+	if _, err := h.Store.DB().ExecContext(context.Background(),
+		`UPDATE runs SET finished_at = now() - make_interval(secs => $2) WHERE id = $1`,
+		string(id), ago.Seconds()); err != nil {
+		h.t.Fatalf("backdate run %s: %v", id, err)
+	}
+}
+
+type runRetentionBody struct {
+	FailedRetentionSeconds int64  `json:"failed_retention_seconds"`
+	RetentionSeconds       int64  `json:"retention_seconds"`
+	Source                 string `json:"source"`
+	UpdatedBy              string `json:"updated_by"`
+}
+
+func TestAFailedRunIsDeletedAfterThreeDaysByDefaultAndNoOtherRunIs(t *testing.T) {
+	h := newHarness(t)
+	ctx := context.Background()
+	p := newProbe(t, h, "east")
+
+	old := h.aFailedRun(p)
+	recent := h.aFailedRun(p)
+	cancelled := h.aFinishedRun()
+	h.stageObject(old.ID, runv1.StorageKeyResult)
+	h.finishedAgo(old.ID, 3*24*time.Hour+time.Minute)
+	h.finishedAgo(recent.ID, 3*24*time.Hour-time.Hour)
+	h.finishedAgo(cancelled.ID, 40*24*time.Hour)
+
+	keep, err := h.App.RunRetention(ctx)
+	if err != nil {
+		t.Fatalf("read run retention: %v", err)
+	}
+	if keep.Failed != 3*24*time.Hour || keep.Source != app.RunRetentionDefault {
+		t.Fatalf("retention = %s from %s, want 72h from the default", keep.Failed, keep.Source)
+	}
+
+	n, err := h.App.ExpireFailedRuns(ctx, keep.Failed)
+	if err != nil {
+		t.Fatalf("expire failed runs: %v", err)
+	}
+	if n != 1 {
+		t.Errorf("deleted %d runs, want 1", n)
+	}
+	if h.runExists(old.ID) {
+		t.Error("a failed run older than three days is still there")
+	}
+	if h.objectCount(old.ID) != 0 {
+		t.Error("the objects of an expired failed run are still stored")
+	}
+	if !h.runExists(recent.ID) {
+		t.Error("a failed run younger than three days was deleted")
+	}
+	if !h.runExists(cancelled.ID) {
+		t.Error("a cancelled run was deleted by the failed-run retention")
+	}
+
+	var actor, reason string
+	if err := h.Store.DB().QueryRowContext(ctx, `
+		SELECT actor, payload->>'reason' FROM audit_log
+		WHERE action = $1 AND run_id = $2`, store.AuditRunDeleted, string(old.ID)).
+		Scan(&actor, &reason); err != nil {
+		t.Fatalf("read the audit record of the expiry: %v", err)
+	}
+	if actor != "retention" || reason != "failed_retention" {
+		t.Errorf("audit record is by %q for %q, want retention for failed_retention", actor, reason)
+	}
+}
+
+func TestAnOperatorChangesTheFailedRunRetentionFromTheAPI(t *testing.T) {
+	h := newHarness(t)
+	ctx := context.Background()
+	p := newProbe(t, h, "east")
+	admin := h.Token(store.ScopeAdmin)
+	writer := h.Token(store.ScopeRunsWrite, store.ScopeRunsRead)
+
+	var got runRetentionBody
+	if status := h.call(t, writer, http.MethodGet, "/api/v1/run-retention", nil, &got); status != http.StatusOK {
+		t.Fatalf("read retention with runs:read: %d", status)
+	}
+	if got.FailedRetentionSeconds != 259200 || got.Source != "default" || got.RetentionSeconds != 0 {
+		t.Errorf("retention = %+v, want 259200 s by default and no general retention", got)
+	}
+
+	if status := h.call(t, writer, http.MethodPut, "/api/v1/run-retention",
+		map[string]any{"failed_retention_seconds": 0}, nil); status != http.StatusForbidden {
+		t.Errorf("runs:write changed the retention: %d, want 403", status)
+	}
+	for _, body := range []map[string]any{
+		{},
+		{"failed_retention_seconds": -1},
+		{"failed_retention_seconds": 60},
+	} {
+		if status := h.call(t, admin, http.MethodPut, "/api/v1/run-retention", body, nil); status != http.StatusUnprocessableEntity {
+			t.Errorf("PUT %v = %d, want 422", body, status)
+		}
+	}
+
+	if status := h.call(t, admin, http.MethodPut, "/api/v1/run-retention",
+		map[string]any{"failed_retention_seconds": 7 * 86400}, &got); status != http.StatusOK {
+		t.Fatalf("save retention: %d", status)
+	}
+	if got.FailedRetentionSeconds != 7*86400 || got.Source != "database" || got.UpdatedBy == "" {
+		t.Errorf("saved retention = %+v, want a week from the database with who saved it", got)
+	}
+	var saved int
+	if err := h.Store.DB().QueryRowContext(ctx,
+		`SELECT count(*) FROM audit_log WHERE action = $1`, store.AuditRunRetentionSaved).Scan(&saved); err != nil {
+		t.Fatalf("read the audit log: %v", err)
+	}
+	if saved != 1 {
+		t.Errorf("saving the retention left %d audit records, want 1", saved)
+	}
+
+	failed := h.aFailedRun(p)
+	h.finishedAgo(failed.ID, 5*24*time.Hour)
+	keep, err := h.App.RunRetention(ctx)
+	if err != nil {
+		t.Fatalf("read run retention: %v", err)
+	}
+	if n, err := h.App.ExpireFailedRuns(ctx, keep.Failed); err != nil || n != 0 {
+		t.Errorf("a week's retention deleted %d runs five days old (err %v)", n, err)
+	}
+
+	// Zero keeps failed runs for ever.
+	if status := h.call(t, admin, http.MethodPut, "/api/v1/run-retention",
+		map[string]any{"failed_retention_seconds": 0}, &got); status != http.StatusOK || got.FailedRetentionSeconds != 0 {
+		t.Fatalf("save a zero retention: %d, %+v", status, got)
+	}
+	h.finishedAgo(failed.ID, 400*24*time.Hour)
+	if keep, err = h.App.RunRetention(ctx); err != nil {
+		t.Fatalf("read run retention: %v", err)
+	}
+	if n, err := h.App.ExpireFailedRuns(ctx, keep.Failed); err != nil || n != 0 || !h.runExists(failed.ID) {
+		t.Errorf("a zero retention deleted %d runs (err %v); zero means keep forever", n, err)
 	}
 }

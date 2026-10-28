@@ -243,8 +243,11 @@ per-run token carrying `runs:write`.
 A controller that reports on the run after it has been deleted gets the
 `RunNotFound` code and the `abandon` action, and drops its copy.
 
-Runs can also be deleted automatically, some time after they finish. See
-`HALIPHRON_RUN_RETENTION` in [configuration](configuration.md#background-work-and-logging).
+Runs can also be deleted automatically, some time after they finish: failed
+runs after three days unless changed with
+[`PUT /api/v1/run-retention`](#put-apiv1run-retention), and every run after
+`HALIPHRON_RUN_RETENTION` in [configuration](configuration.md#background-work-and-logging)
+when it is set.
 
 ---
 
@@ -464,6 +467,46 @@ The bootstrap token that admitted the cluster is kept. With the row gone, the
 controller's key is unknown, and a controller that is still installed is told
 to `reregister`. If its bootstrap token still has uses left and has not
 expired, it comes back as a new cluster. Uninstall the controller first.
+
+---
+
+## Run retention
+
+How long finished runs are kept. A run whose status is `Failed` is deleted
+this long after it finished, together with everything `DELETE /api/v1/runs/{id}`
+removes, and the audit log keeps a `run.deleted` record with reason
+`failed_retention`. `TimedOut` and `Cancelled` runs are not affected. The
+deployment's `HALIPHRON_RUN_RETENTION`, when set, still applies to every
+finished run, so a failed run goes at whichever age comes first. The setting is
+read again on every retention pass, every `HALIPHRON_REAP_INTERVAL` (an hour
+by default).
+
+### `GET /api/v1/run-retention`
+
+Scope: `runs:read`.
+
+```json
+{
+  "failed_retention_seconds": 259200,
+  "retention_seconds": 0,
+  "source": "default"
+}
+```
+
+| Field | Meaning |
+|---|---|
+| `failed_retention_seconds` | the age of a failed run; `0` keeps failed runs forever. `259200` (3 days) until first saved |
+| `retention_seconds` | `HALIPHRON_RUN_RETENTION`, for every finished run; `0` when unset. Read-only here |
+| `source` | `default` (never saved) or `database` |
+| `updated_by`, `updated_at` | who saved it last, and when; absent while `source` is `default` |
+
+### `PUT /api/v1/run-retention`
+
+Scope: `admin`. Body: `{"failed_retention_seconds": 604800}`. The field is
+required. `0` keeps failed runs forever; any other value must be between
+`3600` (an hour) and `315360000` (ten years), or the request is refused with
+`422 invalid_request`. Returns the object `GET` returns. Every save appends a
+`run_retention.saved` audit record.
 
 ---
 

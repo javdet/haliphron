@@ -69,7 +69,7 @@ func TestUnderIfUnansweredTheBotOnlyReactsAndStaysSilentWhenTheAgentAnswered(t *
 	}
 }
 
-func TestUnderIfUnansweredARunThatSucceededSilentlyIsStillReported(t *testing.T) {
+func TestUnderIfUnansweredARunThatSucceededIsNotReportedEvenIfNothingAnswered(t *testing.T) {
 	h := newHarness(t)
 	h.chatRole(t)
 	f := newFakeMattermost(t)
@@ -82,13 +82,16 @@ func TestUnderIfUnansweredARunThatSucceededSilentlyIsStillReported(t *testing.T)
 	}
 	h.finish(t, c, h.runs(t)[0].ID, controller.Outcome{ExitCode: runv1.ExitSuccess, Summary: "backups ok"})
 
-	if n := bot.Deliver(t); n != 1 {
-		t.Fatalf("delivered %d replies, want 1", n)
+	if n := bot.Deliver(t); n != 0 {
+		t.Errorf("posted %d replies for a run that succeeded", n)
 	}
-	results := f.postsOfKind(app.ChatPostResult)
-	if len(results) != 1 || !strings.Contains(results[0].Message, "Nothing was posted in this thread") ||
-		!strings.Contains(results[0].Message, "exited with code 0") || results[0].RootID != msg {
-		t.Errorf("results = %+v", results)
+	if n := len(f.BotPosts()); n != 0 {
+		t.Errorf("%d posts from the bot, want only a reaction", n)
+	}
+	var replied bool
+	if err := h.Store.DB().QueryRow(`SELECT replied_at IS NOT NULL FROM chat_triggers WHERE message_id = $1`,
+		msg).Scan(&replied); err != nil || !replied {
+		t.Errorf("the reply is still owed: %v %v", replied, err)
 	}
 }
 

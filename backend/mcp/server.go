@@ -26,7 +26,6 @@ import (
 	"log/slog"
 	"net/http"
 	"strings"
-	"time"
 
 	"github.com/automagicops/haliphron/backend/app"
 	"github.com/automagicops/haliphron/backend/store"
@@ -36,9 +35,6 @@ import (
 type Server struct {
 	app *app.Service
 	log *slog.Logger
-	// runRetention is how long a finished run is kept, zero for ever. It is
-	// what a task's ttl is derived from.
-	runRetention time.Duration
 }
 
 // New builds it over the use cases.
@@ -47,13 +43,6 @@ func New(service *app.Service, logger *slog.Logger) *Server {
 		logger = slog.Default()
 	}
 	return &Server{app: service, log: logger}
-}
-
-// WithRunRetention tells the server how long finished runs are kept, so that a
-// task can say how long it will be there. Zero, the default, is for ever.
-func (s *Server) WithRunRetention(keep time.Duration) *Server {
-	s.runRetention = keep
-	return s
 }
 
 // Path is where the endpoint lives. It is what goes into the pod's mcp.json,

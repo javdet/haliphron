@@ -27,7 +27,7 @@ const (
 	// ChatReplyAlways acknowledges the message and posts the run's result.
 	ChatReplyAlways = "always"
 	// ChatReplyIfUnanswered is for an agent that answers in the thread itself:
-	// the result is posted only when nothing answered the thread.
+	// the result is posted only when the run did not succeed.
 	ChatReplyIfUnanswered = "if_unanswered"
 )
 

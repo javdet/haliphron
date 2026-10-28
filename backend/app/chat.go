@@ -6,7 +6,6 @@ import (
 	"log/slog"
 	"strings"
 	"time"
-	"unicode/utf8"
 
 	clusterv1 "github.com/automagicops/haliphron/api/cluster/v1"
 	runv1 "github.com/automagicops/haliphron/api/run/v1"
@@ -187,10 +186,6 @@ const (
 	// with a run is kept for exactly as long as the run.
 	chatRefusalRetention = 30 * 24 * time.Hour
 )
-
-// chatUnanswered opens the reply to a run that ended without anything
-// answering the thread.
-const chatUnanswered = "Nothing was posted in this thread in answer, so here is how the run ended.\n\n"
 
 // chatLostClaim is the answer to a message whose handler died before deciding
 // anything. Asking again is safe: nothing was started.
@@ -412,28 +407,17 @@ func (c *Chat) deliver(ctx context.Context, t store.ChatTrigger) (bool, error) {
 		if !c.svc.ResultSettled(r) {
 			return false, c.svc.store.DeferChatReply(ctx, t.ChatTriggerKey, chatSettleRecheck)
 		}
-		// A run that did not succeed is always reported: whatever it posted
-		// before it failed is not the answer it was on its way to.
+		// Under if_unanswered the agent is the one who speaks in the thread, and
+		// a run that succeeded is not reported: "exited with code 0" after the
+		// agent's own answer, or in place of one, is noise. A run that did not
+		// succeed is always reported: whatever it posted before it failed is not
+		// the answer it was on its way to.
 		if t.ReplyPolicy == store.ChatReplyIfUnanswered && r.Status == clusterv1.StatusSucceeded {
-			answered, err := c.answered(ctx, t)
-			if err != nil {
-				// Not knowing is not silence. The thread is read again on the
-				// next attempt rather than answered twice now.
-				c.log.Warn("could not read a thread to see whether it was answered",
-					"message", t.MessageID, "run", t.RunID, "error", err)
-				return false, c.svc.store.FailChatReply(ctx, t.ChatTriggerKey, err.Error(),
-					chatBackoff(t.Attempts), isPermanent(err) || t.Attempts+1 >= chatMaxAttempts)
-			}
-			if answered {
-				c.log.Info("the agent answered the thread itself; no reply is posted",
-					"message", t.MessageID, "run", t.RunID)
-				return false, c.svc.store.MarkChatReplied(ctx, t.ChatTriggerKey, "")
-			}
-			text = chatUnanswered + renderResult(r, c.runLink(r.ID),
-				c.platform.MaxPostRunes()-utf8.RuneCountInString(chatUnanswered))
-		} else {
-			text = renderResult(r, c.runLink(r.ID), c.platform.MaxPostRunes())
+			c.log.Info("the run succeeded under if_unanswered; no reply is posted",
+				"message", t.MessageID, "run", t.RunID)
+			return false, c.svc.store.MarkChatReplied(ctx, t.ChatTriggerKey, "")
 		}
+		text = renderResult(r, c.runLink(r.ID), c.platform.MaxPostRunes())
 		kind = ChatPostResult
 	case t.Refusal != "":
 		text = t.Refusal
@@ -469,29 +453,6 @@ func (c *Chat) deliver(ctx context.Context, t store.ChatTrigger) (bool, error) {
 	}
 	c.log.Info("chat reply posted", "message", t.MessageID, "run", t.RunID, "kind", kind)
 	return true, nil
-}
-
-// answered reports whether anything answered the thread a row owes a reply
-// to, after the row's answer starts to count.
-//
-// An answer is a post by a bot account — the agent's own chat tools post as
-// one — that this process did not make itself. Succeeded is deliberately not
-// consulted: it means the agent exited 0, which says nothing about whether the
-// person heard back.
-func (c *Chat) answered(ctx context.Context, t store.ChatTrigger) (bool, error) {
-	posts, err := c.platform.Thread(ctx, t.ThreadID)
-	if err != nil {
-		return false, err
-	}
-	for _, p := range posts {
-		if p.System || p.Kind != "" || !(p.FromBot || p.FromSelf) {
-			continue
-		}
-		if p.CreatedAt.After(t.AnsweredAfter) {
-			return true, nil
-		}
-	}
-	return false, nil
 }
 
 func (c *Chat) runLink(id runv1.ULID) string {

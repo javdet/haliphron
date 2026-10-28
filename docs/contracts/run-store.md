@@ -334,6 +334,15 @@ status and cost. Retention selects on `finished_at`, oldest first, in batches
 with `SKIP LOCKED`, so a run held under `lock_run.sql` is skipped until the
 next pass. The run's objects are removed after the row is gone, never before.
 
+**Failed runs have a retention of their own** (0012). `run_retention` holds one
+row per tenant, `failed_seconds`, saved from the UI; no row means the backend's
+default of three days, and `0` keeps failed runs forever. The same batched
+`DELETE`, restricted to `status = 'Failed'`, runs on the same pass as the
+general retention and is audited with reason `failed_retention`. The row is read
+again on every pass, so a save on one replica is applied by whichever replica
+runs the next one. A save appends a `run_retention.saved` audit record in its
+own transaction.
+
 **Deleting a cluster** is done only by `DeleteCluster` in
 [backend/store/clusters.go](../../backend/store/clusters.go), and only for a
 cluster whose `status` is `Revoked` and that no `runs` row and no
@@ -497,15 +506,10 @@ out.
 **`reply_policy` is frozen on the row when the message is claimed** (0009).
 `always` is what 0007 did: an acknowledgement, then the run's result.
 `if_unanswered` is for an agent that answers in the thread itself: the bot only
-reacts, and when the run ends the reply loop reads the thread before posting.
-A run that did not reach `Succeeded` is always reported — whatever it posted
-before it failed is not the answer it was on its way to. A run that did is
-reported only if no post by a bot account appeared in the thread after the
-row's answer starts to count; posts the backend made itself carry a
-`haliphron_kind` prop and do not count. A thread that cannot be read is a
-failed attempt and is retried, never taken for silence. The rule exists because
-`Succeeded` means the agent exited 0, which says nothing about whether the
-person was answered. Frozen, because an operator changing the policy while a
+reacts. A run that did not reach `Succeeded` is always reported — whatever it
+posted before it failed is not the answer it was on its way to. A run that did
+is never reported: the row is marked replied with no post, whether or not the
+agent said anything in the thread. Frozen, because an operator changing the policy while a
 run is in flight must not change what that run owes. Rows written before 0009
 read as `always`, which is what they were claimed under.
 
@@ -705,7 +709,7 @@ in [test/backend](../../test/backend) (`chatintegration_test.go`) against the
 same real PostgreSQL rather than here:
 
 - [x] under `if_unanswered` the bot only reacts, and posts nothing when a bot account answered the thread after the claim
-- [x] under `if_unanswered` a run that succeeded without anything answering the thread is still reported
+- [x] under `if_unanswered` a run that succeeded is not reported, even when nothing answered the thread
 - [x] under `if_unanswered` a run that did not succeed is reported even if the agent posted first
 - [x] a child and a grandchild of a chat run are told where the message came from, and a child that fails without a word is reported in the parent's thread even though the parent's routing note answered the parent
 - [x] a run not started from chat gives its children no chat header

@@ -99,6 +99,20 @@ func whyRunNotDeleted(ctx context.Context, tx *sql.Tx, id runv1.ULID) error {
 // on a run. A run somebody is acting on right now is not the one to delete, and
 // the next pass will find it again if it is still eligible.
 func (s *Store) DeleteFinishedRuns(ctx context.Context, cutoff time.Time, limit int) ([]runv1.ULID, error) {
+	return s.deleteEndedRuns(ctx, terminalStatuses, cutoff, limit, "retention")
+}
+
+// DeleteFailedRuns is DeleteFinishedRuns for status Failed alone, the age of
+// which an operator sets apart from the others (0012_run_retention.sql).
+func (s *Store) DeleteFailedRuns(ctx context.Context, cutoff time.Time, limit int) ([]runv1.ULID, error) {
+	return s.deleteEndedRuns(ctx, `('Failed')`, cutoff, limit, "failed_retention")
+}
+
+// deleteEndedRuns is the batch DELETE behind both, over statuses — a subset of
+// terminalStatuses, as a SQL list — with reason recorded in each audit record.
+func (s *Store) deleteEndedRuns(ctx context.Context, statuses string, cutoff time.Time, limit int,
+	reason string) ([]runv1.ULID, error) {
+
 	if limit <= 0 {
 		limit = 500
 	}
@@ -115,7 +129,7 @@ func (s *Store) DeleteFinishedRuns(ctx context.Context, cutoff time.Time, limit 
 			DELETE FROM runs
 			WHERE id IN (
 				SELECT id FROM runs
-				WHERE status IN `+terminalStatuses+`
+				WHERE status IN `+statuses+`
 				  AND finished_at < $1
 				ORDER BY finished_at
 				LIMIT $2
@@ -146,7 +160,7 @@ func (s *Store) DeleteFinishedRuns(ctx context.Context, cutoff time.Time, limit 
 			if err := appendAudit(ctx, tx, AuditEntry{
 				Actor: "retention", ActorKind: "system", Action: AuditRunDeleted,
 				SubjectKind: "run", SubjectID: string(d.id), RunID: d.id,
-				Payload: deletedRunPayload(d.status, d.createdBy, d.cost, d.finished, "retention"),
+				Payload: deletedRunPayload(d.status, d.createdBy, d.cost, d.finished, reason),
 			}); err != nil {
 				return err
 			}

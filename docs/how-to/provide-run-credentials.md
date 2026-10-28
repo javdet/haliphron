@@ -140,7 +140,9 @@ none: a lease fails on it, and the run stays queued.
 ## Rotate one
 
 The same `PUT` with a new value. Runs already in flight keep the credential
-they were given; the next lease carries the new one.
+they were given; the next lease carries the new one. In the UI, it is
+**Edit** on the secret's row under **Secrets**: the dialog takes a new value
+or reference, since the current one cannot be read back.
 
 ```sh
 curl -sX PUT https://haliphron.example.com/api/v1/secrets/git-token \

@@ -254,10 +254,10 @@ func TestRunAgentAsATaskIsTheSameRunCollectedAtTheEnd(t *testing.T) {
 	if created.CreatedAt == "" || created.LastUpdatedAt == "" || created.PollInterval <= 0 {
 		t.Errorf("task is missing a timestamp or a poll interval: %+v", created)
 	}
-	// Runs are kept for ever by default, and ttl says so with null rather than
-	// by being absent.
-	if ttl, present := fields["ttl"]; !present || ttl != nil {
-		t.Errorf("ttl = %v (present %t), want null", ttl, present)
+	// Runs are kept for ever by default except when they fail, which keeps
+	// them three days, and a task that may still fail says the shorter.
+	if ttl, present := fields["ttl"]; !present || ttl != float64((3*24*time.Hour).Milliseconds()) {
+		t.Errorf("ttl = %v (present %t), want three days in milliseconds", ttl, present)
 	}
 
 	stored := h.Run(runv1.ULID(created.TaskID))

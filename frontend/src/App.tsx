@@ -12,6 +12,7 @@ import { RolesPage } from './pages/RolesPage'
 import { TokensPage } from './pages/TokensPage'
 import { SecretsPage } from './pages/SecretsPage'
 import { IntegrationsPage } from './pages/IntegrationsPage'
+import { SettingsPage } from './pages/SettingsPage'
 import { useSignOut } from './auth/TokenGate'
 import { ThemeToggle } from './components/ThemeToggle'
 
@@ -36,6 +37,7 @@ function Sidebar() {
         <NavLink to="/secrets">Secrets</NavLink>
         <NavLink to="/integrations">Integrations</NavLink>
         <NavLink to="/tokens">Tokens</NavLink>
+        <NavLink to="/settings">Settings</NavLink>
       </nav>
 
       <div className="sidebar-foot">
@@ -162,6 +164,7 @@ export default function App() {
           <Route path="/secrets" element={<SecretsPage />} />
           <Route path="/integrations" element={<IntegrationsPage />} />
           <Route path="/tokens" element={<TokensPage />} />
+          <Route path="/settings" element={<SettingsPage />} />
           <Route
             path="*"
             element={

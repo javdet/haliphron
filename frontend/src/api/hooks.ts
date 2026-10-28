@@ -29,6 +29,7 @@ import {
   type Role,
   type Run,
   type RunList,
+  type RunRetention,
   type RunStats,
   type Schedule,
   type ScheduleRequest,
@@ -62,6 +63,7 @@ export const keys = {
   secrets: () => ['secrets'] as const,
   modelCredential: () => ['model-credential'] as const,
   gitCredential: () => ['git-credential'] as const,
+  runRetention: () => ['run-retention'] as const,
   chatIntegration: (platform: ChatPlatform) => ['integrations', platform] as const,
 }
 
@@ -501,6 +503,26 @@ export function usePutGitCredential() {
       qc.setQueryData(keys.gitCredential(), cred)
       void qc.invalidateQueries({ queryKey: keys.secrets() })
     },
+  })
+}
+
+// ---------------------------------------------------------------------------
+// retention
+// ---------------------------------------------------------------------------
+
+export function useRunRetention() {
+  return useQuery({
+    queryKey: keys.runRetention(),
+    queryFn: ({ signal }) => request<RunRetention>('/run-retention', { signal }),
+  })
+}
+
+export function usePutRunRetention() {
+  const qc = useQueryClient()
+  return useMutation({
+    mutationFn: (failed_retention_seconds: number) =>
+      request<RunRetention>('/run-retention', { method: 'PUT', body: { failed_retention_seconds } }),
+    onSuccess: (saved) => qc.setQueryData(keys.runRetention(), saved),
   })
 }
 

@@ -450,6 +450,21 @@ export interface GitCredential {
   problem?: string
 }
 
+/**
+ * How long finished runs are kept. Failed runs have an age of their own, set
+ * here; every other run is kept for the deployment's retention_seconds.
+ */
+export interface RunRetention {
+  /** 0 keeps failed runs forever. */
+  failed_retention_seconds: number
+  /** HALIPHRON_RUN_RETENTION, read-only here. 0 keeps runs forever. */
+  retention_seconds: number
+  /** default: never saved, so the backend's three days apply. */
+  source: 'default' | 'database'
+  updated_by?: string
+  updated_at?: string
+}
+
 /** The error envelope every non-2xx answer carries. */
 export interface ErrorBody {
   error: { code: string; message: string; field?: string }
@@ -461,7 +476,7 @@ export type ChatTransport = 'websocket' | 'webhook' | 'both'
 /**
  * always: the bot acknowledges and posts the run's result.
  * if_unanswered: the agent answers in the thread itself; the bot posts only
- * when the run failed or nothing answered.
+ * when the run did not succeed.
  */
 export type ChatReplyPolicy = 'always' | 'if_unanswered'
 

@@ -43,7 +43,7 @@ An empty `image.registry` means Docker Hub, which is where CI publishes.
 | `backend.logFormat` | `json` | `json` or `text` |
 | `backend.sweepInterval` | `5s` | lease and ack expiry scan |
 | `backend.reapInterval` | `1h` | artifact retention scan and run retention scan |
-| `backend.runRetention` | `""` | delete a run this long after it finished, e.g. `720h` for 30 days; empty keeps runs forever |
+| `backend.runRetention` | `""` | delete a run this long after it finished, e.g. `720h` for 30 days; empty keeps runs forever. Failed runs have their own, shorter retention (3 days by default), set in the UI |
 | `backend.terminationGracePeriodSeconds` | `60` | |
 | `backend.extraEnv`, `backend.extraEnvFrom` | `[]` | |
 | `backend.extraVolumes`, `backend.extraVolumeMounts` | `[]` | |

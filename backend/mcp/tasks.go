@@ -1,6 +1,7 @@
 package mcp
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"net/http"
@@ -65,7 +66,7 @@ type task struct {
 	PollInterval int64  `json:"pollInterval,omitempty"`
 }
 
-func (s *Server) taskOf(item store.Run) task {
+func (s *Server) taskOf(ctx context.Context, item store.Run) task {
 	status, message := s.taskStatus(item)
 	updated := item.UpdatedAt
 	if updated.IsZero() {
@@ -79,11 +80,12 @@ func (s *Server) taskOf(item store.Run) task {
 		LastUpdatedAt: updated.UTC().Format(time.RFC3339Nano),
 		PollInterval:  taskPollInterval.Milliseconds(),
 	}
-	if s.runRetention > 0 {
+	if keep := s.app.RunsKeptFor(ctx); keep > 0 {
 		// Retention counts from when a run finished and a ttl from when it was
 		// created, so the retention is a lower bound on the ttl and the honest
-		// number to give: the task is there for at least this long.
-		ttl := s.runRetention.Milliseconds()
+		// number to give: the task is there for at least this long. The
+		// shorter of the two ages, because a task still working may fail.
+		ttl := keep.Milliseconds()
 		t.TTL = &ttl
 	}
 	return t
@@ -131,7 +133,7 @@ func (s *Server) runAgentTask(r *http.Request, c Caller, raw json.RawMessage) (a
 
 	id := submitted.Run.ID
 	return map[string]any{
-		"task": s.taskOf(submitted.Run),
+		"task": s.taskOf(r.Context(), submitted.Run),
 		"_meta": map[string]any{
 			metaImmediateResponse: fmt.Sprintf("Run %s has started as a task. Its result is delivered "+
 				"when it finishes; get_run_result reads it in the meantime.", id),
@@ -204,7 +206,7 @@ func (s *Server) getTask(r *http.Request, c Caller, raw json.RawMessage) (any, *
 	if rpcErr != nil {
 		return nil, rpcErr
 	}
-	return s.taskOf(item), nil
+	return s.taskOf(r.Context(), item), nil
 }
 
 // taskResult is tasks/result: it blocks until the task is terminal and answers
@@ -268,5 +270,5 @@ func (s *Server) cancelTask(r *http.Request, c Caller, raw json.RawMessage) (any
 		s.log.Error("could not cancel the run behind a task", "run", item.ID, "error", err)
 		return nil, &rpcError{Code: codeInternalError, Message: "the task could not be cancelled"}
 	}
-	return s.taskOf(cancelled), nil
+	return s.taskOf(r.Context(), cancelled), nil
 }

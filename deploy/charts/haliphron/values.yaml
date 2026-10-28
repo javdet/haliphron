@@ -72,7 +72,9 @@ backend:
   # Delete a run this long after it finished — its row, its attempt ledger and
   # its stored logs, results and artifacts — checked every reapInterval. A Go
   # duration: 720h is 30 days. Empty keeps runs forever. The audit log keeps a
-  # record of every deleted run either way.
+  # record of every deleted run either way. Failed runs have a retention of
+  # their own, three days by default, which is set on the UI's Settings page
+  # rather than here; a failed run goes at whichever comes first.
   runRetention: ""
 
   terminationGracePeriodSeconds: 60
@@ -461,8 +463,7 @@ mattermost:
 
   # always: the bot acknowledges each request and posts the run's result.
   # if_unanswered: for a role whose agent answers in the thread itself; the
-  # bot only reacts, and posts the result only when the run failed or nothing
-  # answered the thread.
+  # bot only reacts, and posts the result only when the run did not succeed.
   replyPolicy: always
 
 # -----------------------------------------------------------------------------

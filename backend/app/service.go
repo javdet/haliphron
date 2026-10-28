@@ -81,6 +81,11 @@ type Limits struct {
 	// See clusterv1.DefaultMaxAckExpiries for why there is a ceiling and why
 	// it is five.
 	MaxAckExpiries int
+
+	// RunRetention deletes every finished run this long after it finished;
+	// zero keeps them for ever. The shorter age for failed runs is not here:
+	// it is set from the UI and read from the store on every pass.
+	RunRetention time.Duration
 }
 
 // Options assembles a Service.

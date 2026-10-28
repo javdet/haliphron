@@ -264,7 +264,7 @@ func run() error {
 		}
 	}
 	if cfg.Mode.Serves(config.ModeMCP) {
-		serve("mcp", cfg.MCPAddr, mcp.New(service, log).WithRunRetention(cfg.RunRetention).Handler())
+		serve("mcp", cfg.MCPAddr, mcp.New(service, log).Handler())
 	}
 	if cfg.Mode.Serves(config.ModeCluster) {
 		serve("cluster-api", cfg.ClusterAddr, clusterapi.New(service, log).Handler())
@@ -287,8 +287,9 @@ func run() error {
 		go func() { defer wg.Done(); service.RunSweeper(ctx, cfg.SweepInterval) }()
 		go func() { defer wg.Done(); service.RunScheduler(ctx, cfg.ScheduleInterval) }()
 		go func() { defer wg.Done(); service.RunReaper(ctx, cfg.ReapInterval) }()
-		// Retention for runs. A no-op unless HALIPHRON_RUN_RETENTION is set.
-		go func() { defer wg.Done(); service.ReapRuns(ctx, cfg.ReapInterval, cfg.RunRetention) }()
+		// Retention for runs: failed runs after the age set in the UI, three
+		// days unless changed, and every run after HALIPHRON_RUN_RETENTION.
+		go func() { defer wg.Done(); service.ReapRuns(ctx, cfg.ReapInterval) }()
 		// Retention for the artifact volume. A no-op in object-store mode,
 		// where the chart generated lifecycle rules and the store applies them
 		// itself.

@@ -7,6 +7,15 @@ of `VERSION`, and it is the tag of the published images.
 
 ### Added
 
+- **Failed runs are deleted after three days.** A run whose status is
+  `Failed` is now deleted three days after it finished, with its attempts,
+  logs, result and artifacts; the audit log keeps a `run.deleted` record with
+  reason `failed_retention`. `TimedOut` and `Cancelled` runs are not affected.
+  Change it, or keep failed runs forever, on the new Settings page or with
+  `GET` and `PUT /api/v1/run-retention` (`admin` to change). The deployment's
+  `runRetention` still applies to every run, and a failed run goes at whichever
+  comes first. MCP tasks now carry the shorter of the two as their `ttl`.
+- Migration `0012_run_retention` adds the `run_retention` table.
 - **Slack.** A Slack app in Socket Mode turns mentions, and direct messages,
   into runs, the way the Mattermost bot does. Before it acts, the bot reads the
   whole thread the message was posted in and quotes it into the prompt. The
@@ -50,11 +59,10 @@ of `VERSION`, and it is the tag of the published images.
 - **Reply policy.** `always` is the existing behaviour: an acknowledgement,
   then the result. `if_unanswered` is for agents that answer in the thread
   themselves: the bot only reacts with :eyes:. A run that did not succeed is
-  always reported. A run that succeeded is reported only if no bot account
-  posted in the thread after the request, because `Succeeded` means the agent
-  exited 0, not that the person was answered. The policy is frozen on each
-  request when it is claimed. A configuration saved from the UI defaults to
-  `if_unanswered`; one from the environment keeps `always`.
+  always reported; a run that succeeded gets no post from the bot, whether or
+  not the agent answered. The policy is frozen on each request when it is
+  claimed. A configuration saved from the UI defaults to `if_unanswered`; one
+  from the environment keeps `always`.
 - **Children of a chat run answer the same person.** A run started by a run
   that came from chat owes a reply in the same thread, and so do its own
   children. Its prompt opens with the same chat header as its parent's, added
@@ -123,6 +131,10 @@ of `VERSION`, and it is the tag of the published images.
 
 ### Changed
 
+- **Upgrading starts deleting old failed runs.** The first retention pass, one
+  `reapInterval` (an hour by default) after the new backend starts, deletes
+  every failed run that finished more than three days ago. To keep them, choose
+  *Keep forever* on the Settings page before then.
 - When the agent CLI exits non-zero, the failure message now gives the reason
   (`claude exited 1 after 3s: Invalid API key`). Before, it gave only the exit
   code.
@@ -142,6 +154,10 @@ of `VERSION`, and it is the tag of the published images.
   only the container's, except names the entrypoint reserves.
 - Changing the Mattermost bot's configuration no longer needs a restart when it
   is saved from the UI. A configuration from the environment still does.
+- On the Secrets page, the row button that replaces a secret's value or
+  reference is now **Edit** instead of **Rotate**. On the model credential's row
+  it opens the model credential dialog, so the gateway endpoint and the type
+  check are kept.
 
 ## 0.4.0 — 2026-10-02
 

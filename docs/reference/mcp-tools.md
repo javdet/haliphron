@@ -189,7 +189,7 @@ collects the result with `tasks/result`, rather than the model calling
 | `tasks/list` | not offered: use `list_runs` |
 | Tools that may be tasks | `run_agent`, with `execution.taskSupport: "optional"` |
 | Task ID | the run ID |
-| `ttl` | `null`, or the run retention in milliseconds when `HALIPHRON_RUN_RETENTION` is set |
+| `ttl` | the shorter of the failed-run retention (3 days by default) and `HALIPHRON_RUN_RETENTION`, in milliseconds; `null` when both keep runs forever |
 | `pollInterval` | 5000 |
 | Status notifications | none: poll |
 

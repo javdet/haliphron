@@ -410,16 +410,15 @@ not change what a run already in flight owes.
   post in chat. It is the default for a configuration from the environment.
 - **`if_unanswered`**: the bot only reacts with :eyes:. When the run ends:
   - a run that did not succeed is always reported, whatever it posted before;
-  - a run that succeeded is reported only if no bot account posted in the
-    thread after the request was claimed. Posts the backend made itself do not
-    count.
+  - a run that succeeded is not reported, whether or not the agent posted in
+    the thread.
 
   It is the default for a configuration saved from the UI, and the one to use
   when the agents answer in the thread.
 
-The reason for the second rule: `Succeeded` means the agent exited with code 0.
-It does not mean the person was answered. An agent that exits 0 without saying
-anything still leaves the person owed a reply.
+`Succeeded` means the agent exited with code 0, not that the person was
+answered. Under `if_unanswered`, an agent that exits 0 without posting leaves
+the thread with only the :eyes: reaction; the run's result is in the UI.
 
 A child run started from a chat run owes the same person a reply as well. When
 it is inserted, it gets a follow-up record pointing at the same thread, under
@@ -464,7 +463,7 @@ and in `GET /api/v1/runs` with `created_via` `mattermost` and `created_by`
     summary, the pull request if one was opened, its cost, and the link.
 
   Under `if_unanswered`, the reaction, the refusal, and the result only when
-  the run failed or nothing answered the thread. A result longer than the
+  the run did not succeed. A result longer than the
   post limit (`max_post_runes`) is cut, with a note saying where the rest is.
 - **What "Succeeded" means.** The reply says *the agent exited with code 0*.
   It does not mean the problem was solved, and the bot does not say it was.
@@ -495,9 +494,7 @@ and in `GET /api/v1/runs` with `created_via` `mattermost` and `created_by`
   posting it and recording that it did. Replies are never silently dropped
   while the server accepts posts. A post the server refuses outright, such as
   a 403 because the bot was removed from the channel, is given up on after one
-  attempt. Other failures are retried for up to 20 attempts. Under
-  `if_unanswered`, a thread that cannot be read is treated as not yet known
-  and read again on the next attempt, never as silence.
+  attempt. Other failures are retried for up to 20 attempts.
 - **Attachments are ignored.** Only the text of a message reaches the prompt.
 - **A configuration from the environment needs a restart to change.** One
   saved from the UI does not: every replica checks for a change every 15

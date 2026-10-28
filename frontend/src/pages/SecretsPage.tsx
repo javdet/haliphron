@@ -462,7 +462,7 @@ function SecretDialog({ existing, onClose }: { existing: Secret | null; onClose:
 
   return (
     <Dialog
-      title={existing ? `Rotate ${existing.name}` : 'New secret'}
+      title={existing ? `Edit ${existing.name}` : 'New secret'}
       onClose={onClose}
       footer={
         <>
@@ -509,9 +509,11 @@ function SecretDialog({ existing, onClose }: { existing: Secret | null; onClose:
 
 export function SecretsPage() {
   const secrets = useSecrets()
-  const modelSecret = useModelCredential().data?.secret_name
+  const modelCred = useModelCredential().data
+  const modelSecret = modelCred?.secret_name
   const gitSecrets = new Set(useGitCredential().data?.tokens.map((t) => t.secret_name))
   const [editing, setEditing] = useState<Secret | null>(null)
+  const [editingModel, setEditingModel] = useState(false)
   const [creating, setCreating] = useState(false)
 
   return (
@@ -536,7 +538,7 @@ export function SecretsPage() {
           <div>
             <div className="banner-title">Values are never shown</div>
             <div className="small muted">
-              The API returns names, kinds and references only. A secret can be replaced, not read.
+              The API returns names, kinds and references only. A secret can be replaced — with Edit on its row — but not read.
             </div>
           </div>
         </div>
@@ -585,8 +587,12 @@ export function SecretsPage() {
                       <Time at={secret.rotated_at} />
                     </td>
                     <td className="nowrap">
-                      <button className="sm ghost" onClick={() => setEditing(secret)}>
-                        Rotate
+                      {/* The plain dialog would drop the gateway endpoint and skip the type check. */}
+                      <button
+                        className="sm ghost"
+                        onClick={() => (secret.name === modelSecret ? setEditingModel(true) : setEditing(secret))}
+                      >
+                        Edit
                       </button>
                     </td>
                   </tr>
@@ -609,6 +615,7 @@ export function SecretsPage() {
           }}
         />
       )}
+      {editingModel && <ModelCredentialDialog current={modelCred} onClose={() => setEditingModel(false)} />}
     </>
   )
 }

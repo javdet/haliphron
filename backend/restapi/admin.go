@@ -410,6 +410,63 @@ func gitCredentialBody(cred app.GitCredential) map[string]any {
 }
 
 // ---------------------------------------------------------------------------
+// run retention
+// ---------------------------------------------------------------------------
+
+type runRetentionRequest struct {
+	// A pointer so that a body without it is refused rather than read as
+	// zero, which keeps failed runs for ever.
+	FailedRetentionSeconds *int64 `json:"failed_retention_seconds"`
+}
+
+func (s *Server) getRunRetention(w http.ResponseWriter, r *http.Request, _ caller) {
+	keep, err := s.app.RunRetention(r.Context())
+	if err != nil {
+		s.failFor(w, r, err)
+		return
+	}
+	s.write(w, http.StatusOK, runRetentionBody(keep))
+}
+
+func (s *Server) putRunRetention(w http.ResponseWriter, r *http.Request, c caller) {
+	var req runRetentionRequest
+	if _, ok := s.decode(w, r, &req); !ok {
+		return
+	}
+	if req.FailedRetentionSeconds == nil {
+		s.fail(w, http.StatusUnprocessableEntity, "invalid_request",
+			"failed_retention_seconds is required; 0 keeps failed runs for ever", "failed_retention_seconds")
+		return
+	}
+	seconds := *req.FailedRetentionSeconds
+	if seconds < 0 || seconds > int64(app.MaxFailedRunRetention/time.Second) {
+		// Bounded here as well as in app so the conversion cannot overflow.
+		s.fail(w, http.StatusUnprocessableEntity, "invalid_request",
+			"failed_retention_seconds is out of range", "failed_retention_seconds")
+		return
+	}
+	keep, err := s.app.PutFailedRunRetention(r.Context(), time.Duration(seconds)*time.Second, c.Name())
+	if err != nil {
+		s.failFor(w, r, err)
+		return
+	}
+	s.write(w, http.StatusOK, runRetentionBody(keep))
+}
+
+func runRetentionBody(keep app.RunRetention) map[string]any {
+	body := map[string]any{
+		"failed_retention_seconds": int64(keep.Failed / time.Second),
+		"retention_seconds":        int64(keep.All / time.Second),
+		"source":                   keep.Source,
+	}
+	if keep.UpdatedAt != nil {
+		body["updated_by"] = keep.UpdatedBy
+		body["updated_at"] = keep.UpdatedAt
+	}
+	return body
+}
+
+// ---------------------------------------------------------------------------
 // tokens
 // ---------------------------------------------------------------------------
 
