@@ -5,6 +5,8 @@ of `VERSION`, and it is the tag of the published images.
 
 ## Unreleased
 
+## 0.5.4 — 2026-10-29
+
 ### Changed
 
 - **A chat reply is the agent's answer and nothing else.** On Mattermost and
