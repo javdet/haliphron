@@ -8,10 +8,10 @@ type: application
 
 # The chart's own version. It moves with every release, together with
 # appVersion and VERSION.
-version: 0.5.4
+version: 0.5.5
 # The backend it is written against. `helm upgrade` does not imply an image
 # bump: image.tag overrides this.
-appVersion: "0.5.4"
+appVersion: "0.5.5"
 
 keywords:
   - agents

@@ -5,6 +5,8 @@ of `VERSION`, and it is the tag of the published images.
 
 ## Unreleased
 
+## 0.5.5 — 2026-10-29
+
 ### Changed
 
 - **The classificator's line is posted again.** A run that started another run
