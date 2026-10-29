@@ -473,13 +473,6 @@ export interface ErrorBody {
 /** How Mattermost messages reach the bot. */
 export type ChatTransport = 'websocket' | 'webhook' | 'both'
 
-/**
- * always: the bot acknowledges and posts the run's result.
- * if_unanswered: the agent answers in the thread itself; the bot posts only
- * when the run did not succeed.
- */
-export type ChatReplyPolicy = 'always' | 'if_unanswered'
-
 export type ChatPlatform = 'mattermost' | 'slack'
 
 /**
@@ -496,8 +489,6 @@ export interface ChatIntegration {
   role: string
   repo: string
   base_branch: string
-  run_url: string
-  reply_policy: ChatReplyPolicy
   max_post_runes: number
   max_thread_bytes: number
   bot_token_configured: boolean
@@ -520,8 +511,6 @@ export interface ChatIntegrationRequest {
   role: string
   repo: string
   base_branch: string
-  run_url: string
-  reply_policy: ChatReplyPolicy
   max_post_runes: number
   max_thread_bytes: number
   /** Absent keeps the stored token. */

@@ -7,7 +7,6 @@ import (
 	"strings"
 	"time"
 
-	clusterv1 "github.com/automagicops/haliphron/api/cluster/v1"
 	runv1 "github.com/automagicops/haliphron/api/run/v1"
 	"github.com/automagicops/haliphron/backend/run"
 	"github.com/automagicops/haliphron/backend/store"
@@ -15,6 +14,13 @@ import (
 
 // The chat bot: a message addressed to the bot account is a run, and the run's
 // ending is a reply in the thread that asked for it.
+//
+// The reply is the agent's answer and nothing else: no run identifier, status,
+// cost or link. Agents never post in chat themselves. The bot reacts to the
+// message when the run starts, and when it ends posts what the agent answered,
+// or one plain sentence when there is no answer to post. A run that started a
+// run of its own says nothing; its child answers. Everything else about the
+// run is in the UI.
 //
 // The adapter for a platform is transport. It decodes what the chat server
 // sends into a ChatMessage and carries posts back out through ChatPlatform;
@@ -90,9 +96,8 @@ type ChatThreadPost struct {
 	Text      string
 	CreatedAt time.Time
 	FromSelf  bool
-	// FromBot is a post by any bot account — the agent answering through its
-	// own chat tools, typically. Kind is the kind this process gave its own
-	// post, empty for every other.
+	// FromBot is a post by any bot account. Kind is the kind this process gave
+	// its own post, empty for every other.
 	FromBot bool
 	Kind    string
 	System  bool
@@ -111,7 +116,6 @@ type ChatPost struct {
 
 // The kinds of post the bot makes.
 const (
-	ChatPostAck     = "ack"
 	ChatPostResult  = "result"
 	ChatPostRefusal = "refusal"
 )
@@ -123,15 +127,8 @@ type ChatConfig struct {
 	Role       string
 	RepoURL    string
 	BaseBranch string
-	// RunURL is a link to a run in the UI, with {id} where the identifier
-	// goes. Empty means replies carry no link.
-	RunURL string
 	// MaxThreadBytes bounds the thread history quoted into a prompt.
 	MaxThreadBytes int
-	// ReplyPolicy is store.ChatReplyAlways — acknowledge, then post the
-	// result — or store.ChatReplyIfUnanswered, for an agent that answers in the
-	// thread itself. Empty means always.
-	ReplyPolicy string
 }
 
 // ChatOutcome is what Handle did with a message.
@@ -205,9 +202,6 @@ func (s *Service) NewChat(p ChatPlatform, cfg ChatConfig) *Chat {
 	if cfg.MaxThreadBytes <= 0 {
 		cfg.MaxThreadBytes = DefaultChatThreadBytes
 	}
-	if cfg.ReplyPolicy == "" {
-		cfg.ReplyPolicy = store.ChatReplyAlways
-	}
 	return &Chat{
 		svc:      s,
 		platform: p,
@@ -254,7 +248,6 @@ func (c *Chat) Handle(ctx context.Context, m ChatMessage) (ChatOutcome, error) {
 		Username:       m.Username,
 		ChannelName:    chatChannelName(m),
 		ChannelType:    m.ChannelType,
-		ReplyPolicy:    c.cfg.ReplyPolicy,
 	}, chatOrphanAfter)
 	if err != nil {
 		return 0, err
@@ -303,21 +296,12 @@ func (c *Chat) Handle(ctx context.Context, m ChatMessage) (ChatOutcome, error) {
 	id := submitted.Run.ID
 	c.log.Info("a chat message started a run", "message", m.ID, "channel", m.ChannelID, "run", id)
 
-	// The acknowledgement is best effort. The reply that matters is the
-	// durable one, and a person whose acknowledgement was lost still gets it.
-	// Under if_unanswered the reaction is the whole of it: the agent is the one
-	// who speaks in the thread, and a post from the bot ahead of it is noise.
+	// The reaction is the whole acknowledgement: a post ahead of the answer
+	// would be the system talking about itself in the person's thread. It is
+	// best effort. The reply that matters is the durable one, and a person
+	// whose reaction was lost still gets it.
 	if err := c.platform.React(ctx, m.ID, "eyes"); err != nil {
 		c.log.Warn("could not react to a chat message", "message", m.ID, "error", err)
-	}
-	if c.cfg.ReplyPolicy == store.ChatReplyIfUnanswered {
-		return ChatStarted, nil
-	}
-	if _, err := c.platform.Post(ctx, ChatPost{
-		ChannelID: m.ChannelID, RootID: thread, RunID: id, Kind: ChatPostAck,
-		Text: renderAck(id, c.cfg.Role, c.runLink(id)),
-	}); err != nil {
-		c.log.Warn("could not acknowledge a chat message", "message", m.ID, "run", id, "error", err)
 	}
 	return ChatStarted, nil
 }
@@ -407,17 +391,15 @@ func (c *Chat) deliver(ctx context.Context, t store.ChatTrigger) (bool, error) {
 		if !c.svc.ResultSettled(r) {
 			return false, c.svc.store.DeferChatReply(ctx, t.ChatTriggerKey, chatSettleRecheck)
 		}
-		// Under if_unanswered the agent is the one who speaks in the thread, and
-		// a run that succeeded is not reported: "exited with code 0" after the
-		// agent's own answer, or in place of one, is noise. A run that did not
-		// succeed is always reported: whatever it posted before it failed is not
-		// the answer it was on its way to.
-		if t.ReplyPolicy == store.ChatReplyIfUnanswered && r.Status == clusterv1.StatusSucceeded {
-			c.log.Info("the run succeeded under if_unanswered; no reply is posted",
+		// A run that handed the request on — the classificator, typically —
+		// says nothing: what it would say is how it routed, and the person is
+		// owed the answer, which the child's own row posts.
+		if t.Delegated {
+			c.log.Info("the run started another; its answer is the reply",
 				"message", t.MessageID, "run", t.RunID)
 			return false, c.svc.store.MarkChatReplied(ctx, t.ChatTriggerKey, "")
 		}
-		text = renderResult(r, c.runLink(r.ID), c.platform.MaxPostRunes())
+		text = renderAnswer(r, c.platform.MaxPostRunes())
 		kind = ChatPostResult
 	case t.Refusal != "":
 		text = t.Refusal
@@ -453,13 +435,6 @@ func (c *Chat) deliver(ctx context.Context, t store.ChatTrigger) (bool, error) {
 	}
 	c.log.Info("chat reply posted", "message", t.MessageID, "run", t.RunID, "kind", kind)
 	return true, nil
-}
-
-func (c *Chat) runLink(id runv1.ULID) string {
-	if c.cfg.RunURL == "" {
-		return ""
-	}
-	return strings.ReplaceAll(c.cfg.RunURL, "{id}", string(id))
 }
 
 // addressedToBot is the rule for which messages are requests. A direct

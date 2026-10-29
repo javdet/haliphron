@@ -687,8 +687,6 @@ Scope: `admin`. The configuration in force, without its tokens.
 | `role` | string | the role every run from the bot is admitted under |
 | `repo` | string | the repository runs are pointed at; empty runs without one |
 | `base_branch` | string | |
-| `run_url` | string | a link to a run, with `{id}` for its identifier |
-| `reply_policy` | string | `always` or `if_unanswered` |
 | `max_post_runes` | integer | the server's post length limit |
 | `max_thread_bytes` | integer | how much of a thread is quoted into a prompt |
 | `bot_token_configured` | boolean | whether the bot's token is stored |
@@ -714,10 +712,11 @@ plus two write-only ones:
 | `bot_token` | string | the bot account's access token; absent or empty keeps the stored one |
 | `webhook_tokens` | string | the outgoing webhooks' tokens, one per line (commas also separate); absent keeps the stored ones, a non-empty value replaces them all |
 
-Defaults: `transport` `websocket`, `role` `classificator`, `reply_policy`
-`if_unanswered`, `max_post_runes` `16383`. `url` must be an `http` or `https`
-address, `base_branch` needs `repo`, `run_url` must contain `{id}`, and
-`max_post_runes` is between 1000 and 65535. A switched-off configuration is
+Defaults: `transport` `websocket`, `role` `classificator`, `max_post_runes`
+`16383`. `url` must be an `http` or `https` address, `base_branch` needs `repo`,
+and `max_post_runes` is between 1000 and 65535. The `reply_policy` and `run_url`
+fields earlier versions took are gone; a body that still carries them is
+accepted and they are ignored. A switched-off configuration is
 held to those shape rules only, so it may be saved half finished. An enabled one
 also needs `url`, `role` and a bot token, stored or sent, and a `webhook` or
 `both` transport needs at least one webhook token. A refusal is `422` naming the
@@ -744,8 +743,7 @@ the Mattermost endpoints above, and these differences:
   (`slack-app-token`); `bot_token_secret` is `slack-bot-token`. The `PUT` takes
   a write-only `app_token`, the app-level token (`xapp-`), which an enabled
   configuration needs beside the bot token (`xoxb-`).
-- Defaults: `reply_policy` `always`, because the agents hold no Slack
-  credentials and the bot speaks for them, and `max_post_runes` `4000`.
+- `max_post_runes` defaults to `4000`.
 
 Each save is audited as `chat_integration.saved`, without the tokens.
 

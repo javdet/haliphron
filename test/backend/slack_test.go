@@ -237,8 +237,7 @@ func (h *harness) saveSlack(t *testing.T, f *fakeSlack) {
 	t.Helper()
 	bot, appToken := slBotToken, slAppToken
 	if _, err := h.App.PutChatIntegration(context.Background(), slack.Name, app.ChatIntegrationRequest{
-		Enabled: true, URL: f.apiURL(), RunURL: "https://haliphron.example/runs/{id}",
-		BotToken: &bot, AppToken: &appToken,
+		Enabled: true, URL: f.apiURL(), BotToken: &bot, AppToken: &appToken,
 	}, "test"); err != nil {
 		t.Fatalf("save the Slack integration: %v", err)
 	}
@@ -262,7 +261,7 @@ func slackChat(t *testing.T, h *harness, f *fakeSlack) *app.Chat {
 	if _, err := client.Me(context.Background()); err != nil {
 		t.Fatalf("bot identity: %v", err)
 	}
-	return h.App.NewChat(client, app.ChatConfig{Role: app.DefaultChatRole, ReplyPolicy: store.ChatReplyAlways})
+	return h.App.NewChat(client, app.ChatConfig{Role: app.DefaultChatRole})
 }
 
 func TestASlackMentionInAThreadStartsAClassificatorRunThatCarriesTheWholeThread(t *testing.T) {
@@ -286,10 +285,7 @@ func TestASlackMentionInAThreadStartsAClassificatorRunThatCarriesTheWholeThread(
 	}
 	prompt := h.prompt(t, r.ID)
 	for _, want := range []string{
-		"platform: slack\n", "channel: ops, type O\n",
-		"message_id: " + slChannel + ":1700000000.000300\n",
-		"thread_root_id: " + slChannel + ":" + slRoot + "\n",
-		"sender: @alice (user id U0ALICE)\n",
+		"platform: slack\n", "channel: ops, type O\n", "sender: @alice\n",
 		"alice: the nightly backup failed & nobody noticed\n",
 		"bob: it is the db-1 disk again\n",
 	} {
@@ -301,14 +297,21 @@ func TestASlackMentionInAThreadStartsAClassificatorRunThatCarriesTheWholeThread(
 		t.Errorf("the request is not set apart at the end:\n%s", prompt)
 	}
 
-	eventually(t, "the acknowledgement", func() bool { return len(f.postsOfKind(app.ChatPostAck)) == 1 })
-	ack := f.postsOfKind(app.ChatPostAck)[0]
-	if ack.channel != slChannel || ack.ThreadTS != slRoot || !strings.Contains(ack.Text, string(r.ID)) {
-		t.Errorf("ack = %+v, want it in the thread naming the run", ack)
+	if strings.Contains(prompt, "U0ALICE") || strings.Contains(prompt, "1700000000.000300") {
+		t.Errorf("the prompt carries the message's identifiers:\n%s", prompt)
 	}
-	f.mu.Lock()
-	reactions := append([]url.Values(nil), f.reactions...)
-	f.mu.Unlock()
+
+	// The reaction is the whole acknowledgement.
+	var reactions []url.Values
+	eventually(t, "the reaction", func() bool {
+		f.mu.Lock()
+		defer f.mu.Unlock()
+		reactions = append([]url.Values(nil), f.reactions...)
+		return len(reactions) > 0
+	})
+	if posts := f.postsOfKind(app.ChatPostResult); len(posts) != 0 {
+		t.Errorf("the bot posted before the run ended: %+v", posts)
+	}
 	if len(reactions) != 1 || reactions[0].Get("timestamp") != "1700000000.000300" || reactions[0].Get("name") != "eyes" {
 		t.Errorf("reactions = %v", reactions)
 	}
@@ -320,7 +323,7 @@ func TestASlackMentionInAThreadStartsAClassificatorRunThatCarriesTheWholeThread(
 	}
 }
 
-func TestTheClassifierAndTheRunItStartedEachReportInTheSlackThread(t *testing.T) {
+func TestOnlyTheRunTheClassifierStartedAnswersInTheSlackThread(t *testing.T) {
 	h := newHarness(t)
 	h.classificator(t)
 	h.chatRole(t)
@@ -344,34 +347,36 @@ func TestTheClassifierAndTheRunItStartedEachReportInTheSlackThread(t *testing.T)
 		r.CreatedBy, r.CreatedVia = "run:"+string(parent.ID), "agent"
 	})
 	if p := h.prompt(t, child.ID); !strings.Contains(p, "platform: slack\n") ||
-		!strings.Contains(p, "thread_root_id: "+msg+"\n") {
+		!strings.Contains(p, "sender: @alice\n") {
 		t.Errorf("the child was not told where the request came from:\n%s", p)
 	}
 
 	h.finish(t, c, parent.ID, controller.Outcome{ExitCode: runv1.ExitSuccess,
-		Summary: "Routed to oncall: it is an ingress restart. <!channel>"})
-	h.finish(t, c, child.ID, controller.Outcome{ExitCode: runv1.ExitSuccess, Summary: "Ingress restarted."})
+		Summary: "Routed to oncall: it is an ingress restart."})
+	h.finish(t, c, child.ID, controller.Outcome{ExitCode: runv1.ExitSuccess,
+		Summary: "**Ingress restarted.** <!channel>"})
 
-	if n, err := chat.Deliver(ctx); err != nil || n != 2 {
-		t.Fatalf("delivered %d replies (%v), want the classifier's and the child's", n, err)
+	if n, err := chat.Deliver(ctx); err != nil || n != 1 {
+		t.Fatalf("delivered %d replies (%v), want the child's alone", n, err)
 	}
 	results := f.postsOfKind(app.ChatPostResult)
-	if len(results) != 2 {
+	if len(results) != 1 {
 		t.Fatalf("%d results", len(results))
 	}
-	texts := results[0].Text + "\n" + results[1].Text
-	for _, want := range []string{"Routed to oncall", "Ingress restarted.", "*Succeeded*"} {
-		if !strings.Contains(texts, want) {
-			t.Errorf("the replies are missing %q:\n%s", want, texts)
-		}
+	r := results[0]
+	if strings.Contains(r.Text, "Routed") || strings.Contains(r.Text, string(child.ID)) ||
+		!strings.Contains(r.Text, "*Ingress restarted.*") {
+		t.Errorf("the reply is not the child's answer alone:\n%s", r.Text)
 	}
-	if strings.Contains(texts, "<!channel>") || strings.Contains(texts, "**") {
-		t.Errorf("a reply notifies the channel or is not mrkdwn:\n%s", texts)
+	if strings.Contains(r.Text, "<!channel>") || strings.Contains(r.Text, "**") {
+		t.Errorf("the reply notifies the channel or is not mrkdwn:\n%s", r.Text)
 	}
-	for _, r := range results {
-		if r.channel != slChannel || r.ThreadTS != "1700000000.000400" {
-			t.Errorf("reply posted in %s under %q, want the message's thread", r.channel, r.ThreadTS)
-		}
+	if r.channel != slChannel || r.ThreadTS != "1700000000.000400" {
+		t.Errorf("reply posted in %s under %q, want the message's thread", r.channel, r.ThreadTS)
+	}
+	// The classifier's own row is settled without a post, not left owed.
+	if n, err := chat.Deliver(ctx); err != nil || n != 0 {
+		t.Errorf("a second pass posted %d more (%v)", n, err)
 	}
 }
 
@@ -419,7 +424,7 @@ func TestTheSlackIntegrationKeepsBothTokensWriteOnly(t *testing.T) {
 	var body map[string]any
 	_ = json.Unmarshal(raw, &body)
 	if body["platform"] != "slack" || body["source"] != "database" || body["bot_token_configured"] != true ||
-		body["app_token_configured"] != true || body["reply_policy"] != store.ChatReplyAlways ||
+		body["app_token_configured"] != true || body["reply_policy"] != nil || body["run_url"] != nil ||
 		body["role"] != app.DefaultChatRole || body["app_token_secret"] != app.SlackAppTokenSecret ||
 		body["webhook_path"] != "" {
 		t.Errorf("body = %v", body)

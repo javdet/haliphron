@@ -14,13 +14,17 @@ import (
 
 // What the bot says.
 //
-// Two rules apply to every line here. A status is reported as what it is:
-// Succeeded means the agent exited with code 0, and a reply that says "done"
-// or "solved" is the system claiming success it did not observe. And anything
-// that came from the agent pod — the summary, a status message, a pull request
-// link — is untrusted text, written by a model that read a repository that may
-// have been written to manipulate it. It is posted with its mentions defused,
-// so a summary cannot notify a channel, and never as post metadata.
+// A reply is the agent's answer as it wrote it, and nothing about the run: the
+// status, the cost and the links are in the UI. Where there is no answer to
+// post, the reply is one plain sentence. That is the rule for a run that did
+// not succeed — whatever it wrote before it stopped is not the answer it was
+// on its way to — and for one that exited 0 without saying anything. Neither
+// ever tells the person the work was done: exit code 0 is all Succeeded means,
+// so only the agent's own words may say more.
+//
+// The answer is untrusted text, written by a model that read a repository that
+// may have been written to manipulate it. It is posted with its mentions
+// defused, so it cannot notify a channel, and never as post metadata.
 
 // DefaultChatPostRunes is Mattermost's default ceiling on a post.
 const DefaultChatPostRunes = 16383
@@ -29,87 +33,37 @@ const DefaultChatPostRunes = 16383
 // at ten times that, but a reply past it reads as a wall in the thread.
 const DefaultSlackPostRunes = 4000
 
-func renderAck(id runv1.ULID, role, link string) string {
-	text := fmt.Sprintf("Started run `%s`", id)
-	if role != "" {
-		text += fmt.Sprintf(" with role `%s`", role)
-	}
-	text += ". I will reply in this thread when it ends."
-	if link != "" {
-		text += "\n" + link
-	}
-	return text
-}
+const (
+	// chatNoAnswer is the reply to a run that failed, or ended without an
+	// answer of its own.
+	chatNoAnswer = "Sorry, I couldn't finish this. Please try again."
+	// chatCancelled is the reply to a run someone stopped.
+	chatCancelled = "This request was cancelled."
+	// chatCut ends an answer cut to the post limit.
+	chatCut = "\n\n…"
+)
 
-// renderResult is the reply a settled run owes, at most maxRunes long.
-func renderResult(r store.Run, link string, maxRunes int) string {
+// renderAnswer is the reply a settled run owes, at most maxRunes long.
+func renderAnswer(r store.Run, maxRunes int) string {
 	if maxRunes <= 0 {
 		maxRunes = DefaultChatPostRunes
 	}
-
-	var head string
-	status := r.ReportedStatus()
-	switch {
-	case status == clusterv1.StatusCompletedWithoutResult:
-		head = fmt.Sprintf("Run `%s` ended **%s**, but its report never arrived, so there is no summary.",
-			r.ID, r.Status)
-	case r.Status == clusterv1.StatusSucceeded:
-		// Not "the task was solved": exit code 0 is what Succeeded means.
-		head = fmt.Sprintf("Run `%s` ended **Succeeded**: the agent exited with code 0.", r.ID)
-	default:
-		head = fmt.Sprintf("Run `%s` ended **%s**", r.ID, status)
-		var details []string
-		if r.FailureClass != "" {
-			details = append(details, "failure class `"+string(r.FailureClass)+"`")
-		}
-		if r.ExitCode != nil {
-			details = append(details, fmt.Sprintf("exit code %d", *r.ExitCode))
-		}
-		if len(details) > 0 {
-			head += " (" + strings.Join(details, ", ") + ")"
-		}
-		switch {
-		case r.StatusMessage != "":
-			head += ": " + neutralizeMentions(oneLine(r.StatusMessage, 500))
-		case r.StatusReason != "":
-			head += ": " + neutralizeMentions(r.StatusReason)
-		case r.CancelReason != "":
-			head += ": " + neutralizeMentions(oneLine(r.CancelReason, 500))
-		}
-		head += "."
+	if r.Status == clusterv1.StatusCancelled {
+		return chatCancelled
 	}
-
-	var foot []string
-	if r.PRURL != "" {
-		foot = append(foot, "Pull request: "+neutralizeMentions(r.PRURL))
+	answer := strings.TrimSpace(r.ResultSummary)
+	if r.Status != clusterv1.StatusSucceeded ||
+		r.ReportedStatus() == clusterv1.StatusCompletedWithoutResult ||
+		answer == "" || runv1.IsNoAnswerSummary(r.ID, answer) {
+		return chatNoAnswer
 	}
-	if r.CostUSD != "" {
-		foot = append(foot, "Cost: $"+string(r.CostUSD))
+	answer = neutralizeMentions(answer)
+	// Cut rather than refused: a reply the server rejects for length is a
+	// reply that is never seen.
+	if utf8.RuneCountInString(answer) > maxRunes {
+		answer = cutRunes(answer, maxRunes-utf8.RuneCountInString(chatCut)) + chatCut
 	}
-	if link != "" {
-		foot = append(foot, link)
-	}
-	footer := strings.Join(foot, "\n")
-
-	summary := neutralizeMentions(strings.TrimSpace(r.ResultSummary))
-	if summary == "" {
-		return joinNonEmpty(head, footer)
-	}
-
-	// The summary gets what the status and the links leave, and is cut rather
-	// than the post refused: a reply the server rejects for length is a reply
-	// that is never seen.
-	where := link
-	if where == "" {
-		where = fmt.Sprintf("`GET /api/v1/runs/%s/result`", r.ID)
-	}
-	room := maxRunes - utf8.RuneCountInString(head) - utf8.RuneCountInString(footer) - 8
-	total := utf8.RuneCountInString(summary)
-	if total > room {
-		note := fmt.Sprintf("\n\n… truncated: the full result is at %s", where)
-		summary = cutRunes(summary, room-utf8.RuneCountInString(note)) + note
-	}
-	return joinNonEmpty(head, summary, footer)
+	return answer
 }
 
 // renderRefusal is the answer to a message that started nothing. internal is
@@ -162,22 +116,4 @@ func cutRunes(s string, n int) string {
 		cut = cut[:nl]
 	}
 	return cut
-}
-
-func oneLine(s string, limit int) string {
-	s = strings.Join(strings.Fields(s), " ")
-	if utf8.RuneCountInString(s) > limit {
-		s = cutRunes(s, limit-1) + "…"
-	}
-	return s
-}
-
-func joinNonEmpty(parts ...string) string {
-	var out []string
-	for _, p := range parts {
-		if p != "" {
-			out = append(out, p)
-		}
-	}
-	return strings.Join(out, "\n\n")
 }

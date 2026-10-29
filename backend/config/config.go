@@ -108,14 +108,9 @@ type SlackConfig struct {
 	Role       string
 	RepoURL    string
 	BaseBranch string
-	// RunURL links a reply to the run in the UI, with {id} for the run.
-	RunURL string
 
 	MaxPostRunes   int
 	MaxThreadBytes int
-	// ReplyPolicy is always by default: the agents hold no Slack credentials,
-	// so the backend acknowledges and reports every run.
-	ReplyPolicy string
 }
 
 // Enabled reports whether the bot is configured.
@@ -128,7 +123,6 @@ func (s SlackConfig) LogValue() slog.Value {
 		slog.String("api_url", s.APIURL),
 		slog.String("role", s.Role),
 		slog.String("repo", s.RepoURL),
-		slog.String("reply_policy", s.ReplyPolicy),
 		slog.Bool("bot_token_set", s.BotToken != ""),
 		slog.Bool("app_token_set", s.AppToken != ""),
 	)
@@ -148,8 +142,6 @@ type MattermostConfig struct {
 	Role       string
 	RepoURL    string
 	BaseBranch string
-	// RunURL links a reply to the run in the UI, with {id} for the run.
-	RunURL string
 
 	MaxPostRunes   int
 	MaxThreadBytes int
@@ -158,9 +150,6 @@ type MattermostConfig struct {
 	// webhooks' tokens, read from a file like the bot's own.
 	Transport     string
 	WebhookTokens []string
-	// ReplyPolicy is always — acknowledge, then post the result — or
-	// if_unanswered, for an agent that answers in the thread itself.
-	ReplyPolicy string
 }
 
 // Enabled reports whether the bot is configured.
@@ -173,7 +162,6 @@ func (m MattermostConfig) LogValue() slog.Value {
 		slog.String("role", m.Role),
 		slog.String("repo", m.RepoURL),
 		slog.String("transport", m.Transport),
-		slog.String("reply_policy", m.ReplyPolicy),
 		slog.Bool("token_set", m.Token != ""),
 		slog.Int("webhook_tokens", len(m.WebhookTokens)),
 	)
@@ -334,11 +322,9 @@ func Load() (Config, error) {
 			Role:           os.Getenv("HALIPHRON_MATTERMOST_ROLE"),
 			RepoURL:        os.Getenv("HALIPHRON_MATTERMOST_REPO"),
 			BaseBranch:     os.Getenv("HALIPHRON_MATTERMOST_BASE_BRANCH"),
-			RunURL:         os.Getenv("HALIPHRON_MATTERMOST_RUN_URL"),
 			MaxPostRunes:   intEnv("HALIPHRON_MATTERMOST_MAX_POST_RUNES", app.DefaultChatPostRunes),
 			MaxThreadBytes: intEnv("HALIPHRON_MATTERMOST_MAX_THREAD_BYTES", app.DefaultChatThreadBytes),
 			Transport:      env("HALIPHRON_MATTERMOST_TRANSPORT", store.ChatTransportWebSocket),
-			ReplyPolicy:    env("HALIPHRON_MATTERMOST_REPLY_POLICY", store.ChatReplyAlways),
 		},
 
 		Slack: SlackConfig{
@@ -347,10 +333,8 @@ func Load() (Config, error) {
 			Role:           os.Getenv("HALIPHRON_SLACK_ROLE"),
 			RepoURL:        os.Getenv("HALIPHRON_SLACK_REPO"),
 			BaseBranch:     os.Getenv("HALIPHRON_SLACK_BASE_BRANCH"),
-			RunURL:         os.Getenv("HALIPHRON_SLACK_RUN_URL"),
 			MaxPostRunes:   intEnv("HALIPHRON_SLACK_MAX_POST_RUNES", app.DefaultSlackPostRunes),
 			MaxThreadBytes: intEnv("HALIPHRON_SLACK_MAX_THREAD_BYTES", app.DefaultChatThreadBytes),
-			ReplyPolicy:    env("HALIPHRON_SLACK_REPLY_POLICY", store.ChatReplyAlways),
 		},
 	}
 
@@ -575,17 +559,8 @@ func (m MattermostConfig) validate() error {
 		return fmt.Errorf("config: the Mattermost %s transport needs HALIPHRON_MATTERMOST_WEBHOOK_TOKEN_FILE "+
 			"or HALIPHRON_MATTERMOST_WEBHOOK_TOKEN", m.Transport)
 	}
-	switch m.ReplyPolicy {
-	case store.ChatReplyAlways, store.ChatReplyIfUnanswered:
-	default:
-		return fmt.Errorf("config: HALIPHRON_MATTERMOST_REPLY_POLICY is %q; it is always or if_unanswered",
-			m.ReplyPolicy)
-	}
 	if m.BaseBranch != "" && m.RepoURL == "" {
 		return fmt.Errorf("config: HALIPHRON_MATTERMOST_BASE_BRANCH is set without HALIPHRON_MATTERMOST_REPO")
-	}
-	if m.RunURL != "" && !strings.Contains(m.RunURL, "{id}") {
-		return fmt.Errorf("config: HALIPHRON_MATTERMOST_RUN_URL has no {id} for the run identifier")
 	}
 	if m.MaxPostRunes < 1000 || m.MaxPostRunes > 65535 {
 		return fmt.Errorf("config: HALIPHRON_MATTERMOST_MAX_POST_RUNES is %d; it is between 1000 and 65535",
@@ -618,16 +593,8 @@ func (s SlackConfig) validate() error {
 		// Required rather than defaulted, for the reason Mattermost's is.
 		return fmt.Errorf("config: the Slack bot needs HALIPHRON_SLACK_ROLE")
 	}
-	switch s.ReplyPolicy {
-	case store.ChatReplyAlways, store.ChatReplyIfUnanswered:
-	default:
-		return fmt.Errorf("config: HALIPHRON_SLACK_REPLY_POLICY is %q; it is always or if_unanswered", s.ReplyPolicy)
-	}
 	if s.BaseBranch != "" && s.RepoURL == "" {
 		return fmt.Errorf("config: HALIPHRON_SLACK_BASE_BRANCH is set without HALIPHRON_SLACK_REPO")
-	}
-	if s.RunURL != "" && !strings.Contains(s.RunURL, "{id}") {
-		return fmt.Errorf("config: HALIPHRON_SLACK_RUN_URL has no {id} for the run identifier")
 	}
 	if s.MaxPostRunes < 1000 || s.MaxPostRunes > 65535 {
 		return fmt.Errorf("config: HALIPHRON_SLACK_MAX_POST_RUNES is %d; it is between 1000 and 65535", s.MaxPostRunes)

@@ -492,14 +492,8 @@ variable.
 {{- if and .Values.mattermost.baseBranch (not .Values.mattermost.repo) -}}
 {{- fail "mattermost.baseBranch is set without mattermost.repo" -}}
 {{- end -}}
-{{- if and .Values.mattermost.runURL (not (contains "{id}" .Values.mattermost.runURL)) -}}
-{{- fail (printf "mattermost.runURL is %q and has no {id} for the run identifier" .Values.mattermost.runURL) -}}
-{{- end -}}
 {{- if not (has .Values.mattermost.transport (list "websocket" "webhook" "both")) -}}
 {{- fail (printf "mattermost.transport is %q; it is websocket, webhook or both" .Values.mattermost.transport) -}}
-{{- end -}}
-{{- if not (has .Values.mattermost.replyPolicy (list "always" "if_unanswered")) -}}
-{{- fail (printf "mattermost.replyPolicy is %q; it is always or if_unanswered" .Values.mattermost.replyPolicy) -}}
 {{- end -}}
 {{- if and (ne .Values.mattermost.transport "websocket") (not .Values.mattermost.existingSecret) (not .Values.mattermost.webhookToken) -}}
 {{- fail (printf "mattermost.transport is %s, which needs the outgoing webhook's token: set mattermost.webhookToken, or put it in mattermost.existingSecret under mattermost.existingSecretWebhookKey" .Values.mattermost.transport) -}}
@@ -527,12 +521,6 @@ The Slack bot, refused here for whatever the backend would refuse at startup.
 {{- end -}}
 {{- if and .Values.slack.baseBranch (not .Values.slack.repo) -}}
 {{- fail "slack.baseBranch is set without slack.repo" -}}
-{{- end -}}
-{{- if and .Values.slack.runURL (not (contains "{id}" .Values.slack.runURL)) -}}
-{{- fail (printf "slack.runURL is %q and has no {id} for the run identifier" .Values.slack.runURL) -}}
-{{- end -}}
-{{- if not (has .Values.slack.replyPolicy (list "always" "if_unanswered")) -}}
-{{- fail (printf "slack.replyPolicy is %q; it is always or if_unanswered" .Values.slack.replyPolicy) -}}
 {{- end -}}
 {{- end -}}
 

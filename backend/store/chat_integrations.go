@@ -29,8 +29,6 @@ type ChatIntegration struct {
 	Role           string
 	RepoURL        string
 	BaseBranch     string
-	RunURL         string
-	ReplyPolicy    string
 	MaxPostRunes   int
 	MaxThreadBytes int
 	UpdatedBy      string
@@ -42,11 +40,11 @@ type ChatIntegration struct {
 func (s *Store) ChatIntegration(ctx context.Context, platform string) (ChatIntegration, error) {
 	var c ChatIntegration
 	err := s.db.QueryRowContext(ctx, `
-		SELECT platform, enabled, transport, url, role, repo_url, base_branch, run_url,
-		       reply_policy, max_post_runes, max_thread_bytes, updated_by, updated_at
+		SELECT platform, enabled, transport, url, role, repo_url, base_branch,
+		       max_post_runes, max_thread_bytes, updated_by, updated_at
 		  FROM chat_integrations WHERE platform = $1`, platform).Scan(
 		&c.Platform, &c.Enabled, &c.Transport, &c.URL, &c.Role, &c.RepoURL, &c.BaseBranch,
-		&c.RunURL, &c.ReplyPolicy, &c.MaxPostRunes, &c.MaxThreadBytes, &c.UpdatedBy, &c.UpdatedAt)
+		&c.MaxPostRunes, &c.MaxThreadBytes, &c.UpdatedBy, &c.UpdatedAt)
 	if errors.Is(err, sql.ErrNoRows) {
 		return ChatIntegration{}, ErrNotFound
 	}
@@ -63,22 +61,20 @@ func (s *Store) PutChatIntegration(ctx context.Context, c ChatIntegration) (Chat
 	var out ChatIntegration
 	err := s.db.QueryRowContext(ctx, `
 		INSERT INTO chat_integrations (platform, enabled, transport, url, role, repo_url, base_branch,
-		                               run_url, reply_policy, max_post_runes, max_thread_bytes,
-		                               updated_by, updated_at)
-		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, clock_timestamp())
+		                               max_post_runes, max_thread_bytes, updated_by, updated_at)
+		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, clock_timestamp())
 		ON CONFLICT (tenant_id, platform) DO UPDATE SET
 		       enabled = EXCLUDED.enabled, transport = EXCLUDED.transport, url = EXCLUDED.url,
 		       role = EXCLUDED.role, repo_url = EXCLUDED.repo_url,
-		       base_branch = EXCLUDED.base_branch, run_url = EXCLUDED.run_url,
-		       reply_policy = EXCLUDED.reply_policy, max_post_runes = EXCLUDED.max_post_runes,
+		       base_branch = EXCLUDED.base_branch, max_post_runes = EXCLUDED.max_post_runes,
 		       max_thread_bytes = EXCLUDED.max_thread_bytes, updated_by = EXCLUDED.updated_by,
 		       updated_at = EXCLUDED.updated_at
-		RETURNING platform, enabled, transport, url, role, repo_url, base_branch, run_url,
-		          reply_policy, max_post_runes, max_thread_bytes, updated_by, updated_at`,
-		c.Platform, c.Enabled, c.Transport, c.URL, c.Role, c.RepoURL, c.BaseBranch, c.RunURL,
-		c.ReplyPolicy, c.MaxPostRunes, c.MaxThreadBytes, c.UpdatedBy).Scan(
+		RETURNING platform, enabled, transport, url, role, repo_url, base_branch,
+		          max_post_runes, max_thread_bytes, updated_by, updated_at`,
+		c.Platform, c.Enabled, c.Transport, c.URL, c.Role, c.RepoURL, c.BaseBranch,
+		c.MaxPostRunes, c.MaxThreadBytes, c.UpdatedBy).Scan(
 		&out.Platform, &out.Enabled, &out.Transport, &out.URL, &out.Role, &out.RepoURL,
-		&out.BaseBranch, &out.RunURL, &out.ReplyPolicy, &out.MaxPostRunes, &out.MaxThreadBytes,
+		&out.BaseBranch, &out.MaxPostRunes, &out.MaxThreadBytes,
 		&out.UpdatedBy, &out.UpdatedAt)
 	if err != nil {
 		return ChatIntegration{}, fmt.Errorf("store: save chat integration %s: %w", c.Platform, err)

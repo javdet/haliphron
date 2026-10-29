@@ -12,7 +12,7 @@ import (
 func validIntegration() store.ChatIntegration {
 	return store.ChatIntegration{
 		Platform: "mattermost", Enabled: true, Transport: store.ChatTransportBoth,
-		URL: "https://chat.example", Role: DefaultChatRole, ReplyPolicy: store.ChatReplyIfUnanswered,
+		URL: "https://chat.example", Role: DefaultChatRole,
 		MaxPostRunes: DefaultChatPostRunes, MaxThreadBytes: DefaultChatThreadBytes,
 	}
 }
@@ -28,8 +28,6 @@ func TestAnEnabledIntegrationNeedsItsServerItsRoleAndItsTokens(t *testing.T) {
 		"bot_token":      func(_ *store.ChatIntegration, have *ChatCredentials) { have.Bot = false },
 		"webhook_tokens": func(_ *store.ChatIntegration, have *ChatCredentials) { have.Webhook = false },
 		"transport":      func(c *store.ChatIntegration, _ *ChatCredentials) { c.Transport = "carrier-pigeon" },
-		"reply_policy":   func(c *store.ChatIntegration, _ *ChatCredentials) { c.ReplyPolicy = "sometimes" },
-		"run_url":        func(c *store.ChatIntegration, _ *ChatCredentials) { c.RunURL = "https://ui/runs" },
 		"base_branch":    func(c *store.ChatIntegration, _ *ChatCredentials) { c.BaseBranch = "main" },
 		"max_post_runes": func(c *store.ChatIntegration, _ *ChatCredentials) { c.MaxPostRunes = 10 },
 	} {
@@ -91,14 +89,11 @@ func TestSlackIsReachedOverSocketModeOnly(t *testing.T) {
 	}
 }
 
-func TestSlackDefaultsToTheBackendReplyingForTheAgents(t *testing.T) {
+func TestSlackDefaultsToItsOwnPostLimit(t *testing.T) {
 	c := defaultChatIntegration(ChatPlatformSlack)
-	if c.ReplyPolicy != store.ChatReplyAlways || c.MaxPostRunes != DefaultSlackPostRunes ||
-		c.Role != DefaultChatRole || c.Transport != store.ChatTransportWebSocket {
+	if c.MaxPostRunes != DefaultSlackPostRunes || c.Role != DefaultChatRole ||
+		c.Transport != store.ChatTransportWebSocket {
 		t.Errorf("defaults = %+v", c)
-	}
-	if got := defaultChatIntegration(ChatPlatformMattermost).ReplyPolicy; got != store.ChatReplyIfUnanswered {
-		t.Errorf("Mattermost's default reply policy moved to %q", got)
 	}
 }
 

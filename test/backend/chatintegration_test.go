@@ -21,100 +21,32 @@ import (
 	"github.com/automagicops/haliphron/fake/controller"
 )
 
-// The chat integration as the UI configures it, the reply an agent owes when
-// it answers in the thread itself, and the child runs a chat request fans out
-// into.
+// The chat integration as the UI configures it, the reply a run owes when it
+// has no answer of its own, and the child runs a chat request fans out into.
 
 const mmWebhookToken = "mm-webhook-token-91c2"
 
-func ifUnanswered(c *app.ChatConfig) { c.ReplyPolicy = store.ChatReplyIfUnanswered }
-
-// agentAnswers is the agent posting in the thread through its own chat tools,
-// as a bot account other than the listener's.
-func (f *fakeMattermost) agentAnswers(root, text string) {
-	f.Seed(mmPost{ID: "agentpost" + root[:17], UserID: "agent-bot", ChannelID: mmChannel, RootID: root,
-		Message: text, Props: map[string]any{"from_bot": "true"}})
-}
-
-func TestUnderIfUnansweredTheBotOnlyReactsAndStaysSilentWhenTheAgentAnswered(t *testing.T) {
+func TestARunThatSucceededWithoutSayingAnythingGetsOnePlainSentence(t *testing.T) {
 	h := newHarness(t)
 	h.chatRole(t)
 	f := newFakeMattermost(t)
 	c := newController(t, h)
-	bot := h.chatReplica(t, f, ifUnanswered)
-	const msg = "post00000000000000000000u1"
-
-	if got, err := bot.Chat.Handle(context.Background(), mention(msg, "why is CI red?")); err != nil || got != app.ChatStarted {
-		t.Fatalf("handle: %s %v", got, err)
-	}
-	if n := len(f.BotPosts()); n != 0 {
-		t.Errorf("%d posts from the bot before the run ended, want only a reaction", n)
-	}
-	if rs := f.Reactions(); len(rs) != 1 || rs[0].EmojiName != "eyes" {
-		t.Errorf("reactions = %+v", rs)
-	}
-
-	id := h.runs(t)[0].ID
-	time.Sleep(5 * time.Millisecond)
-	f.agentAnswers(msg, "CI is red because of the lint step.")
-	h.finish(t, c, id, controller.Outcome{ExitCode: runv1.ExitSuccess, Summary: "answered in chat"})
-
-	if n := bot.Deliver(t); n != 0 {
-		t.Errorf("posted %d replies to a thread the agent answered", n)
-	}
-	var replied bool
-	if err := h.Store.DB().QueryRow(`SELECT replied_at IS NOT NULL FROM chat_triggers WHERE message_id = $1`,
-		msg).Scan(&replied); err != nil || !replied {
-		t.Errorf("the reply is still owed: %v %v", replied, err)
-	}
-}
-
-func TestUnderIfUnansweredARunThatSucceededIsNotReportedEvenIfNothingAnswered(t *testing.T) {
-	h := newHarness(t)
-	h.chatRole(t)
-	f := newFakeMattermost(t)
-	c := newController(t, h)
-	bot := h.chatReplica(t, f, ifUnanswered)
+	bot := h.chatReplica(t, f)
 	const msg = "post00000000000000000000u2"
 
 	if _, err := bot.Chat.Handle(context.Background(), mention(msg, "check the backups")); err != nil {
 		t.Fatalf("handle: %v", err)
 	}
-	h.finish(t, c, h.runs(t)[0].ID, controller.Outcome{ExitCode: runv1.ExitSuccess, Summary: "backups ok"})
-
-	if n := bot.Deliver(t); n != 0 {
-		t.Errorf("posted %d replies for a run that succeeded", n)
-	}
-	if n := len(f.BotPosts()); n != 0 {
-		t.Errorf("%d posts from the bot, want only a reaction", n)
-	}
-	var replied bool
-	if err := h.Store.DB().QueryRow(`SELECT replied_at IS NOT NULL FROM chat_triggers WHERE message_id = $1`,
-		msg).Scan(&replied); err != nil || !replied {
-		t.Errorf("the reply is still owed: %v %v", replied, err)
-	}
-}
-
-func TestUnderIfUnansweredAFailureIsReportedEvenIfTheAgentPostedFirst(t *testing.T) {
-	h := newHarness(t)
-	h.chatRole(t)
-	f := newFakeMattermost(t)
-	c := newController(t, h)
-	bot := h.chatReplica(t, f, ifUnanswered)
-	const msg = "post00000000000000000000u3"
-
-	if _, err := bot.Chat.Handle(context.Background(), mention(msg, "migrate the db")); err != nil {
-		t.Fatalf("handle: %v", err)
-	}
-	time.Sleep(5 * time.Millisecond)
-	f.agentAnswers(msg, "On it.")
-	h.finish(t, c, h.runs(t)[0].ID, controller.Outcome{ExitCode: 1, Summary: "could not connect"})
+	id := h.runs(t)[0].ID
+	h.finish(t, c, id, controller.Outcome{ExitCode: runv1.ExitSuccess})
 
 	if n := bot.Deliver(t); n != 1 {
-		t.Fatalf("delivered %d replies, want the failure", n)
+		t.Fatalf("delivered %d replies, want 1", n)
 	}
-	if r := f.postsOfKind(app.ChatPostResult); len(r) != 1 || !strings.Contains(r[0].Message, "**Failed**") {
-		t.Errorf("results = %+v", r)
+	results := f.postsOfKind(app.ChatPostResult)
+	if len(results) != 1 || !strings.Contains(results[0].Message, "couldn't finish") ||
+		strings.Contains(results[0].Message, string(id)) || results[0].RootID != msg {
+		t.Errorf("results = %+v", results)
 	}
 }
 
@@ -123,7 +55,7 @@ func TestAChildOfAChatRunIsToldWhereTheMessageCameFromAndOwesTheSamePersonAReply
 	h.chatRole(t)
 	f := newFakeMattermost(t)
 	c := newController(t, h)
-	bot := h.chatReplica(t, f, ifUnanswered)
+	bot := h.chatReplica(t, f)
 	const msg = "post00000000000000000000c1"
 	ctx := context.Background()
 
@@ -140,8 +72,8 @@ func TestAChildOfAChatRunIsToldWhereTheMessageCameFromAndOwesTheSamePersonAReply
 		r.CreatedBy, r.CreatedVia = "run:"+string(parent.ID), "agent"
 	})
 	prompt := h.prompt(t, child.ID)
-	for _, want := range []string{"message_id: " + msg + "\n", "thread_root_id: " + msg + "\n",
-		"channel: ci, type O\n", "sender: @alice", "--- end of chat message ---\n\nfix the build"} {
+	for _, want := range []string{"channel: ci, type O\n", "sender: @alice\n",
+		"--- end of chat message ---\n\nfix the build"} {
 		if !strings.Contains(prompt, want) {
 			t.Errorf("the child's prompt is missing %q:\n%s", want, prompt)
 		}
@@ -150,24 +82,30 @@ func TestAChildOfAChatRunIsToldWhereTheMessageCameFromAndOwesTheSamePersonAReply
 		r.Prompt, r.Role, r.ParentRunID, r.Depth = "write the test", mmRole, child.ID, child.Depth+1
 		r.CreatedBy, r.CreatedVia = "run:"+string(child.ID), "agent"
 	})
-	if p := h.prompt(t, grandchild.ID); !strings.Contains(p, "message_id: "+msg+"\n") {
-		t.Errorf("a grandchild was not told the message it answers:\n%s", p)
+	if p := h.prompt(t, grandchild.ID); !strings.Contains(p, "channel: ci, type O\n") {
+		t.Errorf("a grandchild was not told where the message came from:\n%s", p)
 	}
 
-	// The classificator routed and exited; the child failed without a word.
-	time.Sleep(5 * time.Millisecond)
-	f.agentAnswers(msg, "Routing this to the oncall role.")
-	h.finish(t, c, parent.ID, controller.Outcome{ExitCode: runv1.ExitSuccess, Summary: "routed"})
-	h.finish(t, c, child.ID, controller.Outcome{ExitCode: 1, Summary: "the compiler is missing"})
+	// The classificator routed and exited, the child handed on to the
+	// grandchild, and the grandchild failed. Only the grandchild had the
+	// answer to give, and only its row posts.
+	h.finish(t, c, parent.ID, controller.Outcome{ExitCode: runv1.ExitSuccess, Summary: "Routing this to oncall."})
+	h.finish(t, c, child.ID, controller.Outcome{ExitCode: runv1.ExitSuccess, Summary: "Asked for a test."})
+	h.finish(t, c, grandchild.ID, controller.Outcome{ExitCode: 1, Summary: "the compiler is missing"})
 
 	bot.Deliver(t)
 	results := f.postsOfKind(app.ChatPostResult)
 	if len(results) != 1 {
-		t.Fatalf("%d replies, want only the child's failure: %+v", len(results), results)
+		t.Fatalf("%d replies, want only the grandchild's: %+v", len(results), results)
 	}
-	if r := results[0]; r.RootID != msg || r.Props["haliphron_run_id"] != string(child.ID) ||
-		!strings.Contains(r.Message, "the compiler is missing") {
+	if r := results[0]; r.RootID != msg || r.Props["haliphron_run_id"] != string(grandchild.ID) ||
+		!strings.Contains(r.Message, "couldn't finish") {
 		t.Errorf("reply = %+v", r)
+	}
+	var owed int
+	if err := h.Store.DB().QueryRow(`SELECT count(*) FROM chat_triggers WHERE replied_at IS NULL`).
+		Scan(&owed); err != nil || owed != 0 {
+		t.Errorf("%d replies still owed (%v), want the delegating runs settled", owed, err)
 	}
 }
 
@@ -186,8 +124,7 @@ func (h *harness) saveIntegration(t *testing.T, f *fakeMattermost, transport str
 	t.Helper()
 	bot, hook := mmToken, mmWebhookToken
 	if _, err := h.App.PutChatIntegration(context.Background(), mattermost.Name, app.ChatIntegrationRequest{
-		Enabled: true, Transport: transport, URL: f.URL, Role: mmRole,
-		ReplyPolicy: store.ChatReplyIfUnanswered, MaxThreadBytes: 1 << 16,
+		Enabled: true, Transport: transport, URL: f.URL, Role: mmRole, MaxThreadBytes: 1 << 16,
 		BotToken: &bot, WebhookTokens: &hook,
 	}, "test"); err != nil {
 		t.Fatalf("save the integration: %v", err)
@@ -243,7 +180,7 @@ func TestAWebhookDeliveryStartsARunFromThePostTheServerReports(t *testing.T) {
 	if r.Role != mmRole || r.CreatedBy != "mattermost:alice" {
 		t.Errorf("run %s by %s, want the integration's role and the post's real author", r.Role, r.CreatedBy)
 	}
-	for _, want := range []string{"channel: ops, type O\n", "message_id: " + msg + "\n",
+	for _, want := range []string{"channel: ops, type O\n", "sender: @alice\n",
 		"--- end of chat message ---\n\nthe disk on db-1 is full"} {
 		if !strings.Contains(prompt, want) {
 			t.Errorf("prompt is missing %q:\n%s", want, prompt)

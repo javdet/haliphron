@@ -214,18 +214,12 @@ encryption key is not even that: it is a file, because a variable is visible in
 - name: HALIPHRON_MATTERMOST_BASE_BRANCH
   value: {{ . | quote }}
 {{- end }}
-{{- with .Values.mattermost.runURL }}
-- name: HALIPHRON_MATTERMOST_RUN_URL
-  value: {{ . | quote }}
-{{- end }}
 - name: HALIPHRON_MATTERMOST_MAX_POST_RUNES
   value: {{ .Values.mattermost.maxPostRunes | quote }}
 - name: HALIPHRON_MATTERMOST_MAX_THREAD_BYTES
   value: {{ .Values.mattermost.maxThreadBytes | quote }}
 - name: HALIPHRON_MATTERMOST_TRANSPORT
   value: {{ .Values.mattermost.transport | quote }}
-- name: HALIPHRON_MATTERMOST_REPLY_POLICY
-  value: {{ .Values.mattermost.replyPolicy | quote }}
 {{- if (include "haliphron.mattermostWebhook" .) }}
 - name: HALIPHRON_MATTERMOST_WEBHOOK_TOKEN_FILE
   value: /haliphron/mattermost/{{ include "haliphron.mattermostWebhookKey" . }}
@@ -256,16 +250,10 @@ encryption key is not even that: it is a file, because a variable is visible in
 - name: HALIPHRON_SLACK_BASE_BRANCH
   value: {{ . | quote }}
 {{- end }}
-{{- with .Values.slack.runURL }}
-- name: HALIPHRON_SLACK_RUN_URL
-  value: {{ . | quote }}
-{{- end }}
 - name: HALIPHRON_SLACK_MAX_POST_RUNES
   value: {{ .Values.slack.maxPostRunes | quote }}
 - name: HALIPHRON_SLACK_MAX_THREAD_BYTES
   value: {{ .Values.slack.maxThreadBytes | quote }}
-- name: HALIPHRON_SLACK_REPLY_POLICY
-  value: {{ .Values.slack.replyPolicy | quote }}
 {{- end }}
 
 - name: HALIPHRON_SWEEP_INTERVAL

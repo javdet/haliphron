@@ -276,7 +276,7 @@ managed secret. It is how a plugin's MCP server gets a credential: claude-code
 expands `${NAME}` in a plugin's `.mcp.json` from its own environment.
 
 ```json
-"secretEnv": [{"name": "MATTERMOST_TOKEN", "secret": "mattermost-agent-token"}]
+"secretEnv": [{"name": "GRAFANA_TOKEN", "secret": "grafana-agent-token"}]
 ```
 
 The secret must exist when the role is saved, or the role is refused with a 422
@@ -287,9 +287,10 @@ proceeds without the variable. Every value is redacted from the run's logs.
 
 **The agent can read these.** This is the one deliberate exception to keeping
 credentials out of the agent's environment (ADR 39 in the
-[architecture](../architecture.md)). Give it a narrow credential — for a chat
-bot, a separate account that is a member only of the channels it answers in —
-never an administrator's, and never a token another system already uses.
+[architecture](../architecture.md)). Give it a narrow credential — a read-only
+token, scoped to what the role needs — never an administrator's, and never a
+token another system already uses. A chat token is never one of them: agents do
+not post in chat, the backend posts their answers.
 
 ### Reserved names
 

@@ -1,6 +1,10 @@
 package v1
 
-import "encoding/json"
+import (
+	"encoding/json"
+	"fmt"
+	"strings"
+)
 
 // The structured output of a run, as it lands in storage under
 // runs/{runID}/output.json.
@@ -117,4 +121,19 @@ type OutputArtifact struct {
 	// +optional
 	// +kubebuilder:validation:MaxLength=128
 	ContentType string `json:"contentType,omitempty"`
+}
+
+// NoAnswerHeading opens the result.md the entrypoint writes when the agent
+// produced no text of its own: a machine summary of how the run went, in place
+// of an answer. A reader that shows only what the agent said — the chat reply
+// — tells the two apart by it, so the entrypoint writes it through this
+// function and the reader checks with IsNoAnswerSummary.
+func NoAnswerHeading(runID ULID, attempt int32) string {
+	return fmt.Sprintf("# Run %s, attempt %d\n\n", runID, attempt)
+}
+
+// IsNoAnswerSummary reports whether a run's summary is the entrypoint's machine
+// summary rather than the agent's words, for any attempt of the run.
+func IsNoAnswerSummary(runID ULID, summary string) bool {
+	return strings.HasPrefix(summary, "# Run "+string(runID)+", attempt ")
 }

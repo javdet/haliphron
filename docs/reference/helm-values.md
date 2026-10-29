@@ -205,7 +205,6 @@ timeout below it.
 | `mattermost.role` | `""` | required when enabled; anyone who can reach the bot can use it |
 | `mattermost.repo` | `""` | empty runs without a repository |
 | `mattermost.baseBranch` | `""` | needs `mattermost.repo` |
-| `mattermost.runURL` | `""` | must contain `{id}` |
 | `mattermost.token` | `""` | written to the credentials Secret |
 | `mattermost.existingSecret` | `""` | preferred over `token` |
 | `mattermost.existingSecretKey` | `token` | |
@@ -214,7 +213,6 @@ timeout below it.
 | `mattermost.transport` | `websocket` | `websocket`, `webhook` or `both` |
 | `mattermost.webhookToken` | `""` | the outgoing webhooks' tokens, one per line; written to the credentials Secret |
 | `mattermost.existingSecretWebhookKey` | `webhookToken` | the key of `mattermost.existingSecret` holding the webhook tokens |
-| `mattermost.replyPolicy` | `always` | `always` or `if_unanswered` |
 
 These values are one of two ways to configure the bot. The other is the UI
 (Integrations → Mattermost), which needs no rollout and keeps the tokens with
@@ -242,7 +240,6 @@ traffic admitted by `networkPolicy.ingressFrom` for the webhook.
 | `slack.role` | `""` | required when enabled; anyone who can reach the app can use it |
 | `slack.repo` | `""` | empty runs without a repository |
 | `slack.baseBranch` | `""` | needs `slack.repo` |
-| `slack.runURL` | `""` | must contain `{id}` |
 | `slack.botToken` | `""` | `xoxb-`; written to the credentials Secret |
 | `slack.appToken` | `""` | `xapp-`; written to the credentials Secret |
 | `slack.existingSecret` | `""` | preferred over the literals |
@@ -250,7 +247,6 @@ traffic admitted by `networkPolicy.ingressFrom` for the webhook.
 | `slack.existingSecretAppTokenKey` | `appToken` | |
 | `slack.maxPostRunes` | `4000` | |
 | `slack.maxThreadBytes` | `65536` | |
-| `slack.replyPolicy` | `always` | `always` or `if_unanswered` |
 
 As with Mattermost, the UI (Integrations → Slack) is the other way to configure
 the bot, and is read-only while `slack.enabled` is on. Either

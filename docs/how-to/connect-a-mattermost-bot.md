@@ -5,9 +5,9 @@ The bot turns a message into a run. Someone writes
 > @devops_duty why are the ingress pods on staging restarting?
 
 in a channel the bot belongs to. Haliphron runs an agent under the role you
-chose for the bot, with that message as the prompt, and the answer arrives in
-the same thread: either posted by the agent itself, or by the bot when the run
-ends.
+chose for the bot, with that message and its thread as the prompt. The bot
+reacts with :eyes:, and when the run ends it posts the agent's answer in the
+same thread: the answer alone, with no run identifier, status, cost or link.
 
 One bot per installation, one role per bot. The role is the whole of what the
 bot may do, and **anyone who can reach the bot can use it**. Mattermost channel
@@ -59,9 +59,8 @@ This is the account the backend listens and replies as. In Mattermost:
 Direct messages to the bot need no invitation and no mention: every message
 in a one-to-one conversation with the bot is a request.
 
-If the agents are going to answer in the thread themselves, you will create a
-**second** bot account for them later. Do not hand this one's token to an
-agent. See [let agents answer in the thread](#let-agents-answer-in-the-thread).
+Agents never post in Mattermost and get no Mattermost token. Do not hand this
+one's token to a role.
 
 ## Configure the bot from the UI
 
@@ -80,12 +79,9 @@ On **Integrations → Mattermost**:
    how messages arrive](#choose-how-messages-arrive).
 4. **Role**: `classificator` unless you want every request to run under one
    fixed role.
-5. **Replies**: see [choose a reply policy](#choose-a-reply-policy). A
-   configuration saved from the UI defaults to *if unanswered*.
-6. Under **Advanced**, optionally a repository and base branch for every run,
-   a run link with `{id}` for the run identifier, and the post and thread
-   limits.
-7. Switch it on and save.
+5. Under **Advanced**, optionally a repository and base branch for every run,
+   and the post and thread limits.
+6. Switch it on and save.
 
 The same configuration is `PUT /api/v1/integrations/mattermost`; see the [REST
 API reference](../reference/rest-api.md#integrations). A switched-off
@@ -112,10 +108,8 @@ mattermost:
   existingSecret: haliphron-mattermost
   # Optional:
   transport: websocket              # or webhook, or both
-  replyPolicy: always               # or if_unanswered
   repo: https://github.com/example/infra    # point runs at a repository
   baseBranch: main
-  runURL: https://haliphron.example.com/runs/{id}   # link replies to the UI
 ```
 
 ```sh
@@ -241,111 +235,26 @@ It routes rather than works. For each request it:
 1. reads the message and the quoted thread;
 2. calls `list_roles` on the haliphron MCP server and picks the role whose
    description fits best, never `classificator` itself;
-3. posts one or two lines in the thread saying which role will handle it and
-   why, through the Mattermost tools of its plugins, **before** starting
-   anything, so that the note is never mistaken for the answer;
-4. calls `run_agent` asynchronously with that role and a self-contained task
-   that tells the agent to answer in the same thread;
-5. stops.
+3. calls `run_agent` asynchronously with that role and a self-contained task
+   that tells the agent its final answer is posted to the person as written;
+4. stops.
 
-A request it can answer in a sentence it answers itself, and an unclear one
-gets one clarifying question. It runs without a repository, and passes one to
-the child only when the request names it.
+When it starts an agent, nothing it says is posted: the person hears from that
+agent. A request it can answer in a sentence it answers itself, and an unclear
+one gets one clarifying question; then its own final answer is the reply. It
+runs without a repository, and passes one to the child only when the request
+names it. It needs no chat tools and no Mattermost token.
 
-Out of the box it cannot post anything. Its `settings.json` enables no plugin,
-and its `secretEnv` names a secret that does not exist yet. The next section
-supplies both. Role descriptions are what it chooses by, so write them for
-that reader: what the role does and what it will not do.
+Role descriptions are what it chooses by, so write them for that reader: what
+the role does and what it will not do.
 
-## Let agents answer in the thread
+An installation seeded by an earlier version keeps the classificator it was
+seeded with, which tells the agent to post in the thread itself. Open it under
+**Roles**, replace its description and system prompt with the ones in
+`backend/app/defaults/classificator.json`, and remove its `MATTERMOST_TOKEN`
+secret variable and any Mattermost plugin.
 
-An agent answers in Mattermost through an MCP server, as a bot account of its
-own. Six things have to be in place.
-
-### 1. Create a separate bot account for agent replies
-
-Create a second bot account, for example `devops_agent`, the same way as the
-first. Add it **only** to the channels it should answer in.
-
-This token goes into the agent's environment, and the agent runs
-model-generated commands in a repository that may contain a prompt injection.
-Treat the token as readable by the agent, because it is. A narrow account
-bounds what a leaked token can do. Never reuse the listener's token, nor the
-token of a bot another system such as n8n already uses.
-
-### 2. Store its token as a managed secret
-
-Under **Secrets**, or:
-
-```sh
-curl -sX PUT https://haliphron.example.com/api/v1/secrets/mattermost-agent-token \
-  -H "Authorization: Bearer $ADMIN_TOKEN" -H 'Content-Type: application/json' \
-  -d '{"value": "yyyyyyyyyyyyyyyyyyyyyyyyyy"}'
-```
-
-Do this before editing any role that names it: a role whose `secretEnv` names
-a secret that does not exist is refused when it is saved.
-
-### 3. Publish a plugin that declares the Mattermost MCP server
-
-A claude-code plugin in a marketplace repository, with a `.mcp.json` at the
-plugin's root. The token is not written into the file; it is expanded from the
-agent's environment:
-
-```json
-{
-  "mcpServers": {
-    "mattermost": {
-      "type": "http",
-      "url": "https://mattermost-mcp.example.com/mcp",
-      "headers": {
-        "Authorization": "Bearer ${MATTERMOST_TOKEN}"
-      }
-    }
-  }
-}
-```
-
-The exact server entry depends on the Mattermost MCP implementation you
-choose: some are a hosted HTTP endpoint like the one above, others a `stdio`
-command that reads the token from an environment variable. What matters is that
-the token arrives as `${MATTERMOST_TOKEN}`.
-
-The marketplace must be `owner/repo` on GitHub or an `https://` git URL. A
-private one is cloned with the run's git token. A run without a repository,
-like the classificator's, is given a git token minted for the role's first
-marketplace, bound to that host and no other.
-
-### 4. Enable the plugin in the classificator and in every role that answers
-
-Each role that should post in chat needs the plugin and the variable. In the
-role's **Config files**, a `settings.json` in claude-code's own format:
-
-```json
-{
-  "extraKnownMarketplaces": {
-    "example-chat": {"source": {"source": "github", "repo": "example/claude-plugins"}}
-  },
-  "enabledPlugins": {"mattermost@example-chat": true}
-}
-```
-
-and under **Secret variables**, `MATTERMOST_TOKEN` from the secret
-`mattermost-agent-token`. As a spec:
-
-```json
-"secretEnv": [{"name": "MATTERMOST_TOKEN", "secret": "mattermost-agent-token"}]
-```
-
-The backend reads only `enabledPlugins` and `extraKnownMarketplaces` from that
-file and turns them into the role's plugins. The rest of the file is not
-applied. A role that sets `plugins` directly does the same job. See the [role
-spec](../reference/role-spec.md#settingsjson-as-the-roles-plugins).
-
-The classificator starts children under other roles, so the roles it picks
-need this too, or the child does its work and cannot say so.
-
-### 5. Give agents `run_agent`
+## Let the classificator start agents
 
 The classificator starts its child through the haliphron MCP server, and a pod
 gets a per-run MCP token only when the installation knows where that server is
@@ -358,23 +267,15 @@ helm upgrade haliphron deploy/charts/haliphron -n haliphron --reuse-values \
 
 See [call Haliphron over MCP](call-haliphron-over-mcp.md#let-agents-start-their-own-runs).
 
-### 6. Make both endpoints reachable on public addresses
-
 Agent pods may reach public addresses only. The runtime chart's NetworkPolicy
 allows `0.0.0.0/0` minus RFC1918 and link-local ranges
 (`agents.networkPolicy.exceptCIDRs`). So `mcpEndpoint` must be a public
-hostname, never the in-cluster Service, and the Mattermost server, or the MCP
-server in front of it, must be reachable on a public address as well. If yours
-are not, narrow the exceptions in the runtime chart instead.
-
-### Tool policy
+hostname, never the in-cluster Service. If it is not, narrow the exceptions in
+the runtime chart instead.
 
 A role with no `toolPolicy.allow` gets every tool the installation permits. A
-role that sets `allow` must list the MCP tools too: `mcp__haliphron__*` for
-`list_roles` and `run_agent`, and the plugin's MCP tools under the names
-claude-code gives them (`mcp__plugin_<plugin>_<server>__*` in current
-releases; the run log's `claude mcp list` output shows the exact server name).
-Otherwise the agent sees the servers and is refused every call.
+role that sets `allow` must list `mcp__haliphron__*` for `list_roles` and
+`run_agent`, or the agent sees the server and is refused every call.
 
 ### What every agent is told
 
@@ -384,11 +285,8 @@ Every prompt from chat opens with a block the system writes:
 --- chat message ---
 platform: mattermost
 channel: town-square (Town Square), type O
-channel_id: 4xp9…
-message_id: 8kq2…
-thread_root_id: 8kq2…
-sender: @alice (user id 9zt1…)
-A reply to this message belongs in channel_id 4xp9… under root_id 8kq2….
+sender: @alice
+Your final answer is posted in the thread as the reply, exactly as you write it, and nothing else about this run is. Write it for the person who asked. If you start another run with run_agent, your final answer is not posted: that run's is. Do not post in the chat yourself.
 --- end of chat message ---
 ```
 
@@ -396,36 +294,37 @@ Everything after it is the sender's text. Each value is flattened onto its
 line, control characters removed and runs of dashes collapsed, so a display
 name cannot end the block early and write lines of its own into it.
 
+The block carries no channel, post or user identifiers. The backend keeps them,
+and that is what ties a run to its thread: an agent never has to repeat one
+back, and has nothing to post with by hand.
+
 A child started by a run that came from chat, through `run_agent` or through
 REST with that run's token, gets the same block prepended to its prompt by
-admission. The parent does not have to copy it, and cannot get it wrong.
+admission, and owes the same thread its answer. The parent does not have to
+copy either, and cannot get them wrong.
 
-## Choose a reply policy
+## What gets posted
 
-The policy is frozen on each request when it is claimed, so changing it does
-not change what a run already in flight owes.
+The bot posts nothing while a run works; the :eyes: reaction is the whole
+acknowledgement. When a run ends:
 
-- **`always`**: the bot reacts with :eyes:, replies "Started run …", and posts
-  the run's result in the thread when it ends. Use it when the agents do not
-  post in chat. It is the default for a configuration from the environment.
-- **`if_unanswered`**: the bot only reacts with :eyes:. When the run ends:
-  - a run that did not succeed is always reported, whatever it posted before;
-  - a run that succeeded is not reported, whether or not the agent posted in
-    the thread.
+- **It succeeded and wrote an answer**: the answer is posted in the thread,
+  exactly as the agent wrote it, with mentions defused.
+- **It started another run**: nothing. That run's answer is the reply, and so
+  on down the chain, so a request routed by the classificator gets one post,
+  from the agent that did the work.
+- **It failed, timed out, or ended without an answer**: one plain sentence,
+  *Sorry, I couldn't finish this. Please try again.* What it wrote before it
+  stopped is not the answer it was on its way to.
+- **It was cancelled**: *This request was cancelled.*
 
-  It is the default for a configuration saved from the UI, and the one to use
-  when the agents answer in the thread.
+A reply never says the work was done. `Succeeded` means only that the agent
+exited with code 0, and whether a run reached it is on the run's page, with
+its cost, its pull request and its log.
 
-`Succeeded` means the agent exited with code 0, not that the person was
-answered. Under `if_unanswered`, an agent that exits 0 without posting leaves
-the thread with only the :eyes: reaction; the run's result is in the UI.
-
-A child run started from a chat run owes the same person a reply as well. When
-it is inserted, it gets a follow-up record pointing at the same thread, under
-the same policy, and grandchildren inherit it in turn. For a child under
-`if_unanswered`, only posts after the child started count as its answer, so the
-classificator's routing note does not silence a child that never answered.
-Under `always`, every child's result is posted in the thread.
+Every new message in a thread is a new run that reads the whole thread again,
+earlier answers included, so the agent needs no memory of its own to carry a
+conversation.
 
 ## Check that it works
 
@@ -433,15 +332,15 @@ Under `always`, every child's result is posted in the thread.
 kubectl -n haliphron logs deploy/haliphron | grep -i mattermost
 ```
 
-Look for `the Mattermost bot is running`, with its transport, role and reply
-policy, and, for the WebSocket, `connected to the Mattermost server`. A line
+Look for `the Mattermost bot is running`, with its transport and role, and,
+for the WebSocket, `connected to the Mattermost server`. A line
 saying the server `refused the bot's token` means the token is wrong or
 revoked. A line saying the bot's role `does not exist` means the role is
 missing. `a webhook delivery carried an unknown token` means the token pasted
 into the UI is not the webhook's.
 
-Then mention the bot in a channel it belongs to. It reacts with :eyes:. Under
-`always` it also replies with the run's identifier. The run appears in the UI
+Then mention the bot in a channel it belongs to. It reacts with :eyes:, and
+posts nothing until the answer is ready. The run appears in the UI
 and in `GET /api/v1/runs` with `created_via` `mattermost` and `created_by`
 `mattermost:<username>`.
 
@@ -455,28 +354,19 @@ and in `GET /api/v1/runs` with `created_via` `mattermost` and `created_by`
   the thread is longer, the first message and the newest ones are kept and the
   middle is left out. A mention with no text, inside a thread, asks about the
   thread.
-- **The replies.** Under `always`, the bot sends three things:
-  - an :eyes: reaction and a short "Started run …" reply when the run is
-    admitted;
-  - a refusal instead, if nothing was started;
-  - the result in the same thread when the run ends. That covers its
-    summary, the pull request if one was opened, its cost, and the link.
-
-  Under `if_unanswered`, the reaction, the refusal, and the result only when
-  the run did not succeed. A result longer than the
-  post limit (`max_post_runes`) is cut, with a note saying where the rest is.
-- **What "Succeeded" means.** The reply says *the agent exited with code 0*.
-  It does not mean the problem was solved, and the bot does not say it was.
+- **The replies.** An :eyes: reaction when the run is admitted, or a refusal
+  instead if nothing was started, and then the answer as described in [what
+  gets posted](#what-gets-posted). An answer longer than the post limit
+  (`max_post_runes`) is cut and ends with an ellipsis; the whole of it is on
+  the run's page.
 - **What is not a request.** The bot ignores its own posts, other bots,
   webhooks, system messages and edits. Over the WebSocket, in a channel, it
   also ignores any message that does not mention it. A webhook delivery is
   addressed to the bot by construction.
 - **Mentions in the result.** `@channel`, `@here` and every other `@` in the
   agent's text are defused before posting. The agent read a repository that
-  may have been written to manipulate it, and its summary must not be able to
-  page a team. This applies to what the bot posts. What an agent posts through
-  its own bot account is that account's, and the account's channel membership
-  is what bounds it.
+  may have been written to manipulate it, and its answer must not be able to
+  page a team.
 
 ## Limits
 

@@ -503,30 +503,35 @@ reaper 30 days after they were claimed, once answered.
 is in 0006: the constraint is dropped and re-added with the whole list written
 out.
 
-**`reply_policy` is frozen on the row when the message is claimed** (0009).
-`always` is what 0007 did: an acknowledgement, then the run's result.
-`if_unanswered` is for an agent that answers in the thread itself: the bot only
-reacts. A run that did not reach `Succeeded` is always reported — whatever it
-posted before it failed is not the answer it was on its way to. A run that did
-is never reported: the row is marked replied with no post, whether or not the
-agent said anything in the thread. Frozen, because an operator changing the policy while a
-run is in flight must not change what that run owes. Rows written before 0009
-read as `always`, which is what they were claimed under.
+**The reply is the agent's answer and nothing else** (0013). The bot reacts to
+the message when the run is admitted and posts nothing else until a run ends.
+Then the reply loop posts the run's summary, the agent's final answer, as it
+was written: no run identifier, status, cost or link. A run that did not reach
+`Succeeded`, one whose report never arrived, and one whose summary is empty or
+is the entrypoint's no-answer stub (`runv1.IsNoAnswerSummary`) get one plain
+sentence instead. Whatever a failed run wrote before it stopped is not the
+answer it was on its way to, and exit code 0 is all `Succeeded` means. A
+cancelled run is told as cancelled. **A run that started a run of its own is
+settled without a post**: the reply loop selects, with each row, whether any
+run names its run as `parent_run_id`, and marks such a row replied with no
+`reply_post_id`. Its answer is its child's, which has a follow-up row of its
+own. Agents never post in chat, so nothing in the thread is read to decide.
+0009's `reply_policy` column, on both `chat_triggers` and `chat_integrations`,
+is dropped with the choice it carried, and so is `chat_integrations.run_url`.
 
 **A child of a chat run owes the same person a reply, through a follow-up
 row.** When `InsertRun` inserts a run with a parent, it inserts — in the same
 transaction, for the same reason the claim is linked there — a row copying the
-parent's row: platform, channel, thread, sender, `channel_name`,
-`channel_type` and `reply_policy`. Its `message_id` is `run:` and the child's
+parent's row: platform, channel, thread, sender, `channel_name` and
+`channel_type`. Its `message_id` is `run:` and the child's
 identifier, which is not a chat message and is never claimed;
 `origin_message_id` is the message the whole tree answers; `run_id` is the
 child. A parent with no row gives its child none, and a grandchild inherits
 through its parent's follow-up by the same statement. A follow-up is due at once
-and selected only when its run ends, like any row with a run. For a follow-up,
-an answer counts only after the child's `started_at`, so that what the parent
-said before the child ran — the classificator's routing note, typically — is not
-taken for the child's answer. Admission reads the same row to prepend the chat
-header to a child's prompt. A follow-up is never written from anywhere but
+and selected only when its run ends, like any row with a run. Admission reads
+the same row to prepend the chat header to a child's prompt. The header names
+the platform, the channel and the sender, and carries no identifiers: what ties
+the child to the thread is this row, not anything the agent repeats back. A follow-up is never written from anywhere but
 `InsertRun`: a child committed without one is a child whose failure nobody is
 told about.
 
@@ -708,17 +713,15 @@ The chat rules 0009 added are store and `app` together, so they are exercised
 in [test/backend](../../test/backend) (`chatintegration_test.go`) against the
 same real PostgreSQL rather than here:
 
-- [x] under `if_unanswered` the bot only reacts, and posts nothing when a bot account answered the thread after the claim
-- [x] under `if_unanswered` a run that succeeded is not reported, even when nothing answered the thread
-- [x] under `if_unanswered` a run that did not succeed is reported even if the agent posted first
-- [x] a child and a grandchild of a chat run are told where the message came from, and a child that fails without a word is reported in the parent's thread even though the parent's routing note answered the parent
+- [x] a run that succeeded without an answer gets one plain sentence, with no run identifier
+- [x] a child and a grandchild of a chat run are told where the message came from; the runs that handed the request on are settled without a post, and only the grandchild that had the answer replies in the parent's thread
 - [x] a run not started from chat gives its children no chat header
 
 The Slack adapter is exercised end to end in the same suite
 (`slack_test.go`), against a fake workspace:
 
 - [x] a mention inside a thread starts a classificator run whose prompt quotes the whole thread
-- [x] the classificator's result and the result of the run it started are both posted in the thread, as mrkdwn, with mentions defused
+- [x] only the answer of the run the classificator started is posted in the thread, as mrkdwn, with mentions defused; the classificator's own row is settled without a post
 - [x] the same event handled by two replicas starts one run
 - [x] the integration keeps both tokens write-only
 - [x] the default roles are seeded once and stay deleted when deleted

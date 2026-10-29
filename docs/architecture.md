@@ -1331,6 +1331,12 @@ a role may name managed secrets under `secretEnv`, the backend resolves them
 when it cuts the lease into the per-run Secret's `agent-env.json`, and the
 entrypoint appends them to the agent's environment.
 
+Chat no longer needs it. Since migration 0013 agents do not post in chat: the
+backend posts each run's final answer in the thread itself and ties child runs
+to the thread through `chat_triggers`, so the default `classificator` carries
+no chat token. `secretEnv` stays for the other plugins that need a credential,
+and the controls below apply to them unchanged.
+
 What that costs is stated plainly: the agent can read the value, and the agent
 works in a repository that may contain a prompt injection. The controls are the
 ones that do not depend on the agent behaving:

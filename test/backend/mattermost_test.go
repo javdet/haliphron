@@ -287,7 +287,7 @@ func (h *harness) chatReplica(t *testing.T, f *fakeMattermost, opts ...mmChatCon
 	if err != nil {
 		t.Fatal(err)
 	}
-	cfg := app.ChatConfig{Role: mmRole, RepoURL: mmRepo, RunURL: "https://haliphron.example/runs/{id}"}
+	cfg := app.ChatConfig{Role: mmRole, RepoURL: mmRepo}
 	for _, opt := range opts {
 		opt(&cfg)
 	}
@@ -424,14 +424,8 @@ func TestAMentionStartsARunWithTheConfiguredRoleAndSaysWhereItCameFrom(t *testin
 
 	f.Emit(mmPost{ID: "post0000000000000000000001", UserID: "user-alice", ChannelID: mmChannel,
 		Message: "@devops_duty restart the ingress on staging"}, "O", []string{mmBotID})
-	// Two posts are handled: the mention, and the bot's own acknowledgement,
-	// which the server echoes back while the mention's handler is still
-	// returning. Either may finish first; the second must start nothing.
-	outcomes := map[app.ChatOutcome]int{}
-	outcomes[bot.Outcome(t)]++
-	outcomes[bot.Outcome(t)]++
-	if outcomes[app.ChatStarted] != 1 || outcomes[app.ChatIgnored] != 1 {
-		t.Fatalf("outcomes = %v, want the mention started and the bot's own post ignored", outcomes)
+	if got := bot.Outcome(t); got != app.ChatStarted {
+		t.Fatalf("outcome = %s, want the mention started", got)
 	}
 
 	runs := h.runs(t)
@@ -449,27 +443,24 @@ func TestAMentionStartsARunWithTheConfiguredRoleAndSaysWhereItCameFrom(t *testin
 	if !strings.HasSuffix(got, "--- end of chat message ---\n\nrestart the ingress on staging") {
 		t.Errorf("prompt = %q, want the chat header and then the message without the mention", got)
 	}
-	for _, want := range []string{"platform: mattermost\n", "message_id: post0000000000000000000001\n",
-		"channel_id: " + mmChannel + "\n", "sender: @alice (user id user-alice)\n"} {
+	for _, want := range []string{"platform: mattermost\n", "sender: @alice\n"} {
 		if !strings.Contains(got, want) {
 			t.Errorf("the chat header is missing %q:\n%s", want, got)
 		}
 	}
+	for _, id := range []string{"post0000000000000000000001", mmChannel, "user-alice"} {
+		if strings.Contains(got, id) {
+			t.Errorf("the prompt carries the identifier %q:\n%s", id, got)
+		}
+	}
 
-	eventually(t, "the acknowledgement", func() bool { return len(f.postsOfKind(app.ChatPostAck)) == 1 })
-	ack := f.postsOfKind(app.ChatPostAck)[0]
-	if ack.RootID != "post0000000000000000000001" || ack.ChannelID != mmChannel {
-		t.Errorf("ack posted in %s under %q, want the trigger's thread", ack.ChannelID, ack.RootID)
-	}
-	if !strings.Contains(ack.Message, string(r.ID)) || !strings.Contains(ack.Message, "https://haliphron.example/runs/"+string(r.ID)) {
-		t.Errorf("ack does not name the run or link to it: %q", ack.Message)
-	}
+	// The reaction is the whole acknowledgement: nothing is posted until the
+	// agent has an answer.
 	if rs := f.Reactions(); len(rs) != 1 || rs[0].EmojiName != "eyes" || rs[0].UserID != mmBotID {
 		t.Errorf("reactions = %+v, want the bot's eyes", rs)
 	}
-
-	if n := len(h.runs(t)); n != 1 {
-		t.Errorf("%d runs after the bot's own post, want 1", n)
+	if posts := f.BotPosts(); len(posts) != 0 {
+		t.Errorf("the bot posted before the run ended: %+v", posts)
 	}
 
 	// The bot's token is a credential that speaks as the bot to everyone it
@@ -481,7 +472,7 @@ func TestAMentionStartsARunWithTheConfiguredRoleAndSaysWhereItCameFrom(t *testin
 	}
 }
 
-func TestTheResultIsPostedInTheThreadOfTheMessageThatAskedForIt(t *testing.T) {
+func TestTheAgentsAnswerAloneIsPostedInTheThreadOfTheMessageThatAskedForIt(t *testing.T) {
 	h := newHarness(t)
 	h.chatRole(t)
 	f := newFakeMattermost(t)
@@ -511,11 +502,8 @@ func TestTheResultIsPostedInTheThreadOfTheMessageThatAskedForIt(t *testing.T) {
 	if reply.RootID != "post0000000000000000000002" || reply.ChannelID != mmChannel {
 		t.Errorf("reply posted in %s under %q, want the trigger's thread", reply.ChannelID, reply.RootID)
 	}
-	for _, want := range []string{"The lint step fails on main.go:12.", "exited with code 0",
-		"https://github.com/example/infra/pull/9"} {
-		if !strings.Contains(reply.Message, want) {
-			t.Errorf("reply is missing %q:\n%s", want, reply.Message)
-		}
+	if reply.Message != "The lint step fails on main.go:12." {
+		t.Errorf("reply is %q, want the agent's answer and nothing about the run", reply.Message)
 	}
 	if reply.Props["haliphron_run_id"] != string(id) {
 		t.Errorf("reply metadata = %v", reply.Props)
@@ -557,13 +545,12 @@ func TestAMentionInsideAThreadCarriesTheThreadAsContext(t *testing.T) {
 	if strings.Count(prompt, "find the cause") != 1 {
 		t.Errorf("the request is quoted as its own context:\n%s", prompt)
 	}
-	acks := f.postsOfKind(app.ChatPostAck)
-	if len(acks) != 1 || acks[0].RootID != m.RootID {
-		t.Errorf("acks = %+v, want one under the thread's root", acks)
+	if posts := f.BotPosts(); len(posts) != 0 {
+		t.Errorf("the bot posted before the run ended: %+v", posts)
 	}
 }
 
-func TestTheSameMessageSeenByTwoReplicasStartsOneRunAndOneAck(t *testing.T) {
+func TestTheSameMessageSeenByTwoReplicasStartsOneRunAndOneReaction(t *testing.T) {
 	h := newHarness(t)
 	h.chatRole(t)
 	f := newFakeMattermost(t)
@@ -573,21 +560,15 @@ func TestTheSameMessageSeenByTwoReplicasStartsOneRunAndOneAck(t *testing.T) {
 
 	f.Emit(mmPost{ID: "post0000000000000000000003", UserID: "user-alice", ChannelID: mmChannel,
 		Message: "@devops_duty rotate the certs"}, "O", []string{mmBotID})
-	// Each replica handles two posts: the mention, and the one acknowledgement
-	// the winner posted, echoed to both.
 	outcomes := map[app.ChatOutcome]int{}
-	for _, r := range []*chatReplica{one, two, one, two} {
+	for _, r := range []*chatReplica{one, two} {
 		outcomes[r.Outcome(t)]++
 	}
-	if outcomes[app.ChatStarted] != 1 || outcomes[app.ChatDuplicate] != 1 || outcomes[app.ChatIgnored] != 2 {
-		t.Errorf("outcomes = %v, want one started, one duplicate and the ack ignored twice", outcomes)
+	if outcomes[app.ChatStarted] != 1 || outcomes[app.ChatDuplicate] != 1 {
+		t.Errorf("outcomes = %v, want one started and one duplicate", outcomes)
 	}
 	if n := len(h.runs(t)); n != 1 {
 		t.Errorf("%d runs, want 1", n)
-	}
-	eventually(t, "the acknowledgement", func() bool { return len(f.postsOfKind(app.ChatPostAck)) >= 1 })
-	if n := len(f.postsOfKind(app.ChatPostAck)); n != 1 {
-		t.Errorf("%d acknowledgements, want 1", n)
 	}
 	if n := len(f.Reactions()); n != 1 {
 		t.Errorf("%d reactions, want 1", n)
@@ -621,7 +602,7 @@ func TestAReplyOwedBeforeARestartIsPostedAfterIt(t *testing.T) {
 	}
 }
 
-func TestAFailedRunIsReportedWithItsStatusAndNotAsASuccess(t *testing.T) {
+func TestAFailedRunIsAnsweredWithOnePlainSentence(t *testing.T) {
 	h := newHarness(t)
 	h.chatRole(t)
 	f := newFakeMattermost(t)
@@ -642,7 +623,8 @@ func TestAFailedRunIsReportedWithItsStatusAndNotAsASuccess(t *testing.T) {
 	if len(results) != 1 {
 		t.Fatalf("%d results, want 1", len(results))
 	}
-	if msg := results[0].Message; !strings.Contains(msg, "**Failed**") || strings.Contains(msg, "code 0") {
+	if msg := results[0].Message; !strings.Contains(msg, "couldn't finish") ||
+		strings.Contains(msg, string(id)) || strings.Contains(msg, "database") {
 		t.Errorf("a failure was reported as:\n%s", msg)
 	}
 }
@@ -674,7 +656,7 @@ func TestARunWhoseReportNeverArrivesIsAnsweredAfterTheGrace(t *testing.T) {
 	if n := bot.Deliver(t); n != 1 {
 		t.Fatalf("delivered %d replies after the grace, want 1", n)
 	}
-	if msg := f.postsOfKind(app.ChatPostResult)[0].Message; !strings.Contains(msg, "report never arrived") {
+	if msg := f.postsOfKind(app.ChatPostResult)[0].Message; !strings.Contains(msg, "couldn't finish") {
 		t.Errorf("reply is:\n%s", msg)
 	}
 }
@@ -692,8 +674,8 @@ func TestARefusedMentionIsAnsweredAndStartsNothing(t *testing.T) {
 	if n := len(h.runs(t)); n != 0 {
 		t.Errorf("%d runs started from a refused mention", n)
 	}
-	if n := len(f.postsOfKind(app.ChatPostAck)); n != 0 {
-		t.Errorf("a refused mention was acknowledged as started")
+	if n := len(f.Reactions()); n != 0 {
+		t.Errorf("a refused mention was reacted to as started")
 	}
 
 	if n := bot.Deliver(t); n != 1 {
@@ -760,12 +742,8 @@ func TestADirectMessageNeedsNoMentionAndOtherAutomationStartsNothing(t *testing.
 
 	f.Emit(mmPost{ID: "dm00000000000000000000001", UserID: "user-alice", ChannelID: "dm-alice",
 		Message: "which pods are crashlooping?"}, "D", nil)
-	// The direct message and the acknowledgement it causes, in either order.
-	outcomes := map[app.ChatOutcome]int{}
-	outcomes[bot.Outcome(t)]++
-	outcomes[bot.Outcome(t)]++
-	if outcomes[app.ChatStarted] != 1 || outcomes[app.ChatIgnored] != 1 {
-		t.Fatalf("outcomes = %v, want the direct message started", outcomes)
+	if got := bot.Outcome(t); got != app.ChatStarted {
+		t.Fatalf("the direct message was %s, want started", got)
 	}
 	runs := h.runs(t)
 	if len(runs) != 1 || !strings.HasSuffix(h.prompt(t, runs[0].ID), "\nwhich pods are crashlooping?") ||

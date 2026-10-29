@@ -204,20 +204,21 @@ leaves it off.
 | `HALIPHRON_MATTERMOST_ROLE` | — | required; the role every run from the bot is admitted under |
 | `HALIPHRON_MATTERMOST_REPO` | — | the repository runs are pointed at; empty runs without one |
 | `HALIPHRON_MATTERMOST_BASE_BRANCH` | — | needs `HALIPHRON_MATTERMOST_REPO` |
-| `HALIPHRON_MATTERMOST_RUN_URL` | — | a link to a run in the UI, with `{id}` for the run identifier |
 | `HALIPHRON_MATTERMOST_MAX_POST_RUNES` | `16383` | the server's post length limit; between 1000 and 65535 |
 | `HALIPHRON_MATTERMOST_MAX_THREAD_BYTES` | `65536` | how much thread history is quoted into a prompt |
 | `HALIPHRON_MATTERMOST_TRANSPORT` | `websocket` | `websocket` (the backend dials the server), `webhook` (the server calls `POST /api/v1/integrations/mattermost/webhook`) or `both` |
 | `HALIPHRON_MATTERMOST_WEBHOOK_TOKEN_FILE` | — | path to the outgoing webhooks' tokens, one per line; checked first |
 | `HALIPHRON_MATTERMOST_WEBHOOK_TOKEN` | — | the tokens themselves, separated by newlines or commas |
-| `HALIPHRON_MATTERMOST_REPLY_POLICY` | `always` | `always`, or `if_unanswered` for an agent that answers in the thread itself |
 
 The process refuses to start when the URL is set and the token or the role is
-missing, when the transport or the reply policy is not one of its values, and
-when a `webhook` or `both` transport has no webhook token. A configuration saved
-from the UI defaults to `if_unanswered` instead; the environment keeps
-`always`, which is what it did before the policy existed. A role that does not exist yet is only a warning: every mention is
-refused until it is created. See [connect a Mattermost
+missing, when the transport is not one of its values, and when a `webhook` or
+`both` transport has no webhook token. A role that does not exist yet is only a
+warning: every mention is refused until it is created.
+
+The bot reacts to a request and, when the run ends, posts the agent's answer in
+the thread and nothing else; there is no setting for it.
+`HALIPHRON_MATTERMOST_REPLY_POLICY` and `HALIPHRON_MATTERMOST_RUN_URL` no longer
+exist, and a deployment that still sets them is not refused: they are ignored. See [connect a Mattermost
 bot](../how-to/connect-a-mattermost-bot.md).
 
 ### Slack bot
@@ -239,10 +240,8 @@ Mode, a connection the backend opens, so nothing has to reach the backend.
 | `HALIPHRON_SLACK_ROLE` | — | required; the role every run from the bot is admitted under |
 | `HALIPHRON_SLACK_REPO` | — | the repository runs are pointed at; empty runs without one |
 | `HALIPHRON_SLACK_BASE_BRANCH` | — | needs `HALIPHRON_SLACK_REPO` |
-| `HALIPHRON_SLACK_RUN_URL` | — | a link to a run in the UI, with `{id}` for the run identifier |
 | `HALIPHRON_SLACK_MAX_POST_RUNES` | `4000` | the longest reply; between 1000 and 65535 |
 | `HALIPHRON_SLACK_MAX_THREAD_BYTES` | `65536` | how much thread history is quoted into a prompt |
-| `HALIPHRON_SLACK_REPLY_POLICY` | `always` | `always`, or `if_unanswered` for a role that brings Slack tools of its own |
 
 The process refuses to start when the bot is enabled and either token or the
 role is missing, or when a value is not one of its values. See [connect a Slack

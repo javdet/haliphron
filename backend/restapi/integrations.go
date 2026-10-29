@@ -25,8 +25,6 @@ type chatIntegrationRequest struct {
 	Role           string `json:"role"`
 	Repo           string `json:"repo"`
 	BaseBranch     string `json:"base_branch"`
-	RunURL         string `json:"run_url"`
-	ReplyPolicy    string `json:"reply_policy"`
 	MaxPostRunes   int    `json:"max_post_runes"`
 	MaxThreadBytes int    `json:"max_thread_bytes"`
 	// Write-only. Absent keeps what is stored.
@@ -44,8 +42,6 @@ type chatIntegrationBody struct {
 	Role                   string     `json:"role"`
 	Repo                   string     `json:"repo"`
 	BaseBranch             string     `json:"base_branch"`
-	RunURL                 string     `json:"run_url"`
-	ReplyPolicy            string     `json:"reply_policy"`
 	MaxPostRunes           int        `json:"max_post_runes"`
 	MaxThreadBytes         int        `json:"max_thread_bytes"`
 	BotTokenConfigured     bool       `json:"bot_token_configured"`
@@ -96,8 +92,6 @@ func (s *Server) putChatIntegration(w http.ResponseWriter, r *http.Request, c ca
 		Role:           req.Role,
 		RepoURL:        req.Repo,
 		BaseBranch:     req.BaseBranch,
-		RunURL:         req.RunURL,
-		ReplyPolicy:    req.ReplyPolicy,
 		MaxPostRunes:   req.MaxPostRunes,
 		MaxThreadBytes: req.MaxThreadBytes,
 		BotToken:       req.BotToken,
@@ -122,8 +116,6 @@ func chatIntegrationResponse(platform string, c app.ChatIntegration) chatIntegra
 		Role:                   c.Role,
 		Repo:                   c.RepoURL,
 		BaseBranch:             c.BaseBranch,
-		RunURL:                 c.RunURL,
-		ReplyPolicy:            c.ReplyPolicy,
 		MaxPostRunes:           c.MaxPostRunes,
 		MaxThreadBytes:         c.MaxThreadBytes,
 		BotTokenConfigured:     c.BotTokenConfigured,

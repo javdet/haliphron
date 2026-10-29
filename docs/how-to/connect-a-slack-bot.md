@@ -11,17 +11,19 @@ message as the request.
 
 The default role is the `classificator`. It does no work itself. It reads the
 request, picks the role that fits with `list_roles`, and starts an agent under
-that role with `run_agent`. The bot then reports in the same thread:
+that role with `run_agent`. In the thread, the person sees:
 
-1. it reacts with 👀 and posts the classificator's run identifier;
-2. it posts the classificator's answer when it ends: which role took the
-   request and why, or a short answer or clarifying question when no run was
-   needed;
-3. it posts the result of every run the classificator started when that run
-   ends.
+1. a 👀 reaction on their message, when the run starts;
+2. the answer, when the run that has it ends: the agent's final answer, as it
+   wrote it, with no run identifier, status, cost or link.
 
-The agents hold no Slack credentials. The backend speaks for them, which is
-why a Slack configuration defaults to the `always` reply policy.
+When the classificator starts another agent, that agent's answer is the reply
+and the classificator says nothing. When it needs no other agent, its own short
+answer or clarifying question is the reply. A run that fails, or ends without
+an answer, gets one plain sentence. The details of every run are in the UI.
+
+The agents hold no Slack credentials and never post in Slack. The backend
+posts for them, and ties every run to the thread itself.
 
 One app per installation, one role per app, and **anyone who can reach the app
 can use the role**. Make it a least-privilege one; the classificator is, since
@@ -111,9 +113,7 @@ Under **Integrations → Slack**:
    other roles it chooses from are the ones you defined; give each a
    `description` that says what it is for, because that is what the
    classificator reads.
-3. Leave **Replies** at *The bot acknowledges and posts every result*.
-4. Optionally set the **Run link**, so each reply links to the run in the UI.
-5. Tick **Enabled** and save. Within 15 seconds the backend logs
+3. Tick **Enabled** and save. Within 15 seconds the backend logs
    `connected to Slack`.
 
 ## Or configure it in the chart
@@ -129,7 +129,6 @@ kubectl -n haliphron create secret generic haliphron-slack \
 slack:
   enabled: true
   role: classificator
-  runURL: https://haliphron.example.com/runs/{id}
   existingSecret: haliphron-slack
 ```
 
@@ -139,13 +138,12 @@ needs a `kubectl rollout restart`.
 ## An installation that already has a classificator
 
 The default roles are seeded once and never overwritten. A `classificator`
-created before Slack support was added still says to post through Mattermost
-tools. On Slack it has none, so the post fails and the routing still happens,
-but its final answer is less useful than it could be. Open the role under
-**Roles** and replace its system prompt with the one in
-`backend/app/defaults/classificator.json`. That prompt tells the agent to post
-only when it has tools for the platform the header names, and otherwise to
-leave the reply to the bot.
+seeded by an earlier version still tells the agent to post in the thread
+itself, and to say which role took the request. Open the role under **Roles**,
+replace its description and system prompt with the ones in
+`backend/app/defaults/classificator.json`, and remove its `MATTERMOST_TOKEN`
+secret variable. The current prompt says that the agent never posts, and that
+when it starts another agent, that agent's answer is the reply.
 
 ## What the agent is told
 
@@ -155,30 +153,30 @@ Every prompt opens with a block the system writes:
 --- chat message ---
 platform: slack
 channel: ops, type O
-channel_id: C0OPS00001
-message_id: C0OPS00001:1700000000.000300
-thread_root_id: C0OPS00001:1700000000.000100
-sender: @alice (user id U0ALICE)
-A reply to this message belongs in channel_id C0OPS00001 under root_id C0OPS00001:1700000000.000100.
+sender: @alice
+Your final answer is posted in the thread as the reply, exactly as you write it, and nothing else about this run is. Write it for the person who asked. If you start another run with run_agent, your final answer is not posted: that run's is. Do not post in the chat yourself.
 --- end of chat message ---
 ```
 
-A Slack message is identified by its channel and its timestamp together, so
-both identifiers are written as `<channel>:<ts>`. After the block come the
-thread's earlier messages, bounded by **Thread context**, and then the request.
-A child run that the classificator starts gets the same block, and its result
-is posted in the same thread.
+The block carries no channel, message or user identifiers. The backend keeps
+them, and that is what ties a run, and every run it starts, to the thread.
+After the block come the thread's earlier messages, earlier answers included,
+bounded by **Thread context**, and then the request. Every new message in the
+thread is a new run that reads the whole thread again, so the agent needs no
+memory of its own. A child run that the classificator starts gets the same
+block, and its answer is posted in the same thread.
 
 ## Check it
 
-- Mention the app in a thread. Expect 👀, then a post naming the run.
+- Mention the app in a thread. Expect 👀 and nothing else while the work runs.
 - In the UI, open the run and read its prompt. The thread should be quoted
   above the request.
-- When the classificator ends, expect its answer in the thread. When the run it
-  started ends, expect that run's result there too.
+- When the run that has the answer ends, expect that answer in the thread, and
+  only that.
 
-"Succeeded" in a reply means the agent exited with code 0, and nothing more.
-Read the summary under it.
+A reply says nothing about whether the run succeeded: it is the agent's own
+words. Whether a run reached `Succeeded`, which means only that the agent
+exited with code 0, is on the run's page.
 
 ## When it does not answer
 

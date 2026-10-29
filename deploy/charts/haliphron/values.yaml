@@ -428,10 +428,6 @@ mattermost:
   repo: ""
   baseBranch: ""
 
-  # A link to a run in the UI, with {id} where the run identifier goes, e.g.
-  # https://haliphron.example.com/runs/{id}. Empty means replies carry none.
-  runURL: ""
-
   # The bot account's access token. existingSecret is the better answer: a
   # literal here ends up in the release's own storage, which `helm get values`
   # can read.
@@ -443,8 +439,7 @@ mattermost:
   existingSecret: ""
   existingSecretKey: token
 
-  # The server's post length limit (MaxPostSize). A longer result is cut, with
-  # a note saying where the rest is.
+  # The server's post length limit (MaxPostSize). A longer answer is cut.
   maxPostRunes: 16383
   # How much of a thread is quoted into the prompt as context.
   maxThreadBytes: 65536
@@ -460,11 +455,6 @@ mattermost:
   # set.
   webhookToken: ""
   existingSecretWebhookKey: webhookToken
-
-  # always: the bot acknowledges each request and posts the run's result.
-  # if_unanswered: for a role whose agent answers in the thread itself; the
-  # bot only reacts, and posts the result only when the run did not succeed.
-  replyPolicy: always
 
 # -----------------------------------------------------------------------------
 # The Slack bot
@@ -506,9 +496,6 @@ slack:
   repo: ""
   baseBranch: ""
 
-  # A link to a run in the UI, with {id} where the run identifier goes.
-  runURL: ""
-
   # The app's bot token (xoxb-) and app-level token (xapp-, with
   # connections:write). existingSecret is the better answer, for the reason it
   # is for Mattermost. Both are read once at startup.
@@ -518,17 +505,10 @@ slack:
   existingSecretBotTokenKey: botToken
   existingSecretAppTokenKey: appToken
 
-  # The longest reply posted. Slack recommends 4000; a longer result is cut,
-  # with a note saying where the rest is.
+  # The longest reply posted. Slack recommends 4000; a longer answer is cut.
   maxPostRunes: 4000
   # How much of a thread is quoted into the prompt as context.
   maxThreadBytes: 65536
-
-  # always: the bot acknowledges each request and posts every run's result.
-  # The agents hold no Slack credentials, so this is the policy that gets the
-  # person an answer. if_unanswered suits only roles that bring Slack tools of
-  # their own.
-  replyPolicy: always
 
 # -----------------------------------------------------------------------------
 # The UI

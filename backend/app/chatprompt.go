@@ -11,11 +11,11 @@ import (
 
 // The prompt a chat message becomes.
 //
-// Every prompt opens with a header saying where the message came from: the
-// platform, the channel, the message, the thread a reply belongs in and who
-// sent it. An agent that answers in the thread itself needs exactly those
-// identifiers, and an agent that does not is told nothing it can misuse — they
-// are all things the sender could see.
+// Every prompt opens with a header saying where the message came from — the
+// platform, the channel and who sent it — and that the agent's final answer is
+// the reply. It carries no identifiers: the agent never posts in chat, and
+// what ties a run, and the runs it starts, to the thread is the backend's
+// chat_triggers row, not anything the agent repeats back.
 //
 // After the header, a message outside a thread is the request as typed, with
 // the mention removed. A message inside a thread is a request that leans on
@@ -46,47 +46,26 @@ type ChatOrigin struct {
 	// direct message the name the platform displays.
 	ChannelName string
 	ChannelType string
-	ChannelID   string
-	MessageID   string
-	// ThreadID is the root a reply is posted under.
-	ThreadID string
-	UserID   string
-	Username string
+	Username    string
 }
 
 // chatOriginOf is the origin of a message as the adapter decoded it.
 func chatOriginOf(platform string, m ChatMessage) ChatOrigin {
-	thread := m.RootID
-	if thread == "" {
-		thread = m.ID
-	}
 	return ChatOrigin{
 		Platform:    platform,
 		ChannelName: chatChannelName(m),
 		ChannelType: m.ChannelType,
-		ChannelID:   m.ChannelID,
-		MessageID:   m.ID,
-		ThreadID:    thread,
-		UserID:      m.UserID,
 		Username:    m.Username,
 	}
 }
 
-// chatOriginOfTrigger is the origin a stored row records. For a follow-up the
-// message is the one the whole tree answers.
+// chatOriginOfTrigger is the origin a stored row records. For a follow-up it
+// is the origin of the message the whole tree answers.
 func chatOriginOfTrigger(t store.ChatTrigger) ChatOrigin {
-	message := t.MessageID
-	if t.OriginMessageID != "" {
-		message = t.OriginMessageID
-	}
 	return ChatOrigin{
 		Platform:    t.Platform,
 		ChannelName: t.ChannelName,
 		ChannelType: t.ChannelType,
-		ChannelID:   t.ChannelID,
-		MessageID:   message,
-		ThreadID:    t.ThreadID,
-		UserID:      t.UserID,
 		Username:    t.Username,
 	}
 }
@@ -108,6 +87,12 @@ func chatChannelName(m ChatMessage) string {
 const (
 	chatHeaderOpen  = "--- chat message ---\n"
 	chatHeaderClose = "--- end of chat message ---\n\n"
+	// chatHeaderReply is the one instruction the header gives, and the same
+	// for every role: the agent's final answer is what gets posted.
+	chatHeaderReply = "Your final answer is posted in the thread as the reply, exactly as you " +
+		"write it, and nothing else about this run is. Write it for the person who asked. " +
+		"If you start another run with run_agent, your final answer is not posted: that " +
+		"run's is. Do not post in the chat yourself.\n"
 	// chatHeaderValueBytes bounds one value. Names are short; an identifier
 	// that is not is not one this header should carry whole.
 	chatHeaderValueBytes = 256
@@ -137,21 +122,12 @@ func RenderChatHeader(o ChatOrigin) string {
 		channel += ", type " + chatHeaderValue(o.ChannelType)
 	}
 	line("channel", channel)
-	line("channel_id", o.ChannelID)
-	line("message_id", o.MessageID)
-	line("thread_root_id", o.ThreadID)
 	sender := "@" + chatHeaderValue(o.Username)
 	if o.Username == "" {
 		sender = "someone"
 	}
-	if o.UserID != "" {
-		sender += " (user id " + chatHeaderValue(o.UserID) + ")"
-	}
 	line("sender", sender)
-	if o.ChannelID != "" && o.ThreadID != "" {
-		fmt.Fprintf(&b, "A reply to this message belongs in channel_id %s under root_id %s.\n",
-			chatHeaderValue(o.ChannelID), chatHeaderValue(o.ThreadID))
-	}
+	b.WriteString(chatHeaderReply)
 	b.WriteString(chatHeaderClose)
 	return b.String()
 }

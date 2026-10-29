@@ -1013,6 +1013,11 @@ func TestAnAgentThatSaidNothingStillProducesAResult(t *testing.T) {
 	if !strings.Contains(result, string(h.prepared.RunID)) {
 		t.Errorf("the stub does not name its own run: %q", result)
 	}
+	// The chat reply posts the agent's words and nothing else, and this is how
+	// it tells the stub from them.
+	if !runv1.IsNoAnswerSummary(h.prepared.RunID, result) {
+		t.Errorf("the stub does not open with runv1.NoAnswerHeading: %q", result)
+	}
 }
 
 func TestUsageIsNormalisedForBothRuntimes(t *testing.T) {

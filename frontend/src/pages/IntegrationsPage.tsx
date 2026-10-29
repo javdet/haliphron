@@ -1,8 +1,7 @@
 import { useEffect, useId, useState } from 'react'
-import { Link } from 'react-router-dom'
 import { useChatIntegration, usePutChatIntegration, useRoles } from '../api/hooks'
 import { Card, CopyButton, ErrorBanner, Field, Section, Spinner, Time } from '../components/ui'
-import type { ChatIntegration, ChatPlatform, ChatReplyPolicy, ChatTransport } from '../api/types'
+import type { ChatIntegration, ChatPlatform, ChatTransport } from '../api/types'
 
 /**
  * The chat integrations: a Mattermost bot and a Slack app whose messages become
@@ -28,11 +27,6 @@ const TRANSPORT_HINT: Record<ChatTransport, string> = {
   both: 'Either way in. A post that arrives both ways starts one run.',
 }
 
-const POLICY_LABEL: Record<ChatReplyPolicy, string> = {
-  if_unanswered: 'The agent answers; the bot reports only failures',
-  always: 'The bot acknowledges and posts every result',
-}
-
 interface FormState {
   enabled: boolean
   transport: ChatTransport
@@ -40,8 +34,6 @@ interface FormState {
   role: string
   repo: string
   baseBranch: string
-  runURL: string
-  replyPolicy: ChatReplyPolicy
   maxPostRunes: string
   maxThreadBytes: string
   botToken: string
@@ -59,8 +51,6 @@ function fromIntegration(c: ChatIntegration): FormState {
     role: c.role,
     repo: c.repo,
     baseBranch: c.base_branch,
-    runURL: c.run_url || `${window.location.origin}/runs/{id}`,
-    replyPolicy: c.reply_policy,
     maxPostRunes: String(c.max_post_runes || DEFAULT_POST_RUNES[c.platform]),
     maxThreadBytes: String(c.max_thread_bytes ?? 65536),
     botToken: '',
@@ -78,8 +68,6 @@ function toRequest(form: FormState, platform: ChatPlatform) {
     role: form.role.trim(),
     repo: form.repo.trim(),
     base_branch: form.baseBranch.trim(),
-    run_url: form.runURL.trim(),
-    reply_policy: form.replyPolicy,
     max_post_runes: Number(form.maxPostRunes) || DEFAULT_POST_RUNES[platform],
     max_thread_bytes: Number(form.maxThreadBytes) || 0,
     ...(form.botToken.trim() ? { bot_token: form.botToken.trim() } : {}),
@@ -241,11 +229,7 @@ function MattermostCard() {
           )}
 
           <RoleField form={form} set={set} />
-          <RepliesField
-            form={form}
-            set={set}
-            unansweredHint="The bot reacts with 👀 and stays quiet; the agent replies in the thread through its own Mattermost tools. When a run fails, the bot posts how it ended; a run that succeeded gets no post from the bot."
-          />
+          <RepliesHint />
           <AdvancedSection form={form} set={set} postRunesHint="The server’s MaxPostSize." />
         </fieldset>
 
@@ -310,31 +294,20 @@ function RoleField({ form, set }: { form: FormState; set: SetForm }) {
   )
 }
 
-function RepliesField({ form, set, unansweredHint }: { form: FormState; set: SetForm; unansweredHint: string }) {
+function RepliesHint() {
   return (
-    <>
-      <Field label="Replies">
-        <div className="checks">
-          {(Object.keys(POLICY_LABEL) as ChatReplyPolicy[]).map((p) => (
-            <label key={p} className={form.replyPolicy === p ? 'check on' : 'check'}>
-              <input type="radio" checked={form.replyPolicy === p} onChange={() => set({ replyPolicy: p })} />
-              {POLICY_LABEL[p]}
-            </label>
-          ))}
-        </div>
-      </Field>
-      <div className="hint">
-        {form.replyPolicy === 'if_unanswered'
-          ? unansweredHint
-          : 'The bot replies with the run’s identifier, and again with its result when it ends — for every run the request starts.'}
-      </div>
-    </>
+    <div className="hint">
+      Replies: the bot reacts with 👀 when the run starts, and posts the agent’s answer in the thread when it ends —
+      the answer alone, with no run identifier, status or cost. A run that fails, or ends without an answer, gets one
+      plain sentence. A run that hands the request to another agent says nothing; that agent answers. The details
+      are on the run’s page.
+    </div>
   )
 }
 
 function AdvancedSection({ form, set, postRunesHint }: { form: FormState; set: SetForm; postRunesHint: string }) {
   return (
-    <Section title="Advanced" hint="repository, links and limits">
+    <Section title="Advanced" hint="repository and limits">
       <div className="grid-2">
         <Field label="Repository" hint="Empty runs without one — the usual choice for the classificator.">
           <input value={form.repo} placeholder="https://github.com/org/repo" onChange={(e) => set({ repo: e.target.value })} />
@@ -343,9 +316,6 @@ function AdvancedSection({ form, set, postRunesHint }: { form: FormState; set: S
           <input value={form.baseBranch} placeholder="main" onChange={(e) => set({ baseBranch: e.target.value })} />
         </Field>
       </div>
-      <Field label="Run link" hint="Where a reply links to a run, with {id} for its identifier. Empty for none.">
-        <input value={form.runURL} onChange={(e) => set({ runURL: e.target.value })} />
-      </Field>
       <div className="grid-2">
         <Field label="Longest post (runes)" hint={postRunesHint}>
           <input
@@ -471,11 +441,7 @@ function SlackCard() {
           </Field>
 
           <RoleField form={form} set={set} />
-          <RepliesField
-            form={form}
-            set={set}
-            unansweredHint="The bot reacts with 👀 and stays quiet; the agent must reply in the thread through Slack tools of its own. When a run fails, the bot posts how it ended; a run that succeeded gets no post from the bot."
-          />
+          <RepliesHint />
 
           <AdvancedSection form={form} set={set} postRunesHint="Slack recommends at most 4000." />
           <Field
@@ -498,26 +464,19 @@ function HowItWorks() {
     <Card title="How a message becomes an answer">
       <ol className="small" style={{ margin: 0, paddingLeft: 18, lineHeight: 1.6 }}>
         <li>
-          A message reaches the bot, by mention, direct message or webhook. The bot reads the whole thread the message
-          was posted in and starts a run under the role above, with the thread quoted as context, the message as the
-          request, and a header naming the platform, the channel, the message, the thread and the sender.
+          A message reaches the bot, by mention, direct message or webhook. The bot reacts with 👀, reads the whole
+          thread the message was posted in, and starts a run under the role above, with the thread quoted as context,
+          the message as the request, and a header naming the platform, the channel and the sender.
         </li>
         <li>
           The <span className="mono">classificator</span> role reads it, picks a role with{' '}
           <span className="mono">list_roles</span> and starts that agent with <span className="mono">run_agent</span>.
-          The child is told the same chat header, and its ending is owed to the same thread.
+          The backend ties the child to the same thread; the agent never handles chat identifiers.
         </li>
         <li>
-          On Slack the bot speaks for the agents: it acknowledges the request, then posts the result of the
-          classificator and of every run it started. The agents need no Slack credentials.
-        </li>
-        <li>
-          On Mattermost the agent can answer in the thread itself through a Mattermost MCP server that a plugin brings.
-          Give the plugin its token as a <em>secret variable</em> on the role (for example{' '}
-          <span className="mono">MATTERMOST_TOKEN</span> from the secret{' '}
-          <span className="mono">mattermost-agent-token</span>), and declare the plugin in the role’s{' '}
-          <span className="mono">settings.json</span> — see <Link to="/roles">Roles</Link>. Use a separate, narrow bot
-          account for that token: the agent can read its environment, and the agent reads untrusted text.
+          When the run that has the answer ends, the bot posts that agent’s final answer in the thread, as written.
+          Agents never post in chat and need no chat credentials. A reply in the thread is a new message, and starts
+          again from the whole thread, earlier answers included.
         </li>
       </ol>
     </Card>

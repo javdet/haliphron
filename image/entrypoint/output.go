@@ -225,7 +225,7 @@ func ResultMarkdown(c *Config, agentText string, exitCode int32, failure *Failur
 	}
 
 	var b strings.Builder
-	fmt.Fprintf(&b, "# Run %s, attempt %d\n\n", c.RunID, c.Attempt)
+	b.WriteString(runv1.NoAnswerHeading(c.RunID, c.Attempt))
 	fmt.Fprintf(&b, "The %s agent produced no textual result.\n\n", c.Agent)
 	fmt.Fprintf(&b, "- exit code: %d (%s)\n", exitCode, runv1.FailureClassForExitCode(exitCode))
 	fmt.Fprintf(&b, "- model: %s\n", c.Model)

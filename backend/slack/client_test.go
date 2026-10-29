@@ -108,8 +108,8 @@ func TestAThreadIsReadPageByPageAndKnowsWhichPostsAreTheBotsOwn(t *testing.T) {
 			}, "response_metadata": map[string]any{"next_cursor": "page2"}}
 		}
 		return 200, map[string]any{"ok": true, "messages": []map[string]any{
-			{"ts": "1.000200", "bot_id": "BBOT", "text": "Started run",
-				"metadata": map[string]any{"event_type": "haliphron_post", "event_payload": map[string]any{"kind": "ack"}}},
+			{"ts": "1.000200", "bot_id": "BBOT", "text": "The build is red because of the lint step.",
+				"metadata": map[string]any{"event_type": "haliphron_post", "event_payload": map[string]any{"kind": "result"}}},
 			{"ts": "1.000300", "bot_id": "BOTHER", "subtype": "bot_message", "username": "ci",
 				"metadata": map[string]any{"event_type": "haliphron_post", "event_payload": map[string]any{"kind": "result"}}},
 			{"ts": "1.000400", "subtype": "channel_join", "user": "U2", "text": "joined"},
@@ -131,7 +131,7 @@ func TestAThreadIsReadPageByPageAndKnowsWhichPostsAreTheBotsOwn(t *testing.T) {
 		p.Text != "the build is red & I do not know why" || p.FromBot {
 		t.Errorf("first post: %+v", p)
 	}
-	if p := posts[1]; !p.FromSelf || p.Kind != app.ChatPostAck {
+	if p := posts[1]; !p.FromSelf || p.Kind != app.ChatPostResult {
 		t.Errorf("own post: %+v", p)
 	}
 	if p := posts[2]; p.FromSelf || !p.FromBot || p.Kind != "" || p.Username != "ci" {

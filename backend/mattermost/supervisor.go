@@ -142,9 +142,7 @@ func (s *Supervisor) start(ctx context.Context, cfg app.ResolvedChatIntegration)
 		Role:           cfg.Role,
 		RepoURL:        cfg.RepoURL,
 		BaseBranch:     cfg.BaseBranch,
-		RunURL:         cfg.RunURL,
 		MaxThreadBytes: cfg.MaxThreadBytes,
-		ReplyPolicy:    cfg.ReplyPolicy,
 	})
 	if err := chat.CheckRole(ctx); errors.Is(err, store.ErrNotFound) {
 		s.log.Warn("the Mattermost bot's role does not exist; every request is refused until it is created",
@@ -166,7 +164,7 @@ func (s *Supervisor) start(ctx context.Context, cfg app.ResolvedChatIntegration)
 	s.current.Store(rt)
 	s.log.Info("the Mattermost bot is running",
 		"url", cfg.URL, "transport", cfg.Transport, "role", cfg.Role,
-		"reply_policy", cfg.ReplyPolicy, "configured_by", cfg.UpdatedBy)
+		"configured_by", cfg.UpdatedBy)
 	return nil
 }
 

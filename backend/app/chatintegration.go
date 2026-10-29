@@ -127,8 +127,6 @@ type ChatIntegrationRequest struct {
 	Role           string
 	RepoURL        string
 	BaseBranch     string
-	RunURL         string
-	ReplyPolicy    string
 	MaxPostRunes   int
 	MaxThreadBytes int
 	BotToken       *string
@@ -219,7 +217,6 @@ func defaultChatIntegration(platform string) store.ChatIntegration {
 		Platform:       platform,
 		Transport:      store.ChatTransportWebSocket,
 		Role:           DefaultChatRole,
-		ReplyPolicy:    defaultChatReplyPolicy(platform),
 		MaxPostRunes:   DefaultChatPostRunes,
 		MaxThreadBytes: DefaultChatThreadBytes,
 	}
@@ -227,16 +224,6 @@ func defaultChatIntegration(platform string) store.ChatIntegration {
 		c.MaxPostRunes = DefaultSlackPostRunes
 	}
 	return c
-}
-
-// defaultChatReplyPolicy is the policy an integration saved without one gets.
-// On Slack the backend speaks for the agents, which hold no Slack credentials,
-// so it acknowledges and reports every run itself.
-func defaultChatReplyPolicy(platform string) string {
-	if platform == ChatPlatformSlack {
-		return store.ChatReplyAlways
-	}
-	return store.ChatReplyIfUnanswered
 }
 
 // PutChatIntegration validates and saves a platform's integration.
@@ -259,17 +246,12 @@ func (s *Service) PutChatIntegration(ctx context.Context, platform string, req C
 		Role:           strings.TrimSpace(req.Role),
 		RepoURL:        strings.TrimSpace(req.RepoURL),
 		BaseBranch:     strings.TrimSpace(req.BaseBranch),
-		RunURL:         strings.TrimSpace(req.RunURL),
-		ReplyPolicy:    strings.TrimSpace(req.ReplyPolicy),
 		MaxPostRunes:   req.MaxPostRunes,
 		MaxThreadBytes: req.MaxThreadBytes,
 		UpdatedBy:      by,
 	}
 	if c.Transport == "" {
 		c.Transport = store.ChatTransportWebSocket
-	}
-	if c.ReplyPolicy == "" {
-		c.ReplyPolicy = defaultChatReplyPolicy(platform)
 	}
 	if c.Role == "" {
 		c.Role = DefaultChatRole
@@ -334,8 +316,8 @@ func (s *Service) PutChatIntegration(ctx context.Context, platform string, req C
 		SubjectKind: "chat_integration", SubjectID: platform,
 		Payload: map[string]any{
 			"enabled": c.Enabled, "transport": c.Transport, "url": c.URL, "role": c.Role,
-			"reply_policy": c.ReplyPolicy, "bot_token_replaced": req.BotToken != nil,
-			"webhook_tokens_replaced": len(webhookTokens) > 0, "app_token_replaced": appToken != "",
+			"bot_token_replaced": req.BotToken != nil, "webhook_tokens_replaced": len(webhookTokens) > 0,
+			"app_token_replaced": appToken != "",
 		},
 	}); err != nil {
 		return ChatIntegration{}, err
@@ -446,11 +428,6 @@ func ValidateChatIntegration(c store.ChatIntegration, have ChatCredentials) erro
 	default:
 		return invalid("transport", "%q is not websocket, webhook or both", c.Transport)
 	}
-	switch c.ReplyPolicy {
-	case store.ChatReplyAlways, store.ChatReplyIfUnanswered:
-	default:
-		return invalid("reply_policy", "%q is not always or if_unanswered", c.ReplyPolicy)
-	}
 	if c.URL != "" {
 		u, err := url.Parse(c.URL)
 		if err != nil || (u.Scheme != "https" && u.Scheme != "http") || u.Host == "" {
@@ -459,9 +436,6 @@ func ValidateChatIntegration(c store.ChatIntegration, have ChatCredentials) erro
 	}
 	if c.BaseBranch != "" && c.RepoURL == "" {
 		return invalid("base_branch", "a base branch needs a repository")
-	}
-	if c.RunURL != "" && !strings.Contains(c.RunURL, "{id}") {
-		return invalid("run_url", "has no {id} for the run identifier")
 	}
 	if c.MaxPostRunes < 1000 || c.MaxPostRunes > 65535 {
 		return invalid("max_post_runes", "%d is not between 1000 and 65535", c.MaxPostRunes)

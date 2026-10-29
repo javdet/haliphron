@@ -25,7 +25,7 @@ func TestEveryDefaultRoleWouldBeAcceptedFromTheUI(t *testing.T) {
 	}
 }
 
-func TestTheClassificatorRunsWithoutARepositoryAndReadsTheBotToken(t *testing.T) {
+func TestTheClassificatorRunsWithoutARepositoryOrAChatToken(t *testing.T) {
 	spec, err := defaultRoles.ReadFile("defaults/" + DefaultChatRole + ".json")
 	if err != nil {
 		t.Fatalf("the default chat role has no spec: %v", err)
@@ -38,13 +38,13 @@ func TestTheClassificatorRunsWithoutARepositoryAndReadsTheBotToken(t *testing.T)
 		!strings.Contains(role.SystemPrompt, "list_roles") {
 		t.Error("the classificator's prompt does not say how to route")
 	}
-	// On Slack the agent holds no chat tools and the backend speaks for it,
-	// so the prompt must not make posting a step it cannot skip.
-	if !strings.Contains(role.SystemPrompt, "Slack") || !strings.Contains(role.SystemPrompt, "final answer") {
-		t.Error("the classificator's prompt does not say what to do without chat tools")
+	// The backend speaks in the thread, and only with a final answer: the
+	// prompt must say so, and give the agent no way to post itself.
+	if !strings.Contains(role.SystemPrompt, "never post") || !strings.Contains(role.SystemPrompt, "final answer") {
+		t.Error("the classificator's prompt does not say that its final answer is the only reply")
 	}
-	if len(role.SecretEnv) != 1 || role.SecretEnv[0].Name != "MATTERMOST_TOKEN" {
-		t.Errorf("secretEnv is %+v", role.SecretEnv)
+	if len(role.SecretEnv) != 0 {
+		t.Errorf("secretEnv is %+v, want no chat token", role.SecretEnv)
 	}
 	var raw map[string]any
 	if err := json.Unmarshal(spec, &raw); err != nil {

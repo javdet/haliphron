@@ -5,6 +5,38 @@ of `VERSION`, and it is the tag of the published images.
 
 ## Unreleased
 
+### Changed
+
+- **A chat reply is the agent's answer and nothing else.** On Mattermost and
+  Slack the bot reacts with 👀 when a run starts and posts nothing else until
+  the answer is ready. The "Started run …" post is gone. When a run ends, the
+  bot posts the agent's final answer exactly as written, with no run
+  identifier, status, cost, pull request or link. A run that fails, times out
+  or ends without an answer gets one plain sentence, and a cancelled run says
+  so. A run that started another run posts nothing, because that run's answer
+  is the reply. A request routed by the `classificator` therefore gets one
+  post, from the agent that did the work. Everything else about a run is on its
+  page in the UI.
+- **Agents never post in chat.** The prompt header no longer carries channel,
+  message, thread or user identifiers. It tells the agent that its final answer
+  is the reply. The backend ties a run, and every run it starts, to the thread.
+  The default `classificator` no longer posts, and no longer names a
+  `MATTERMOST_TOKEN` secret variable.
+- **The reply policy and the run link are removed.** `reply_policy` and
+  `run_url` are gone from the integrations API and the UI, as are
+  `HALIPHRON_{MATTERMOST,SLACK}_REPLY_POLICY` and `_RUN_URL` and the chart's
+  `replyPolicy` and `runURL` values. Old settings are ignored, not refused.
+  Migration `0013_chat_answers` drops the columns.
+
+### Upgrading
+
+- **Update an existing `classificator`.** The default role is seeded once and
+  never overwritten. On an installation that already has one, replace its
+  description and system prompt with the ones in
+  `backend/app/defaults/classificator.json`, and remove its `MATTERMOST_TOKEN`
+  secret variable and any Mattermost plugin. Until then it may still post a
+  routing note in the thread through its own tools.
+
 ## 0.5.3 — 2026-10-28
 
 ### Added
