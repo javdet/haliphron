@@ -299,8 +299,8 @@ function RepliesHint() {
     <div className="hint">
       Replies: the bot reacts with 👀 when the run starts, and posts the agent’s answer in the thread when it ends —
       the answer alone, with no run identifier, status or cost. A run that fails, or ends without an answer, gets one
-      plain sentence. A run that hands the request to another agent says nothing; that agent answers. The details
-      are on the run’s page.
+      plain sentence. When the classificator hands the request to another agent, it posts one sentence saying who
+      will handle it, and that agent’s answer follows. The details are on the run’s page.
     </div>
   )
 }
@@ -471,7 +471,8 @@ function HowItWorks() {
         <li>
           The <span className="mono">classificator</span> role reads it, picks a role with{' '}
           <span className="mono">list_roles</span> and starts that agent with <span className="mono">run_agent</span>.
-          The backend ties the child to the same thread; the agent never handles chat identifiers.
+          Its one-sentence answer, saying who will handle the request, is posted in the thread. The backend ties the
+          child to the same thread; the agent never handles chat identifiers.
         </li>
         <li>
           When the run that has the answer ends, the bot posts that agent’s final answer in the thread, as written.

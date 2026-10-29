@@ -91,8 +91,9 @@ const (
 	// for every role: the agent's final answer is what gets posted.
 	chatHeaderReply = "Your final answer is posted in the thread as the reply, exactly as you " +
 		"write it, and nothing else about this run is. Write it for the person who asked. " +
-		"If you start another run with run_agent, your final answer is not posted: that " +
-		"run's is. Do not post in the chat yourself.\n"
+		"If you start another run with run_agent, that run's answer follows yours: make " +
+		"yours one short sentence saying who will handle the request and what they will " +
+		"do. Do not post in the chat yourself.\n"
 	// chatHeaderValueBytes bounds one value. Names are short; an identifier
 	// that is not is not one this header should carry whole.
 	chatHeaderValueBytes = 256

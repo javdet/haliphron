@@ -239,8 +239,10 @@ It routes rather than works. For each request it:
    that tells the agent its final answer is posted to the person as written;
 4. stops.
 
-When it starts an agent, nothing it says is posted: the person hears from that
-agent. A request it can answer in a sentence it answers itself, and an unclear
+When it starts an agent, its final answer is one short sentence saying who
+will handle the request and what they will do — *Аудитор проверит состояние
+postgres-room с точки зрения задержки диска* — and it is posted in the thread;
+that agent's answer follows when it ends. A request it can answer in a sentence it answers itself, and an unclear
 one gets one clarifying question; then its own final answer is the reply. It
 runs without a repository, and passes one to the child only when the request
 names it. It needs no chat tools and no Mattermost token.
@@ -286,7 +288,7 @@ Every prompt from chat opens with a block the system writes:
 platform: mattermost
 channel: town-square (Town Square), type O
 sender: @alice
-Your final answer is posted in the thread as the reply, exactly as you write it, and nothing else about this run is. Write it for the person who asked. If you start another run with run_agent, your final answer is not posted: that run's is. Do not post in the chat yourself.
+Your final answer is posted in the thread as the reply, exactly as you write it, and nothing else about this run is. Write it for the person who asked. If you start another run with run_agent, that run's answer follows yours: make yours one short sentence saying who will handle the request and what they will do. Do not post in the chat yourself.
 --- end of chat message ---
 ```
 
@@ -310,9 +312,11 @@ acknowledgement. When a run ends:
 
 - **It succeeded and wrote an answer**: the answer is posted in the thread,
   exactly as the agent wrote it, with mentions defused.
-- **It started another run**: nothing. That run's answer is the reply, and so
-  on down the chain, so a request routed by the classificator gets one post,
-  from the agent that did the work.
+- **It started another run**: its own answer, if it wrote one, is posted the
+  same way — for the classificator, the sentence saying who takes the request.
+  That run's answer follows when it ends. If the run that handed the request
+  on wrote nothing, or failed, nothing is posted for it: the person is still
+  owed the answer, and the run it started gives it.
 - **It failed, timed out, or ended without an answer**: one plain sentence,
   *Sorry, I couldn't finish this. Please try again.* What it wrote before it
   stopped is not the answer it was on its way to.

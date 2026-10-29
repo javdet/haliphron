@@ -86,21 +86,28 @@ func TestAChildOfAChatRunIsToldWhereTheMessageCameFromAndOwesTheSamePersonAReply
 		t.Errorf("a grandchild was not told where the message came from:\n%s", p)
 	}
 
-	// The classificator routed and exited, the child handed on to the
-	// grandchild, and the grandchild failed. Only the grandchild had the
-	// answer to give, and only its row posts.
-	h.finish(t, c, parent.ID, controller.Outcome{ExitCode: runv1.ExitSuccess, Summary: "Routing this to oncall."})
-	h.finish(t, c, child.ID, controller.Outcome{ExitCode: runv1.ExitSuccess, Summary: "Asked for a test."})
+	// The classificator said who takes the request and exited; the child
+	// handed on to the grandchild without a word; the grandchild failed. The
+	// classificator's line is posted, the silent child posts nothing — not
+	// even the no-answer sentence, since the grandchild still answers — and
+	// the grandchild's failure is posted.
+	h.finish(t, c, parent.ID, controller.Outcome{ExitCode: runv1.ExitSuccess,
+		Summary: "Oncall will fix the build."})
+	h.finish(t, c, child.ID, controller.Outcome{ExitCode: runv1.ExitSuccess})
 	h.finish(t, c, grandchild.ID, controller.Outcome{ExitCode: 1, Summary: "the compiler is missing"})
 
 	bot.Deliver(t)
-	results := f.postsOfKind(app.ChatPostResult)
-	if len(results) != 1 {
-		t.Fatalf("%d replies, want only the grandchild's: %+v", len(results), results)
+	byRun := map[string]string{}
+	for _, r := range f.postsOfKind(app.ChatPostResult) {
+		if r.RootID != msg {
+			t.Errorf("reply posted under %q, want the message's thread", r.RootID)
+		}
+		id, _ := r.Props["haliphron_run_id"].(string)
+		byRun[id] = r.Message
 	}
-	if r := results[0]; r.RootID != msg || r.Props["haliphron_run_id"] != string(grandchild.ID) ||
-		!strings.Contains(r.Message, "couldn't finish") {
-		t.Errorf("reply = %+v", r)
+	if len(byRun) != 2 || byRun[string(parent.ID)] != "Oncall will fix the build." ||
+		!strings.Contains(byRun[string(grandchild.ID)], "couldn't finish") {
+		t.Errorf("replies by run = %v, want the classificator's line and the grandchild's failure", byRun)
 	}
 	var owed int
 	if err := h.Store.DB().QueryRow(`SELECT count(*) FROM chat_triggers WHERE replied_at IS NULL`).

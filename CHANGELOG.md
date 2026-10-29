@@ -5,6 +5,19 @@ of `VERSION`, and it is the tag of the published images.
 
 ## Unreleased
 
+### Changed
+
+- **The classificator's line is posted again.** A run that started another run
+  posts its own answer too. For the classificator, that is one sentence saying
+  who will handle the request and what they will do, such as *Аудитор проверит
+  состояние postgres-room с точки зрения задержки диска*. The answer of the run
+  it started follows. A run that hands the request on without a word, or fails
+  after starting one, still posts nothing, because the run it started answers.
+  The default `classificator` prompt and the chat header say so. An installation
+  that copied the 0.5.4 prompt into its `classificator` should copy it again.
+- Replies that are due together are posted in the order their requests were
+  claimed, so the classificator's line never lands after the answer.
+
 ## 0.5.4 — 2026-10-29
 
 ### Changed

@@ -19,8 +19,10 @@ import (
 // cost or link. Agents never post in chat themselves. The bot reacts to the
 // message when the run starts, and when it ends posts what the agent answered,
 // or one plain sentence when there is no answer to post. A run that started a
-// run of its own says nothing; its child answers. Everything else about the
-// run is in the UI.
+// run of its own posts its answer too — the classificator's line saying who
+// took the request — and its child's answer follows; when it has none, it
+// says nothing, because the child still answers. Everything else about the run
+// is in the UI.
 //
 // The adapter for a platform is transport. It decodes what the chat server
 // sends into a ChatMessage and carries posts back out through ChatPlatform;
@@ -392,14 +394,20 @@ func (c *Chat) deliver(ctx context.Context, t store.ChatTrigger) (bool, error) {
 			return false, c.svc.store.DeferChatReply(ctx, t.ChatTriggerKey, chatSettleRecheck)
 		}
 		// A run that handed the request on — the classificator, typically —
-		// says nothing: what it would say is how it routed, and the person is
-		// owed the answer, which the child's own row posts.
+		// posts what it said, which tells the person who took the request. It
+		// never posts the no-answer sentence: the person is still owed an
+		// answer, and the child's own row posts it.
 		if t.Delegated {
-			c.log.Info("the run started another; its answer is the reply",
-				"message", t.MessageID, "run", t.RunID)
-			return false, c.svc.store.MarkChatReplied(ctx, t.ChatTriggerKey, "")
+			answer, ok := agentAnswer(r, c.platform.MaxPostRunes())
+			if !ok {
+				c.log.Info("the run started another and said nothing; its child answers",
+					"message", t.MessageID, "run", t.RunID)
+				return false, c.svc.store.MarkChatReplied(ctx, t.ChatTriggerKey, "")
+			}
+			text = answer
+		} else {
+			text = renderAnswer(r, c.platform.MaxPostRunes())
 		}
-		text = renderAnswer(r, c.platform.MaxPostRunes())
 		kind = ChatPostResult
 	case t.Refusal != "":
 		text = t.Refusal

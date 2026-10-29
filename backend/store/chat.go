@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"sort"
 	"time"
 
 	runv1 "github.com/automagicops/haliphron/api/run/v1"
@@ -39,9 +40,10 @@ type ChatTrigger struct {
 	// claimed from a message.
 	OriginMessageID string
 
-	// Delegated is a run that started a run of its own. The answer the person
-	// is owed is its child's, which has a row of its own, so this one is
-	// settled without a post. Set only by DueChatReplies.
+	// Delegated is a run that started a run of its own. Its child has a row of
+	// its own and owes the person the answer, so this one posts only what the
+	// run itself said, and nothing when it said nothing. Set only by
+	// DueChatReplies.
 	Delegated bool
 
 	// RunID and Refusal are admission's answer. Both empty on a row returned
@@ -172,6 +174,11 @@ func (s *Store) RefuseChatTrigger(ctx context.Context, k ChatTriggerKey, refusal
 // next_attempt_at rather than a held lock, which is what lets the post to the
 // chat server happen outside any transaction and lets a second replica skip
 // the row instead of waiting on it.
+//
+// The rows come back in the order they were claimed. RETURNING keeps no order
+// of its own, and a parent's row — the classificator's line saying who takes
+// the request — must not be posted after its child's answer when both are due
+// in one pass. A follow-up is always inserted after its parent's row.
 func (s *Store) DueChatReplies(ctx context.Context, platform string, limit int,
 	lease time.Duration) ([]ChatTrigger, error) {
 
@@ -219,7 +226,11 @@ func (s *Store) DueChatReplies(ctx context.Context, platform string, limit int,
 		t.Refusal = refusal.String
 		out = append(out, t)
 	}
-	return out, rows.Err()
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	sort.SliceStable(out, func(i, j int) bool { return out[i].ClaimedAt.Before(out[j].ClaimedAt) })
+	return out, nil
 }
 
 // DeferChatReply puts a claimed row back without counting an attempt: the run

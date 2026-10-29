@@ -323,7 +323,7 @@ func TestASlackMentionInAThreadStartsAClassificatorRunThatCarriesTheWholeThread(
 	}
 }
 
-func TestOnlyTheRunTheClassifierStartedAnswersInTheSlackThread(t *testing.T) {
+func TestTheClassifiersLineAndTheAnswerOfTheRunItStartedArePostedInTheSlackThread(t *testing.T) {
 	h := newHarness(t)
 	h.classificator(t)
 	h.chatRole(t)
@@ -356,25 +356,28 @@ func TestOnlyTheRunTheClassifierStartedAnswersInTheSlackThread(t *testing.T) {
 	h.finish(t, c, child.ID, controller.Outcome{ExitCode: runv1.ExitSuccess,
 		Summary: "**Ingress restarted.** <!channel>"})
 
-	if n, err := chat.Deliver(ctx); err != nil || n != 1 {
-		t.Fatalf("delivered %d replies (%v), want the child's alone", n, err)
+	if n, err := chat.Deliver(ctx); err != nil || n != 2 {
+		t.Fatalf("delivered %d replies (%v), want the classifier's and the child's", n, err)
 	}
 	results := f.postsOfKind(app.ChatPostResult)
-	if len(results) != 1 {
+	if len(results) != 2 {
 		t.Fatalf("%d results", len(results))
 	}
-	r := results[0]
-	if strings.Contains(r.Text, "Routed") || strings.Contains(r.Text, string(child.ID)) ||
-		!strings.Contains(r.Text, "*Ingress restarted.*") {
-		t.Errorf("the reply is not the child's answer alone:\n%s", r.Text)
+	if got := results[0].Text; got != "Routed to oncall: it is an ingress restart." {
+		t.Errorf("the first reply is not the classifier's line alone:\n%s", got)
+	}
+	r := results[1]
+	if strings.Contains(r.Text, string(child.ID)) || !strings.Contains(r.Text, "*Ingress restarted.*") {
+		t.Errorf("the second reply is not the child's answer alone:\n%s", r.Text)
 	}
 	if strings.Contains(r.Text, "<!channel>") || strings.Contains(r.Text, "**") {
 		t.Errorf("the reply notifies the channel or is not mrkdwn:\n%s", r.Text)
 	}
-	if r.channel != slChannel || r.ThreadTS != "1700000000.000400" {
-		t.Errorf("reply posted in %s under %q, want the message's thread", r.channel, r.ThreadTS)
+	for _, r := range results {
+		if r.channel != slChannel || r.ThreadTS != "1700000000.000400" {
+			t.Errorf("reply posted in %s under %q, want the message's thread", r.channel, r.ThreadTS)
+		}
 	}
-	// The classifier's own row is settled without a post, not left owed.
 	if n, err := chat.Deliver(ctx); err != nil || n != 0 {
 		t.Errorf("a second pass posted %d more (%v)", n, err)
 	}

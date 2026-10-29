@@ -511,11 +511,15 @@ was written: no run identifier, status, cost or link. A run that did not reach
 is the entrypoint's no-answer stub (`runv1.IsNoAnswerSummary`) get one plain
 sentence instead. Whatever a failed run wrote before it stopped is not the
 answer it was on its way to, and exit code 0 is all `Succeeded` means. A
-cancelled run is told as cancelled. **A run that started a run of its own is
-settled without a post**: the reply loop selects, with each row, whether any
-run names its run as `parent_run_id`, and marks such a row replied with no
-`reply_post_id`. Its answer is its child's, which has a follow-up row of its
-own. Agents never post in chat, so nothing in the thread is read to decide.
+cancelled run is told as cancelled. **A run that started a run of its own
+posts only what it said**: the reply loop selects, with each row, whether any
+run names its run as `parent_run_id`. Such a run's answer, the classificator's
+sentence saying who takes the request, is posted like any other, and its
+child's answer follows from the child's own follow-up row. When it has no
+answer, or did not succeed, the row is marked replied with no `reply_post_id`
+rather than given the no-answer sentence: the person is still owed an answer,
+and the child gives it. Agents never post in chat, so nothing in the thread is
+read to decide.
 0009's `reply_policy` column, on both `chat_triggers` and `chat_integrations`,
 is dropped with the choice it carried, and so is `chat_integrations.run_url`.
 
@@ -714,14 +718,14 @@ in [test/backend](../../test/backend) (`chatintegration_test.go`) against the
 same real PostgreSQL rather than here:
 
 - [x] a run that succeeded without an answer gets one plain sentence, with no run identifier
-- [x] a child and a grandchild of a chat run are told where the message came from; the runs that handed the request on are settled without a post, and only the grandchild that had the answer replies in the parent's thread
+- [x] a child and a grandchild of a chat run are told where the message came from; the classificator's sentence is posted, a run that handed the request on without a word is settled without a post, and the grandchild's failure is posted in the parent's thread
 - [x] a run not started from chat gives its children no chat header
 
 The Slack adapter is exercised end to end in the same suite
 (`slack_test.go`), against a fake workspace:
 
 - [x] a mention inside a thread starts a classificator run whose prompt quotes the whole thread
-- [x] only the answer of the run the classificator started is posted in the thread, as mrkdwn, with mentions defused; the classificator's own row is settled without a post
+- [x] the classificator's sentence and the answer of the run it started are both posted in the thread, as mrkdwn, with mentions defused
 - [x] the same event handled by two replicas starts one run
 - [x] the integration keeps both tokens write-only
 - [x] the default roles are seeded once and stay deleted when deleted

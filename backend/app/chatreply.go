@@ -45,17 +45,27 @@ const (
 
 // renderAnswer is the reply a settled run owes, at most maxRunes long.
 func renderAnswer(r store.Run, maxRunes int) string {
-	if maxRunes <= 0 {
-		maxRunes = DefaultChatPostRunes
-	}
 	if r.Status == clusterv1.StatusCancelled {
 		return chatCancelled
+	}
+	if answer, ok := agentAnswer(r, maxRunes); ok {
+		return answer
+	}
+	return chatNoAnswer
+}
+
+// agentAnswer is what the agent answered, ready to post, and whether it
+// answered at all: a run that did not succeed, whose report never arrived, or
+// that wrote nothing but the entrypoint's stub has no answer.
+func agentAnswer(r store.Run, maxRunes int) (string, bool) {
+	if maxRunes <= 0 {
+		maxRunes = DefaultChatPostRunes
 	}
 	answer := strings.TrimSpace(r.ResultSummary)
 	if r.Status != clusterv1.StatusSucceeded ||
 		r.ReportedStatus() == clusterv1.StatusCompletedWithoutResult ||
 		answer == "" || runv1.IsNoAnswerSummary(r.ID, answer) {
-		return chatNoAnswer
+		return "", false
 	}
 	answer = neutralizeMentions(answer)
 	// Cut rather than refused: a reply the server rejects for length is a
@@ -63,7 +73,7 @@ func renderAnswer(r store.Run, maxRunes int) string {
 	if utf8.RuneCountInString(answer) > maxRunes {
 		answer = cutRunes(answer, maxRunes-utf8.RuneCountInString(chatCut)) + chatCut
 	}
-	return answer
+	return answer, true
 }
 
 // renderRefusal is the answer to a message that started nothing. internal is

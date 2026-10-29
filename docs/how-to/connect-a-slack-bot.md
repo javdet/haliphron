@@ -17,9 +17,10 @@ that role with `run_agent`. In the thread, the person sees:
 2. the answer, when the run that has it ends: the agent's final answer, as it
    wrote it, with no run identifier, status, cost or link.
 
-When the classificator starts another agent, that agent's answer is the reply
-and the classificator says nothing. When it needs no other agent, its own short
-answer or clarifying question is the reply. A run that fails, or ends without
+When the classificator starts another agent, its own answer is one short
+sentence saying who will handle the request, posted first, and that agent's
+answer follows. When it needs no other agent, its own short answer or
+clarifying question is the reply. A run that fails, or ends without
 an answer, gets one plain sentence. The details of every run are in the UI.
 
 The agents hold no Slack credentials and never post in Slack. The backend
@@ -154,7 +155,7 @@ Every prompt opens with a block the system writes:
 platform: slack
 channel: ops, type O
 sender: @alice
-Your final answer is posted in the thread as the reply, exactly as you write it, and nothing else about this run is. Write it for the person who asked. If you start another run with run_agent, your final answer is not posted: that run's is. Do not post in the chat yourself.
+Your final answer is posted in the thread as the reply, exactly as you write it, and nothing else about this run is. Write it for the person who asked. If you start another run with run_agent, that run's answer follows yours: make yours one short sentence saying who will handle the request and what they will do. Do not post in the chat yourself.
 --- end of chat message ---
 ```
 
@@ -171,8 +172,9 @@ block, and its answer is posted in the same thread.
 - Mention the app in a thread. Expect 👀 and nothing else while the work runs.
 - In the UI, open the run and read its prompt. The thread should be quoted
   above the request.
-- When the run that has the answer ends, expect that answer in the thread, and
-  only that.
+- When the classificator ends, expect its sentence saying who took the
+  request. When the run it started ends, expect that run's answer, and only
+  that.
 
 A reply says nothing about whether the run succeeded: it is the agent's own
 words. Whether a run reached `Succeeded`, which means only that the agent
