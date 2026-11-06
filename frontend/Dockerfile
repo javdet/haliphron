@@ -11,7 +11,10 @@ RUN --mount=type=cache,target=/root/.npm npm ci
 
 COPY tsconfig.json vite.config.ts index.html ./
 COPY src ./src
-RUN npm run build
+# The release this bundle belongs to, shown in the sidebar. Declared after the
+# sources so that a new version re-runs only the build, not `npm ci`.
+ARG VERSION=dev
+RUN VITE_HALIPHRON_VERSION="$VERSION" npm run build
 
 # ---- run ------------------------------------------------------------------
 # Unprivileged: the image listens on 8080 as uid 101 and needs no root, which

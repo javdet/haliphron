@@ -8,21 +8,40 @@ export function Card({
   actions,
   children,
   tight,
+  collapsed,
+  onToggle,
 }: {
   title?: ReactNode
   actions?: ReactNode
   children: ReactNode
   tight?: boolean
+  /** With onToggle, the title becomes a button that shows or hides the body. */
+  collapsed?: boolean
+  onToggle?: () => void
 }) {
+  const heading =
+    onToggle && typeof title === 'string' ? (
+      <h2>
+        <button type="button" className="card-toggle" aria-expanded={!collapsed} onClick={onToggle}>
+          <span className="card-chevron" aria-hidden="true" />
+          {title}
+        </button>
+      </h2>
+    ) : typeof title === 'string' ? (
+      <h2>{title}</h2>
+    ) : (
+      title
+    )
+  const shut = onToggle && collapsed
   return (
     <section className="card">
       {(title || actions) && (
-        <header className="card-head">
-          {typeof title === 'string' ? <h2>{title}</h2> : title}
+        <header className={shut ? 'card-head shut' : 'card-head'}>
+          {heading}
           {actions && <div className="inline">{actions}</div>}
         </header>
       )}
-      <div className={tight ? 'card-body tight' : 'card-body'}>{children}</div>
+      {!shut && <div className={tight ? 'card-body tight' : 'card-body'}>{children}</div>}
     </section>
   )
 }

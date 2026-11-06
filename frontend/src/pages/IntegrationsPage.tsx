@@ -1,4 +1,4 @@
-import { useEffect, useId, useState } from 'react'
+import { useEffect, useId, useRef, useState } from 'react'
 import { useChatIntegration, usePutChatIntegration, useRoles } from '../api/hooks'
 import { Card, CopyButton, ErrorBanner, Field, Section, Spinner, Time } from '../components/ui'
 import type { ChatIntegration, ChatPlatform, ChatTransport } from '../api/types'
@@ -106,6 +106,37 @@ function useIntegrationForm(platform: ChatPlatform) {
   return { current, put, form, set, save, saved }
 }
 
+/**
+ * Whether a card is folded. Until the viewer chooses, an integration that is
+ * on starts open and one that is off starts folded; the choice is a per-viewer
+ * convenience, so it lives in localStorage.
+ */
+function useCollapsed(platform: ChatPlatform, enabled: boolean | undefined) {
+  const key = `haliphron.integrations.${platform}.collapsed`
+  const [chosen, setChosen] = useState<boolean | undefined>(() => {
+    try {
+      const stored = window.localStorage.getItem(key)
+      return stored === null ? undefined : stored === '1'
+    } catch {
+      return undefined
+    }
+  })
+  // The state at first load, so saving an integration off does not fold the
+  // card over the banner that says it was saved.
+  const loaded = useRef(enabled)
+  if (loaded.current === undefined) loaded.current = enabled
+  const collapsed = chosen ?? !loaded.current
+  const toggle = () => {
+    setChosen(!collapsed)
+    try {
+      window.localStorage.setItem(key, collapsed ? '0' : '1')
+    } catch {
+      /* the choice lasts for this page only */
+    }
+  }
+  return { collapsed, toggle }
+}
+
 function urlProblem(raw: string): string | undefined {
   const v = raw.trim()
   if (!v) return undefined
@@ -120,6 +151,7 @@ function urlProblem(raw: string): string | undefined {
 
 function MattermostCard() {
   const { current, put, form, set, save, saved } = useIntegrationForm('mattermost')
+  const fold = useCollapsed('mattermost', current.data?.enabled)
 
   const c = current.data
   if (!c || !form) {
@@ -147,6 +179,8 @@ function MattermostCard() {
   return (
     <Card
       title="Mattermost"
+      collapsed={fold.collapsed}
+      onToggle={fold.toggle}
       actions={
         <span className={c.enabled ? 'badge ok' : 'badge'}>
           {c.enabled ? 'enabled' : c.source === 'none' ? 'not configured' : 'disabled'}
@@ -366,6 +400,7 @@ function SaveRow(props: {
 
 function SlackCard() {
   const { current, put, form, set, save, saved } = useIntegrationForm('slack')
+  const fold = useCollapsed('slack', current.data?.enabled)
 
   const c = current.data
   if (!c || !form) {
@@ -389,6 +424,8 @@ function SlackCard() {
   return (
     <Card
       title="Slack"
+      collapsed={fold.collapsed}
+      onToggle={fold.toggle}
       actions={
         <span className={c.enabled ? 'badge ok' : 'badge'}>
           {c.enabled ? 'enabled' : c.source === 'none' ? 'not configured' : 'disabled'}

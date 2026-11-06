@@ -314,6 +314,7 @@ acknowledgement. When a run ends:
   exactly as the agent wrote it, with mentions defused.
 - **It started another run**: its own answer, if it wrote one, is posted the
   same way — for the classificator, the sentence saying who takes the request.
+  Any run identifier in that sentence is removed before it is posted.
   That run's answer follows when it ends. If the run that handed the request
   on wrote nothing, or failed, nothing is posted for it: the person is still
   owed the answer, and the run it started gives it.

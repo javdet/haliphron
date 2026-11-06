@@ -20,6 +20,7 @@ BACKEND_VERSION    ?= 0.1.0
 BACKEND_IMAGE      ?= $(REGISTRY)/haliphron-backend:$(IMAGE_TAG)
 CONTROLLER_IMAGE   ?= $(REGISTRY)/haliphron-controller:$(IMAGE_TAG)
 FRONTEND_IMAGE     ?= $(REGISTRY)/haliphron-frontend:$(IMAGE_TAG)
+FRONTEND_VERSION   ?= $(IMAGE_TAG)
 NODE_IMAGE         ?= node:22-alpine
 # The UI's toolchain runs in a container too, for the same reason the Go one
 # does: a laptop without Node still has to be able to build and check it.
@@ -152,7 +153,7 @@ controller-image:
 
 ## frontend-image: the UI image — the bundle plus the nginx that proxies /api
 frontend-image:
-	docker build -f frontend/Dockerfile -t $(FRONTEND_IMAGE) frontend
+	docker build -f frontend/Dockerfile -t $(FRONTEND_IMAGE) --build-arg VERSION=$(FRONTEND_VERSION) frontend
 
 ## images: every image, for this machine's architecture
 images: backend-image controller-image frontend-image image-build
@@ -170,7 +171,7 @@ controller-push:
 
 frontend-push:
 	docker buildx build --platform $(PLATFORM) -f frontend/Dockerfile \
-	  -t $(FRONTEND_IMAGE) --push frontend
+	  -t $(FRONTEND_IMAGE) --build-arg VERSION=$(FRONTEND_VERSION) --push frontend
 
 image-push:
 	docker buildx build --platform $(PLATFORM) -f image/Dockerfile \

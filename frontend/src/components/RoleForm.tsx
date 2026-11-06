@@ -370,22 +370,20 @@ export function RoleForm({
       </Section>
 
       <Section title="Tools" hint="empty means everything the platform allows" open>
-        <div className="grid-2">
-          <Field label="Allow" hint="Empty = no narrowing by this role.">
-            <StringList
-              value={form.allow}
-              onChange={(allow) => set({ allow })}
-              placeholder="Read, Edit, Bash(git:*)…"
-            />
-          </Field>
-          <Field label="Deny" hint="Applied on top of the platform's own deny list.">
-            <StringList
-              value={form.deny}
-              onChange={(deny) => set({ deny })}
-              placeholder="WebFetch, Bash(curl:*)…"
-            />
-          </Field>
-        </div>
+        <Field label="Allow" hint="Empty = no narrowing by this role.">
+          <StringList
+            value={form.allow}
+            onChange={(allow) => set({ allow })}
+            placeholder="Read, Edit, Bash(git:*)…"
+          />
+        </Field>
+        <Field label="Deny" hint="Applied on top of the platform's own deny list.">
+          <StringList
+            value={form.deny}
+            onChange={(deny) => set({ deny })}
+            placeholder="WebFetch, Bash(curl:*)…"
+          />
+        </Field>
       </Section>
 
       <Section title="Advanced" hint="MCP servers, variables, images and files">

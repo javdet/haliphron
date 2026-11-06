@@ -3,6 +3,7 @@ package app
 import (
 	"errors"
 	"fmt"
+	"regexp"
 	"strings"
 	"unicode/utf8"
 
@@ -74,6 +75,59 @@ func agentAnswer(r store.Run, maxRunes int) (string, bool) {
 		answer = cutRunes(answer, maxRunes-utf8.RuneCountInString(chatCut)) + chatCut
 	}
 	return answer, true
+}
+
+// routingLine is what a run that started another run says in the thread,
+// ready to post, and whether it says anything: for the classificator, the
+// sentence telling the person who takes the request. It is the run's answer
+// with every run identifier taken out. The prompt asks for none, and a small
+// model still appends the identifier run_agent returned to it ("… Run
+// 01M6R7GD…."). A routing line has no use for one, so none is posted however
+// the prompt is followed; a line that was nothing but identifiers is no line.
+func routingLine(r store.Run, maxRunes int) (string, bool) {
+	answer, ok := agentAnswer(r, maxRunes)
+	if !ok {
+		return "", false
+	}
+	answer = stripRunIDs(answer)
+	return answer, answer != ""
+}
+
+// runIDMention is a run identifier as an agent writes one into prose: a ULID,
+// optionally named as a run or an id before it, in backticks or brackets, and
+// with the separator that joined it to the sentence.
+var runIDMention = regexp.MustCompile(
+	`[ \t]*[,;:—–-]?[ \t]*[(\[]?[ \t]*` +
+		`(?:(?:\b(?i:run(?:[ _]?id)?|id)|(?i:запуск\p{L}*|ран\p{L}*))[ \t]*(?:[:#№][ \t]*)?)?` +
+		"`?" + `\b[0-7][0-9A-HJKMNP-TV-Z]{25}\b` + "`?" +
+		`(?:[ \t]*[)\]])?`)
+
+// stripRunIDs removes every run identifier from s, and the punctuation the
+// removal leaves doubled or dangling.
+func stripRunIDs(s string) string {
+	var b strings.Builder
+	rest := 0
+	for _, m := range runIDMention.FindAllStringIndex(s, -1) {
+		b.WriteString(s[rest:m[0]])
+		rest = m[1]
+		before := strings.TrimRight(b.String(), " \t")
+		switch {
+		case before == "" || strings.HasSuffix(before, "\n"):
+			// It opened the line: what joined it to the rest goes with it.
+			rest += len(s[rest:]) - len(strings.TrimLeft(s[rest:], " \t.,;:—–-"))
+		case strings.HasSuffix(before, ".") || strings.HasSuffix(before, "!") ||
+			strings.HasSuffix(before, "?") || strings.HasSuffix(before, "…"):
+			// It was a sentence of its own: its full stop goes with it.
+			rest += len(s[rest:]) - len(strings.TrimLeft(s[rest:], "."))
+		}
+	}
+	b.WriteString(s[rest:])
+
+	lines := strings.Split(b.String(), "\n")
+	for i, l := range lines {
+		lines[i] = strings.TrimRight(l, " \t")
+	}
+	return strings.TrimSpace(strings.Join(lines, "\n"))
 }
 
 // renderRefusal is the answer to a message that started nothing. internal is

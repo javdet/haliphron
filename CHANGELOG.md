@@ -5,6 +5,20 @@ of `VERSION`, and it is the tag of the published images.
 
 ## Unreleased
 
+### Added
+
+- **The web UI shows its version.** The sidebar shows the release next to the
+  name, such as `v0.5.6`. It is the version the UI image was built for. A bundle
+  built outside the image build shows `dev`.
+
+### Fixed
+
+- **The classificator's line no longer shows a run identifier.** Its prompt
+  asks for none, but a small model still appended the run it started, such as
+  *… Run 01M6R7GDAAGEEV8Q526M7BSVW6.* Run identifiers are now removed from that
+  line before it is posted, with the word "run" or "запуск" before them and any
+  brackets around them. A line that held nothing else is not posted.
+
 ## 0.5.5 — 2026-10-29
 
 ### Changed

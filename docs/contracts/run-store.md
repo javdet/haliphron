@@ -514,8 +514,10 @@ answer it was on its way to, and exit code 0 is all `Succeeded` means. A
 cancelled run is told as cancelled. **A run that started a run of its own
 posts only what it said**: the reply loop selects, with each row, whether any
 run names its run as `parent_run_id`. Such a run's answer, the classificator's
-sentence saying who takes the request, is posted like any other, and its
-child's answer follows from the child's own follow-up row. When it has no
+sentence saying who takes the request, is posted like any other, except that
+every run identifier in it is taken out first (`routingLine`): the prompt asks
+for none and a small model appends one anyway. Its child's answer follows from
+the child's own follow-up row. When it has no
 answer, or did not succeed, the row is marked replied with no `reply_post_id`
 rather than given the no-answer sentence: the person is still owed an answer,
 and the child gives it. Agents never post in chat, so nothing in the thread is

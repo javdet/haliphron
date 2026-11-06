@@ -113,25 +113,21 @@ jobs:
             context: .
             file: backend/Dockerfile
             platforms: linux/amd64,linux/arm64
-            versioned: true
           - name: controller
             image: haliphron-controller
             context: .
             file: controller/Dockerfile
             platforms: linux/amd64,linux/arm64
-            versioned: true
           - name: frontend
             image: haliphron-frontend
             context: frontend
             file: frontend/Dockerfile
             platforms: linux/amd64
-            versioned: false
           - name: agent
             image: haliphron-agent
             context: .
             file: image/Dockerfile
             platforms: linux/amd64
-            versioned: true
             # min, not max: the agent image's expensive layers (apt, nodesource,
             # gh/glab, the two agent CLIs) are all in the final stage, so they
             # are cached either way, and a ~2 GB image exported with mode=max
@@ -173,9 +169,7 @@ jobs:
           file: ${{ matrix.file }}
           platforms: ${{ matrix.platforms }}
           push: true
-          # The frontend Dockerfile declares no VERSION arg, and BuildKit warns
-          # about one it was not asked for.
-          build-args: ${{ matrix.versioned && format('VERSION={0}', steps.version.outputs.value) || '' }}
+          build-args: VERSION=${{ steps.version.outputs.value }}
           # :latest only from main. A tag push on an older commit would
           # otherwise move it backwards. Empty lines are dropped by the action.
           tags: |

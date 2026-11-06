@@ -398,7 +398,7 @@ func (c *Chat) deliver(ctx context.Context, t store.ChatTrigger) (bool, error) {
 		// never posts the no-answer sentence: the person is still owed an
 		// answer, and the child's own row posts it.
 		if t.Delegated {
-			answer, ok := agentAnswer(r, c.platform.MaxPostRunes())
+			answer, ok := routingLine(r, c.platform.MaxPostRunes())
 			if !ok {
 				c.log.Info("the run started another and said nothing; its child answers",
 					"message", t.MessageID, "run", t.RunID)

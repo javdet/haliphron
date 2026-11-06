@@ -297,6 +297,44 @@ func TestAnAgentsAnswerCannotNotifyAChannel(t *testing.T) {
 	}
 }
 
+func TestARoutingLineIsPostedWithoutRunIdentifiers(t *testing.T) {
+	const id = "01M6R7GDAAGEEV8Q526M7BSVW6"
+	for written, want := range map[string]string{
+		// What the classificator wrote in production, despite its prompt.
+		"Взял в работу: агент разберется с информацией про основной проект Playneta. Run " + id + ".": "Взял в работу: агент разберется с информацией про основной проект Playneta.",
+		"Аудитор проверит postgres-room (run `" + id + "`).":                                          "Аудитор проверит postgres-room.",
+		"Аудитор проверит postgres-room, запуск " + id + ".":                                          "Аудитор проверит postgres-room.",
+		"Run ID: " + id + " — аудитор проверит postgres-room.":                                        "аудитор проверит postgres-room.",
+		"Аудитор проверит postgres-room.\n\nRun: " + id:                                               "Аудитор проверит postgres-room.",
+		"Аудитор проверит postgres-room [" + id + "]!":                                                "Аудитор проверит postgres-room!",
+		"Аудитор проверит postgres-room.":                                                             "Аудитор проверит postgres-room.",
+	} {
+		r := finished(clusterv1.StatusSucceeded)
+		r.ResultSummary = written
+		got, ok := routingLine(r, 0)
+		if !ok || got != want {
+			t.Errorf("%q is posted as %q (%v), want %q", written, got, ok, want)
+		}
+	}
+}
+
+func TestARoutingLineOfNothingButAnIdentifierIsNotPosted(t *testing.T) {
+	r := finished(clusterv1.StatusSucceeded)
+	r.ResultSummary = "Run `01M6R7GDAAGEEV8Q526M7BSVW6`."
+	if got, ok := routingLine(r, 0); ok {
+		t.Errorf("posted %q, want nothing", got)
+	}
+}
+
+func TestARoutingLineKeepsWordsThatOnlyLookLikeIdentifiers(t *testing.T) {
+	r := finished(clusterv1.StatusSucceeded)
+	// Lower case, too short, and an I: none of them is a ULID.
+	r.ResultSummary = "Проверю run 01m6r7gdaageev8q526m7bsvw6, ABCDEFGHIJ и 01M6R7GDAAGEEV8Q526M7BSVWI."
+	if got, _ := routingLine(r, 0); got != r.ResultSummary {
+		t.Errorf("posted %q, want it unchanged", got)
+	}
+}
+
 func TestARefusalSaysWhatTheRequesterCanActOnAndHidesInternalFaults(t *testing.T) {
 	text, internal := renderRefusal(&run.PromptTooLargeError{Size: 600000, Limit: 524288})
 	if internal || !strings.Contains(text, "524288") {

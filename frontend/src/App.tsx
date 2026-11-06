@@ -16,6 +16,10 @@ import { SettingsPage } from './pages/SettingsPage'
 import { useSignOut } from './auth/TokenGate'
 import { ThemeToggle } from './components/ThemeToggle'
 
+// A bundle not built by the image build says so, rather than showing a
+// plausible-looking number, the same as the backend's "dev".
+const VERSION = import.meta.env.VITE_HALIPHRON_VERSION || 'dev'
+
 function Sidebar() {
   const signOut = useSignOut()
   return (
@@ -23,6 +27,9 @@ function Sidebar() {
       <div className="brand">
         <span className="brand-mark">H</span>
         <span className="brand-name">Haliphron</span>
+        <span className="brand-version mono" title="Release">
+          {VERSION === 'dev' ? VERSION : `v${VERSION}`}
+        </span>
       </div>
 
       <nav className="nav">

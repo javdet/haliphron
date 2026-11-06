@@ -123,6 +123,7 @@ code, .mono { font-family: var(--mono); font-size: 12.5px; }
   color: var(--accent-contrast); font-weight: 700; font-size: 13px;
 }
 .brand-name { font-weight: 650; letter-spacing: -0.01em; }
+.brand-version { font-size: 11px; color: var(--text-dim); white-space: nowrap; }
 
 .nav { display: flex; flex-direction: column; gap: 2px; }
 .nav a {
@@ -161,6 +162,17 @@ code, .mono { font-family: var(--mono); font-size: 12.5px; }
   display: flex; align-items: center; justify-content: space-between; gap: 12px;
   padding: 11px 14px; border-bottom: 1px solid var(--border);
 }
+.card-head.shut { border-bottom: 0; }
+.card-toggle {
+  display: inline-flex; align-items: center; gap: 8px;
+  padding: 0; border: 0; background: none; font: inherit; color: inherit; cursor: pointer;
+}
+.card-chevron {
+  width: 7px; height: 7px; margin: 0 2px;
+  border-right: 1.5px solid var(--text-faint); border-bottom: 1.5px solid var(--text-faint);
+  transform: rotate(45deg); transition: transform 0.15s;
+}
+.card-toggle[aria-expanded="false"] .card-chevron { transform: rotate(-45deg); }
 .card-body { padding: 14px; }
 .card-body.tight { padding: 0; }
 
