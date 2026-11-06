@@ -5,6 +5,8 @@ of `VERSION`, and it is the tag of the published images.
 
 ## Unreleased
 
+## 0.5.6 — 2026-11-06
+
 ### Added
 
 - **The web UI shows its version.** The sidebar shows the release next to the
