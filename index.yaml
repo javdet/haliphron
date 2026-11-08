@@ -2,6 +2,36 @@ apiVersion: v1
 entries:
   haliphron:
   - apiVersion: v2
+    appVersion: 0.6.0
+    created: "2026-11-08T06:00:23.193192147Z"
+    dependencies:
+    - condition: postgresql.enabled
+      name: postgresql
+      repository: oci://registry-1.docker.io/bitnamicharts
+      version: 18.11.5
+    - condition: minio.enabled
+      name: minio
+      repository: oci://registry-1.docker.io/bitnamicharts
+      version: 17.0.21
+    description: 'The Haliphron control plane: the backend (REST, MCP, Cluster API
+      and the expiry scanners), its PostgreSQL system of record and its object storage.
+      Installed once. The target clusters get haliphron-runtime instead. '
+    digest: 941681cfcb9653ac6f8f7aba908388c9128677d71a9d6196cb14d2348bcbd245
+    home: https://github.com/automagicops/haliphron
+    keywords:
+    - agents
+    - orchestration
+    - control-plane
+    maintainers:
+    - name: automagicops
+    name: haliphron
+    sources:
+    - https://github.com/automagicops/haliphron
+    type: application
+    urls:
+    - https://javdet.github.io/haliphron/haliphron-0.6.0.tgz
+    version: 0.6.0
+  - apiVersion: v2
     appVersion: 0.5.6
     created: "2026-11-06T11:15:11.207760516Z"
     dependencies:
@@ -153,6 +183,29 @@ entries:
     version: 0.5.2
   haliphron-runtime:
   - apiVersion: v2
+    appVersion: 0.6.0
+    created: "2026-11-08T06:00:23.194102291Z"
+    description: 'The Haliphron controller and everything an agent run needs inside
+      a target cluster: the AgentRun CRD, the agents'' namespace with its quota and
+      its default-deny network policy, and the RBAC for both. Installed once per cluster.
+      It holds no database, no UI and no engine — only a controller that fetches work
+      from the control plane and reports back. '
+    digest: d82c3b3d3987722be56f19cf04d134344bfa8b3881d6b89160b98f528f9689b7
+    home: https://github.com/automagicops/haliphron
+    keywords:
+    - agents
+    - kubernetes
+    - controller
+    maintainers:
+    - name: automagicops
+    name: haliphron-runtime
+    sources:
+    - https://github.com/automagicops/haliphron
+    type: application
+    urls:
+    - https://javdet.github.io/haliphron/haliphron-runtime-0.6.0.tgz
+    version: 0.6.0
+  - apiVersion: v2
     appVersion: 0.5.6
     created: "2026-11-06T11:15:11.208962097Z"
     description: 'The Haliphron controller and everything an agent run needs inside
@@ -267,4 +320,4 @@ entries:
     urls:
     - https://javdet.github.io/haliphron/haliphron-runtime-0.5.2.tgz
     version: 0.5.2
-generated: "2026-11-06T11:15:11.195742369Z"
+generated: "2026-11-08T06:00:23.184279647Z"
