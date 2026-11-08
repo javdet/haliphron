@@ -5,6 +5,8 @@ of `VERSION`, and it is the tag of the published images.
 
 ## Unreleased
 
+## 0.6.0 — 2026-11-08
+
 ### Added
 
 - **Ended per-run tokens are deleted after two weeks.** Every run gets its own
