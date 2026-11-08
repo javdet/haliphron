@@ -436,6 +436,17 @@ child runs accountable: the token carries a `run_id` and dies with the run, so a
 the depth limit and charged to the right budget. A global token makes all three
 impossible at once.
 
+**Ended per-run tokens have a retention** (0014). Revoking a `run-mcp` token
+when its run ends leaves the row, so a kept run would keep a dead token for
+ever. `token_retention` holds one row per tenant, `run_token_seconds`, saved
+from the UI; no row means the backend's default of two weeks, and `0` keeps
+them forever. On the same pass as run retention, a batched `DELETE` removes
+`run-mcp` rows created before the cutoff whose `revoked_at` is set or whose
+`expires_at` has passed; the partial index `api_tokens_run_created` serves it.
+`user` and `service` rows are never selected. The deletion is not audited per
+row; a save appends a `token_retention.saved` audit record in its own
+transaction.
+
 `api_tokens.last_used_at` is written on authentication, which means every read of
 this table is potentially a write. Update it no more than once a minute
 (`WHERE last_used_at IS NULL OR last_used_at < now() - interval '1 minute'`): the

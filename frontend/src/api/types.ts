@@ -465,6 +465,19 @@ export interface RunRetention {
   updated_at?: string
 }
 
+/**
+ * How long a per-run token is kept once it has ended. Every run mints one, so
+ * without this the tokens list grows by one dead entry per run.
+ */
+export interface TokenRetention {
+  /** 0 keeps per-run tokens forever. */
+  run_token_retention_seconds: number
+  /** default: never saved, so the backend's two weeks apply. */
+  source: 'default' | 'database'
+  updated_by?: string
+  updated_at?: string
+}
+
 /** The error envelope every non-2xx answer carries. */
 export interface ErrorBody {
   error: { code: string; message: string; field?: string }

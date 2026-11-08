@@ -5,6 +5,17 @@ of `VERSION`, and it is the tag of the published images.
 
 ## Unreleased
 
+### Added
+
+- **Ended per-run tokens are deleted after two weeks.** Every run gets its own
+  MCP token, which stops working when the run ends but stayed in the tokens
+  list for good. A per-run token that is revoked or expired is now deleted 14
+  days after it was created. Tokens minted by hand are not affected. Change the
+  age, or keep per-run tokens forever, on the Settings page or with `GET` and
+  `PUT /api/v1/token-retention` (`admin` to change).
+- Migration `0014_token_retention` adds the `token_retention` table and the
+  `api_tokens_run_created` index.
+
 ## 0.5.6 — 2026-11-06
 
 ### Added

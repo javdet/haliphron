@@ -52,6 +52,7 @@ const (
 	AuditChatIntegrationSaved = "chat_integration.saved"
 	AuditRoleSeeded           = "role.seeded"
 	AuditRunRetentionSaved    = "run_retention.saved"
+	AuditTokenRetentionSaved  = "token_retention.saved"
 )
 
 // AuditEntry is one record. Actor and ActorKind are who did it — a token, a

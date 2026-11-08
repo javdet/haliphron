@@ -284,7 +284,8 @@ func run() error {
 		go func() { defer wg.Done(); service.RunScheduler(ctx, cfg.ScheduleInterval) }()
 		go func() { defer wg.Done(); service.RunReaper(ctx, cfg.ReapInterval) }()
 		// Retention for runs: failed runs after the age set in the UI, three
-		// days unless changed, and every run after HALIPHRON_RUN_RETENTION.
+		// days unless changed, and every run after HALIPHRON_RUN_RETENTION;
+		// then ended per-run tokens, two weeks unless changed in the UI.
 		go func() { defer wg.Done(); service.ReapRuns(ctx, cfg.ReapInterval) }()
 		// Retention for the artifact volume. A no-op in object-store mode,
 		// where the chart generated lifecycle rules and the store applies them

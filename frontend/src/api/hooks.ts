@@ -34,6 +34,7 @@ import {
   type Schedule,
   type ScheduleRequest,
   type Secret,
+  type TokenRetention,
 } from './types'
 
 export interface RunFilter {
@@ -64,6 +65,7 @@ export const keys = {
   modelCredential: () => ['model-credential'] as const,
   gitCredential: () => ['git-credential'] as const,
   runRetention: () => ['run-retention'] as const,
+  tokenRetention: () => ['token-retention'] as const,
   chatIntegration: (platform: ChatPlatform) => ['integrations', platform] as const,
 }
 
@@ -523,6 +525,25 @@ export function usePutRunRetention() {
     mutationFn: (failed_retention_seconds: number) =>
       request<RunRetention>('/run-retention', { method: 'PUT', body: { failed_retention_seconds } }),
     onSuccess: (saved) => qc.setQueryData(keys.runRetention(), saved),
+  })
+}
+
+export function useTokenRetention() {
+  return useQuery({
+    queryKey: keys.tokenRetention(),
+    queryFn: ({ signal }) => request<TokenRetention>('/token-retention', { signal }),
+  })
+}
+
+export function usePutTokenRetention() {
+  const qc = useQueryClient()
+  return useMutation({
+    mutationFn: (run_token_retention_seconds: number) =>
+      request<TokenRetention>('/token-retention', {
+        method: 'PUT',
+        body: { run_token_retention_seconds },
+      }),
+    onSuccess: (saved) => qc.setQueryData(keys.tokenRetention(), saved),
   })
 }
 

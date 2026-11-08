@@ -242,9 +242,10 @@ func (s *Service) RunsKeptFor(ctx context.Context) time.Duration {
 	return keep.RunsKeptFor()
 }
 
-// ReapRuns deletes runs past either age, on an interval, until the context
-// ends. The failed-run age is read again on every pass, so a change saved on
-// one replica is applied by whichever replica runs the next one.
+// ReapRuns deletes runs past either age, and then ended per-run tokens past
+// theirs (token_retention.go), on an interval, until the context ends. The
+// failed-run age is read again on every pass, so a change saved on one replica
+// is applied by whichever replica runs the next one.
 func (s *Service) ReapRuns(ctx context.Context, interval time.Duration) {
 	if interval <= 0 {
 		interval = time.Hour
@@ -258,6 +259,7 @@ func (s *Service) ReapRuns(ctx context.Context, interval time.Duration) {
 			return
 		case <-ticker.C:
 			s.reapRunsOnce(ctx)
+			s.reapRunTokensOnce(ctx)
 		}
 	}
 }

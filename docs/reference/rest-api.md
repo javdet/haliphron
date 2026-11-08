@@ -510,6 +510,43 @@ required. `0` keeps failed runs forever; any other value must be between
 
 ---
 
+## Token retention
+
+How long a per-run token is kept once it has ended. Every run that reaches the
+MCP endpoint gets a `run-mcp` token, and the token is revoked when the run ends.
+A `run-mcp` token that is revoked or expired is deleted this long after it was
+created. User and service tokens are never deleted by retention: remove them
+with `POST /api/v1/tokens/{id}/remove`. A deleted per-run token gets no audit
+record of its own. The setting is read again on every retention pass, every
+`HALIPHRON_REAP_INTERVAL` (an hour by default).
+
+### `GET /api/v1/token-retention`
+
+Scope: `runs:read`.
+
+```json
+{
+  "run_token_retention_seconds": 1209600,
+  "source": "default"
+}
+```
+
+| Field | Meaning |
+|---|---|
+| `run_token_retention_seconds` | the age of an ended per-run token; `0` keeps them forever. `1209600` (14 days) until first saved |
+| `source` | `default` (never saved) or `database` |
+| `updated_by`, `updated_at` | who saved it last, and when; absent while `source` is `default` |
+
+### `PUT /api/v1/token-retention`
+
+Scope: `admin`. Body: `{"run_token_retention_seconds": 604800}`. The field is
+required. `0` keeps per-run tokens forever; any other value must be between
+`3600` (an hour) and `315360000` (ten years), or the request is refused with
+`422 invalid_request`. Returns the object `GET` returns. Every save appends a
+`token_retention.saved` audit record.
+
+---
+
 ## Statistics
 
 ### `GET /api/v1/stats/runs`

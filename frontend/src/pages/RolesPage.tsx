@@ -166,7 +166,7 @@ export function RolesPage() {
               <thead>
                 <tr>
                   <th>Name</th>
-                  <th>Spec</th>
+                  <th>Model</th>
                   <th>Updated</th>
                   <th />
                 </tr>
@@ -180,8 +180,15 @@ export function RolesPage() {
                         <div className="small muted">{role.spec.description}</div>
                       )}
                     </td>
-                    <td className="mono small muted">
-                      <span className="trunc">{JSON.stringify(role.spec)}</span>
+                    <td className="small">
+                      {role.spec.model ? (
+                        <span className="mono">{role.spec.model}</span>
+                      ) : (
+                        // The default is the backend's HALIPHRON_DEFAULT_MODEL, which
+                        // no endpoint reports; naming a guess here would be wrong
+                        // on any installation that changed it.
+                        <span className="muted">platform default</span>
+                      )}
                     </td>
                     <td className="small muted">
                       <Time at={role.updated_at} />

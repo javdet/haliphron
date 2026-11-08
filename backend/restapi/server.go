@@ -96,6 +96,8 @@ func (s *Server) Handler() http.Handler {
 	// may know how long a failed one will be there. Changing it is admin's.
 	mux.HandleFunc("GET "+BasePath+"/run-retention", s.scoped(store.ScopeRunsRead, s.getRunRetention))
 	mux.HandleFunc("PUT "+BasePath+"/run-retention", s.scoped(store.ScopeAdmin, s.putRunRetention))
+	mux.HandleFunc("GET "+BasePath+"/token-retention", s.scoped(store.ScopeRunsRead, s.getTokenRetention))
+	mux.HandleFunc("PUT "+BasePath+"/token-retention", s.scoped(store.ScopeAdmin, s.putTokenRetention))
 
 	// runs:write, like starting a run, and refused to a run's own token in
 	// app: a schedule outlives the run that would have created it.
