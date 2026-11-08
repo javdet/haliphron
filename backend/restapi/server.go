@@ -108,6 +108,15 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("DELETE "+BasePath+"/schedules/{id}", s.scoped(store.ScopeRunsWrite, s.deleteSchedule))
 	mux.HandleFunc("POST "+BasePath+"/schedules/{id}/run", s.scoped(store.ScopeRunsWrite, s.triggerSchedule))
 
+	// Locks are set by agents through MCP. Reading them is runs:read; the
+	// force-release is admin, because every agent pod holds runs:write and
+	// one prompt injection must not clear every lock in the installation.
+	mux.HandleFunc("GET "+BasePath+"/locks", s.scoped(store.ScopeRunsRead, s.listLocks))
+	mux.HandleFunc("DELETE "+BasePath+"/locks/{id}", s.scoped(store.ScopeAdmin, s.deleteLock))
+	mux.HandleFunc("GET "+BasePath+"/deferred-runs", s.scoped(store.ScopeRunsRead, s.listDeferred))
+	mux.HandleFunc("GET "+BasePath+"/deferred-runs/{id}", s.scoped(store.ScopeRunsRead, s.getDeferred))
+	mux.HandleFunc("POST "+BasePath+"/deferred-runs/{id}/cancel", s.scoped(store.ScopeRunsWrite, s.cancelDeferred))
+
 	mux.HandleFunc("GET "+BasePath+"/roles", s.scoped(store.ScopeRunsRead, s.listRoles))
 	mux.HandleFunc("PUT "+BasePath+"/roles/{name}", s.scoped(store.ScopeAdmin, s.putRole))
 	mux.HandleFunc("GET "+BasePath+"/roles/{name}", s.scoped(store.ScopeRunsRead, s.getRole))
@@ -250,6 +259,15 @@ func (s *Server) failFor(w http.ResponseWriter, r *http.Request, err error) {
 	case errors.Is(err, app.ErrScheduleFromAgent):
 		s.fail(w, http.StatusForbidden, "forbidden",
 			"schedules are managed by operators; a run's own token cannot create, change or start one", "")
+	case errors.Is(err, app.ErrLockFromAgent):
+		s.fail(w, http.StatusForbidden, "forbidden",
+			"a run's own token cannot remove another run's lock", "")
+	case errors.Is(err, app.ErrDeferredNotYours):
+		s.fail(w, http.StatusForbidden, "forbidden",
+			"a run's own token cancels only the deferred runs that run created", "")
+	case errors.Is(err, store.ErrDeferredSettled):
+		s.fail(w, http.StatusConflict, "deferred_settled",
+			"this deferred run is no longer waiting", "")
 	case errors.Is(err, store.ErrNotFound):
 		s.fail(w, http.StatusNotFound, "not_found", "no such object", "")
 	case errors.Is(err, store.ErrNoKEK):

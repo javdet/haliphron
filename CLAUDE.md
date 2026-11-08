@@ -199,6 +199,22 @@ changes no row. A fire that admits nothing advances through the same fenced stat
 the fence compares it for equality. `Replace` cancels the earlier runs only after its own run has
 won the fence, or a replica that lost would cancel the winner's run.
 
+**A resource lock is a registry entry, never a judgement, and every lock write takes the advisory
+lock.** The backend never compares locks or holds a run back because of one. `SetLock`
+(`backend/store/locks.go`) takes `pg_advisory_xact_lock(lockWriteKey)` and returns the live locks
+of other runs with a lower `seq` from inside that transaction; that is what makes "the later of any
+two locks sees the earlier one" true. Drop the advisory lock and two agents can each miss the
+other. A lock row goes only four ways: its holder's `UnsetLocks` (`WHERE run_id = holder`), an
+operator's admin `ForceUnsetLock`, the `runs_release_locks` trigger when the run's status turns
+terminal, and expiry plus the sweeper. Never add an agent path that removes another run's lock,
+and never revive an expired lock's `seq`.
+
+**A deferred run becomes a run only inside `InsertRun`.** `linkDeferredFire`
+(`backend/store/deferred.go`), `UPDATE … SET state = 'submitted' WHERE id = $1 AND state =
+'waiting'`, runs in the run's own transaction and rolls the run back when it changes no row.
+Every replica's scheduler loop fires due rows, with no leader. Never write `state = 'submitted'`
+from another path.
+
 **In the image, `persist` runs before the git phases** — what has been paid for is made durable
 before anything allowed to fail, so a retry never pays for the model twice.
 `TestAFailedPushLeavesTheResultAlreadyInStorage` is what keeps that true.

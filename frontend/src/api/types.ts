@@ -533,3 +533,46 @@ export interface ChatIntegrationRequest {
   /** Slack only. Absent keeps the stored token. */
   app_token?: string
 }
+
+/**
+ * A resource lock: a run saying it is working on a piece of shared
+ * infrastructure. Advisory — the name and description are free-form text an
+ * agent wrote, and the backend never compares two locks.
+ */
+export interface Lock {
+  lock_id: string
+  seq: number
+  name: string
+  description: string
+  acquired_at: string
+  updated_at: string
+  expires_at: string
+
+  held_by_run: string
+  holder_status: RunStatus | string
+  holder_role?: string
+  holder_created_at: string
+  holder_started_at?: string
+  /** Moves with every heartbeat the holder's cluster sends. */
+  holder_last_activity_at: string
+}
+
+export type DeferredState = 'waiting' | 'submitted' | 'expired' | 'cancelled'
+
+/** A run request waiting for locks to be released, for a time, or both. */
+export interface DeferredRun {
+  deferred_id: string
+  /** The run that deferred the work; the run this becomes is its child. */
+  parent_run_id: string
+  state: DeferredState
+  run: RunTemplate
+  wait_for_locks: { lock_id: string; live: boolean }[]
+  not_before?: string
+  give_up_at: string
+  /** The run it became, once submitted. */
+  run_id?: string
+  reason?: string
+  created_by: string
+  created_at: string
+  finished_at?: string
+}

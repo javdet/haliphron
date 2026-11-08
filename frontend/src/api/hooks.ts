@@ -21,8 +21,11 @@ import {
   type ChatIntegrationRequest,
   type Cluster,
   type CreateRunRequest,
+  type DeferredRun,
+  type DeferredState,
   type GitCredential,
   type GitTokenProvider,
+  type Lock,
   type LogPage,
   type ModelCredential,
   type ModelCredentialType,
@@ -67,6 +70,14 @@ export const keys = {
   runRetention: () => ['run-retention'] as const,
   tokenRetention: () => ['token-retention'] as const,
   chatIntegration: (platform: ChatPlatform) => ['integrations', platform] as const,
+  locks: (runId?: string) => ['locks', runId ?? ''] as const,
+  deferred: (filter: DeferredFilter) => ['deferred-runs', filter] as const,
+}
+
+export interface DeferredFilter {
+  state?: DeferredState
+  parent_run_id?: string
+  run_id?: string
 }
 
 /** How often a run that has not finished is re-read. */
@@ -283,6 +294,62 @@ export function useTriggerSchedule() {
       qc.setQueryData(keys.run(run.run_id), run)
       void qc.invalidateQueries({ queryKey: ['runs'] })
     },
+  })
+}
+
+// ---------------------------------------------------------------------------
+// locks and deferred runs
+// ---------------------------------------------------------------------------
+
+/** Locks come and go with runs; a page left open should follow them. */
+const LOCKS_MS = 5000
+
+export function useLocks(runId?: string, enabled = true) {
+  return useQuery({
+    enabled,
+    queryKey: keys.locks(runId),
+    queryFn: ({ signal }) =>
+      request<{ locks: Lock[] }>(runId ? `/locks?run_id=${encodeURIComponent(runId)}` : '/locks', {
+        signal,
+      }).then((r) => r.locks),
+    refetchInterval: LOCKS_MS,
+  })
+}
+
+/** The operator's force-release. Admin only; an agent never reaches it. */
+export function useForceReleaseLock() {
+  const qc = useQueryClient()
+  return useMutation({
+    mutationFn: (id: string) => request<void>(`/locks/${encodeURIComponent(id)}`, { method: 'DELETE' }),
+    onSuccess: () => {
+      void qc.invalidateQueries({ queryKey: ['locks'] })
+      void qc.invalidateQueries({ queryKey: ['deferred-runs'] })
+    },
+  })
+}
+
+export function useDeferredRuns(filter: DeferredFilter = {}) {
+  const params = new URLSearchParams()
+  if (filter.state) params.set('state', filter.state)
+  if (filter.parent_run_id) params.set('parent_run_id', filter.parent_run_id)
+  if (filter.run_id) params.set('run_id', filter.run_id)
+  const qs = params.toString()
+  return useQuery({
+    queryKey: keys.deferred(filter),
+    queryFn: ({ signal }) =>
+      request<{ deferred_runs: DeferredRun[] }>(`/deferred-runs${qs ? `?${qs}` : ''}`, { signal }).then(
+        (r) => r.deferred_runs,
+      ),
+    refetchInterval: LOCKS_MS,
+  })
+}
+
+export function useCancelDeferred() {
+  const qc = useQueryClient()
+  return useMutation({
+    mutationFn: (id: string) =>
+      request<DeferredRun>(`/deferred-runs/${encodeURIComponent(id)}/cancel`, { method: 'POST' }),
+    onSuccess: () => void qc.invalidateQueries({ queryKey: ['deferred-runs'] }),
   })
 }
 

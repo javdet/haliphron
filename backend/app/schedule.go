@@ -481,11 +481,21 @@ func templateOf(req run.SubmitRequest) scheduleTemplate {
 }
 
 func decodeSchedule(row store.Schedule) (Schedule, error) {
-	var t scheduleTemplate
-	if err := json.Unmarshal(row.Run, &t); err != nil {
+	req, err := decodeTemplate(row.Run)
+	if err != nil {
 		return Schedule{}, fmt.Errorf("decode the template of schedule %s: %w", row.ID, err)
 	}
-	return Schedule{Schedule: row, Template: run.SubmitRequest{
+	return Schedule{Schedule: row, Template: req}, nil
+}
+
+// decodeTemplate reads a stored run template — a schedule's or a deferred
+// run's — back into a request.
+func decodeTemplate(raw json.RawMessage) (run.SubmitRequest, error) {
+	var t scheduleTemplate
+	if err := json.Unmarshal(raw, &t); err != nil {
+		return run.SubmitRequest{}, err
+	}
+	return run.SubmitRequest{
 		Prompt:         t.Prompt,
 		Agent:          runv1.AgentType(t.Agent),
 		Model:          t.Model,
@@ -498,5 +508,5 @@ func decodeSchedule(row store.Schedule) (Schedule, error) {
 		MaxCostUSD:     runv1.MoneyUSD(t.MaxCostUSD),
 		MaxTurns:       t.MaxTurns,
 		Priority:       t.Priority,
-	}}, nil
+	}, nil
 }

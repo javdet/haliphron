@@ -4,12 +4,15 @@ import {
   isLive,
   useAttempts,
   useCancelRun,
+  useDeferredRuns,
+  useLocks,
   useLogs,
   useResult,
   useRetryRun,
   useRun,
 } from '../api/hooks'
 import { DeleteRunDialog } from '../components/DeleteRunDialog'
+import { DeferredRunsTable } from './LocksPage'
 import { FailureBadge, StatusBadge } from '../components/StatusBadge'
 import {
   Card,
@@ -28,6 +31,74 @@ import {
 import type { Attempt, Run } from '../api/types'
 
 type Tab = 'result' | 'logs' | 'attempts'
+
+/**
+ * What the run holds and what it handed on. A run that deferred its work ends
+ * Succeeded — exit code 0 and nothing more — so the hand-off is shown here,
+ * where someone would otherwise read that status as "the task is done".
+ */
+function LocksAndDeferrals({ id, live }: { id: string; live: boolean }) {
+  const locks = useLocks(id, live)
+  const deferred = useDeferredRuns({ parent_run_id: id })
+  const origin = useDeferredRuns({ run_id: id })
+  const held = live ? (locks.data ?? []) : []
+  const handed = deferred.data ?? []
+  const from = origin.data?.[0]
+  if (held.length === 0 && handed.length === 0 && !from) return null
+  return (
+    <Card title="Locks and deferred work" tight>
+      {from && (
+        <div className="banner" role="status">
+          <div className="small">
+            This run continues work deferred by run{' '}
+            <Link to={`/runs/${from.parent_run_id}`} className="mono">
+              {from.parent_run_id}
+            </Link>
+            .
+          </div>
+        </div>
+      )}
+      {handed.length > 0 && (
+        <div className="banner warn" role="status">
+          <div className="small">
+            This run deferred {handed.length === 1 ? 'part of its task' : `${handed.length} parts of its task`} to
+            a later run. Its own status says only how it exited, not that the task is done.
+          </div>
+        </div>
+      )}
+      {held.length > 0 && (
+        <div className="table-wrap">
+          <table>
+            <thead>
+              <tr>
+                <th>Holds</th>
+                <th>Acquired</th>
+                <th>Expires</th>
+              </tr>
+            </thead>
+            <tbody>
+              {held.map((l) => (
+                <tr key={l.lock_id}>
+                  <td>
+                    {l.name}
+                    {l.description && <div className="small muted">{l.description}</div>}
+                  </td>
+                  <td className="small nowrap">
+                    <Time at={l.acquired_at} />
+                  </td>
+                  <td className="small nowrap">
+                    <Time at={l.expires_at} />
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      )}
+      {handed.length > 0 && <DeferredRunsTable rows={handed} compact />}
+    </Card>
+  )
+}
 
 function Summary({ run }: { run: Run }) {
   return (
@@ -401,6 +472,7 @@ export function RunDetailPage() {
       <div className="content">
         <ErrorBanner error={retry.error} what="retry the run" />
         <Summary run={data} />
+        <LocksAndDeferrals id={id} live={live} />
 
         <Card tight>
           <div className="tabs">

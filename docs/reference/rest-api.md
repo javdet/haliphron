@@ -389,6 +389,82 @@ alone. Accepts an `Idempotency-Key`; one key used on two schedules is a
 
 ---
 
+## Locks and deferred runs
+
+Agents set locks and defer work through MCP (see
+[Resource locks](mcp-tools.md#resource-locks)). These endpoints let an operator
+see what agents hold and what is waiting, force-release a lock, and cancel a
+waiting run.
+
+### `GET /api/v1/locks`
+
+Scope: `runs:read`. Every live lock, oldest first. `?run_id=` lists the locks
+of one run.
+
+```json
+{"locks": [ /* lock objects */ ]}
+```
+
+### `DELETE /api/v1/locks/{id}`
+
+Scope: `admin`. Force-releases any run's lock and returns `204`. The run is not
+stopped: other agents just stop seeing the lock, and runs waiting on it may
+start. It is `admin` and not `runs:write` because every agent pod holds
+`runs:write`, and an agent must not be able to clear other runs' locks. The
+release is audited as `lock.force_unset`.
+
+### The lock object
+
+| Field | Type | Notes |
+|---|---|---|
+| `lock_id` | ULID | |
+| `seq` | integer | the lock's place in the order; a lower `seq` was set earlier |
+| `name`, `description` | string | written by an agent; display them as untrusted text |
+| `acquired_at`, `updated_at`, `expires_at` | timestamp | `updated_at` moves when the holder sets the same name again |
+| `held_by_run` | ULID | |
+| `holder_status` | string | the holder run's status |
+| `holder_role` | string | omitted when the run has no role |
+| `holder_created_at`, `holder_started_at` | timestamp | `holder_started_at` is omitted before the run starts |
+| `holder_last_activity_at` | timestamp | moves with every heartbeat the holder's cluster sends |
+
+### `GET /api/v1/deferred-runs`
+
+Scope: `runs:read`. Newest first, up to `limit` (default 100, at most 200).
+Filters: `state` (`waiting`, `submitted`, `expired`, `cancelled`),
+`parent_run_id` (the runs a run deferred), `run_id` (the row a run was started
+from).
+
+```json
+{"deferred_runs": [ /* deferred run objects */ ]}
+```
+
+### `GET /api/v1/deferred-runs/{id}`
+
+Scope: `runs:read`. Returns a [deferred run object](#the-deferred-run-object).
+
+### `POST /api/v1/deferred-runs/{id}/cancel`
+
+Scope: `runs:write`. No body. Cancels a waiting row and returns it. A row that
+is no longer waiting is `409 deferred_settled`. A `run-mcp` token can cancel
+only the rows its own run created; any other is `403 forbidden`.
+
+### The deferred run object
+
+| Field | Type | Notes |
+|---|---|---|
+| `deferred_id` | ULID | |
+| `parent_run_id` | ULID | the run that deferred the work; the run this becomes is its child |
+| `state` | string | `waiting`, `submitted`, `expired` or `cancelled` |
+| `run` | object | the request, in the shape of [`POST /api/v1/runs`](#post-apiv1runs) |
+| `wait_for_locks` | array | `{"lock_id": "…", "live": true}`; it starts when no entry is `live` |
+| `not_before` | timestamp | omitted when not set |
+| `give_up_at` | timestamp | a row still waiting at this time expires |
+| `run_id` | ULID | the run it became, once `submitted` |
+| `reason` | string | why it expired or was cancelled |
+| `created_by`, `created_at`, `finished_at` | string, timestamp | |
+
+---
+
 ## Roles
 
 | Endpoint | Scope | Returns |

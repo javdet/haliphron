@@ -30,6 +30,11 @@ type SweepResult struct {
 	Placed        int
 	Recovered     int
 	StaleClusters int
+	// LocksExpired counts expired lock rows deleted. They were already
+	// invisible; this is the rows going.
+	LocksExpired int
+	// DeferredExpired counts deferred runs that gave up waiting.
+	DeferredExpired int
 }
 
 // Sweep performs one pass.
@@ -138,6 +143,23 @@ func (s *Service) Sweep(ctx context.Context) (SweepResult, error) {
 		if recovered {
 			out.Recovered++
 		}
+	}
+
+	locks, err := s.store.DeleteExpiredLocks(ctx)
+	if err != nil {
+		return out, err
+	}
+	out.LocksExpired = locks
+
+	gaveUp, err := s.store.ExpireDeferred(ctx)
+	if err != nil {
+		return out, err
+	}
+	out.DeferredExpired = len(gaveUp)
+	for _, d := range gaveUp {
+		s.log.Info("a deferred run gave up waiting", "deferred", d.ID, "parent", d.ParentRunID,
+			"giveUpAt", d.GiveUpAt, "stillHeld", len(d.LiveLocks))
+		s.auditDeferred(ctx, "expiry", "system", store.AuditDeferredExpired, d, nil)
 	}
 
 	if out.AckExpired > out.AckExhausted || out.Placed > 0 {

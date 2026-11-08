@@ -49,6 +49,15 @@ const (
 	AuditScheduleDeleted   = "schedule.deleted"
 	AuditScheduleTriggered = "schedule.triggered"
 
+	AuditLockSet        = "lock.set"
+	AuditLockUnset      = "lock.unset"
+	AuditLockForceUnset = "lock.force_unset"
+
+	AuditDeferredCreated   = "deferred_run.created"
+	AuditDeferredFired     = "deferred_run.fired"
+	AuditDeferredExpired   = "deferred_run.expired"
+	AuditDeferredCancelled = "deferred_run.cancelled"
+
 	AuditChatIntegrationSaved = "chat_integration.saved"
 	AuditRoleSeeded           = "role.seeded"
 	AuditRunRetentionSaved    = "run_retention.saved"

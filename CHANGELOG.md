@@ -15,6 +15,26 @@ of `VERSION`, and it is the tag of the published images.
   `PUT /api/v1/token-retention` (`admin` to change).
 - Migration `0014_token_retention` adds the `token_retention` table and the
   `api_tokens_run_created` index.
+- **Agents can tell each other what shared infrastructure they are changing.**
+  Four new MCP tools for a run's own token. `set_lock` records that the run is
+  working on something, such as `prod/db/orders`, and returns the locks of
+  other runs that were set before it. `unset_lock` releases the run's own
+  locks. `list_locks` shows every live lock with its holder's status and last
+  activity. `schedule_agent` hands the rest of a task to a new run that starts
+  once the named locks are released or at a set time. The backend never decides
+  whether two locks conflict; the agents do, following the protocol in the tool
+  descriptions. A lock is released when its run ends and expires at the latest
+  when the run's timeout would. Operator tokens with `runs:read` can call
+  `list_locks`.
+- **A Locks page in the UI** lists live locks and deferred runs. An admin can
+  force-release a lock and cancel a waiting run. A run's page shows the locks
+  it holds and the work it deferred. A run that deferred work usually ends
+  `Succeeded`, which still means only that it exited 0.
+- New REST endpoints: `GET /api/v1/locks`, `DELETE /api/v1/locks/{id}`
+  (`admin`), `GET /api/v1/deferred-runs`, `GET /api/v1/deferred-runs/{id}` and
+  `POST /api/v1/deferred-runs/{id}/cancel`.
+- Migration `0015_resource_locks` adds the `resource_locks` and
+  `deferred_runs` tables, and the `runs_release_locks` trigger.
 
 ## 0.5.6 — 2026-11-06
 

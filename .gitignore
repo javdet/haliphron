@@ -36,3 +36,4 @@ deploy/charts/*/charts/
 
 # Packaged charts, from `make chart-package`.
 dist/
+resource-locks-plan.md

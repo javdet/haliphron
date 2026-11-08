@@ -75,6 +75,12 @@ type NewRun struct {
 	// and the insert is rolled back with ErrScheduleSettled if the fence is
 	// lost. Unset for "run now", which leaves the schedule's slot alone.
 	ScheduleFire *ScheduleFire
+
+	// DeferredID, when set, is the deferred run this run is the fire of: the
+	// row is marked submitted in the same transaction, fenced on its still
+	// waiting, and the insert is rolled back with ErrDeferredSettled if the
+	// fence is lost.
+	DeferredID runv1.ULID
 }
 
 // ErrTooManyChildren is a child run refused because its parent has already
@@ -98,7 +104,8 @@ var ErrTooManyChildren = errors.New("store: the parent run has started its full 
 //
 // A scheduled fire advances its schedule here too, and for the same reason
 // again: a fire whose run committed without the advance would be fired a
-// second time by the next replica to look.
+// second time by the next replica to look. A deferred run's fire marks its row
+// submitted here, for that reason once more.
 func (s *Store) InsertRun(ctx context.Context, r NewRun) error {
 	return s.inTx(ctx, func(tx *sql.Tx) error {
 		if r.ParentRunID != "" && r.MaxChildren > 0 {
@@ -120,6 +127,11 @@ func (s *Store) InsertRun(ctx context.Context, r NewRun) error {
 		}
 		if r.ScheduleFire != nil {
 			if err := recordScheduleRun(ctx, tx, r.ScheduleID, r.ID); err != nil {
+				return err
+			}
+		}
+		if r.DeferredID != "" {
+			if err := linkDeferredFire(ctx, tx, r.DeferredID, r.ID); err != nil {
 				return err
 			}
 		}

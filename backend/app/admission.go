@@ -120,6 +120,8 @@ type submitLinks struct {
 	// makes the admission that schedule's fenced fire rather than a "run now".
 	schedule runv1.ULID
 	fire     *store.ScheduleFire
+	// deferred is the deferred run this admission is the fire of.
+	deferred runv1.ULID
 }
 
 // prepare applies admission's rules to a request and renders its spec,
@@ -216,6 +218,7 @@ func (s *Service) submit(ctx context.Context, req run.SubmitRequest, links submi
 		ChatTrigger:    chat,
 		ScheduleID:     links.schedule,
 		ScheduleFire:   links.fire,
+		DeferredID:     links.deferred,
 	}); err != nil {
 		if errors.Is(err, store.ErrTooManyChildren) {
 			// Worth a line of its own: a run that hits this is either a
@@ -236,7 +239,7 @@ func (s *Service) submit(ctx context.Context, req run.SubmitRequest, links submi
 		Payload: map[string]any{
 			"agent": spec.Agent, "model": spec.Model, "role": req.Role,
 			"repo": spec.Repo.URL, "via": req.CreatedVia, "parent": string(req.ParentRunID),
-			"schedule": string(links.schedule),
+			"schedule": string(links.schedule), "deferred": string(links.deferred),
 		},
 	}); err != nil {
 		return Submitted{}, err

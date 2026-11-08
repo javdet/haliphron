@@ -7,6 +7,7 @@ import { RunDetailPage } from './pages/RunDetailPage'
 import { SchedulesPage } from './pages/SchedulesPage'
 import { ScheduleDetailPage } from './pages/ScheduleDetailPage'
 import { ClustersPage } from './pages/ClustersPage'
+import { LocksPage } from './pages/LocksPage'
 import { StatsPage } from './pages/StatsPage'
 import { RolesPage } from './pages/RolesPage'
 import { TokensPage } from './pages/TokensPage'
@@ -35,6 +36,7 @@ function Sidebar() {
       <nav className="nav">
         <NavLink to="/runs">Runs</NavLink>
         <NavLink to="/schedules">Schedules</NavLink>
+        <NavLink to="/locks">Locks</NavLink>
         <NavLink to="/clusters">Clusters</NavLink>
         <NavLink to="/stats">Statistics</NavLink>
         <div className="nav-group">
@@ -165,6 +167,7 @@ export default function App() {
           <Route path="/runs/:id" element={<RunDetailPage />} />
           <Route path="/schedules" element={<SchedulesPage />} />
           <Route path="/schedules/:id" element={<ScheduleDetailPage />} />
+          <Route path="/locks" element={<LocksPage />} />
           <Route path="/clusters" element={<ClustersPage />} />
           <Route path="/stats" element={<StatsPage />} />
           <Route path="/roles" element={<RolesPage />} />

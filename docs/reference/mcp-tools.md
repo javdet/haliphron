@@ -173,6 +173,134 @@ Scope: `runs:read`.
 **Not offered to a per-run token.** `tools/list` omits this tool when the
 caller is an agent inside a pod. It exists for an operator without a UI.
 
+## Resource locks
+
+Four tools let agents that change shared infrastructure (a load balancer, a
+database, DNS, a cluster) tell each other what they are working on, and hand
+the rest of a task to a later run when what they need is busy. A lock is
+advisory: a free-form name and description. The backend never compares two
+locks, never refuses a lock because of another one, and never holds a run back
+because of one. Each agent decides whether a lock concerns its own work. See
+[Cooperative locks](../explanation/cooperative-locks.md) for the reasoning.
+
+`set_lock`, `unset_lock` and `schedule_agent` need a per-run token: the holder
+of a lock is the run whose token set it, never something named in the
+arguments. `list_locks` is also offered to an operator's token with
+`runs:read`.
+
+### The protocol
+
+1. Before you change shared infrastructure, call `set_lock`.
+2. Read `earlier` in the answer. It lists the live locks of other runs that
+   were set before yours. If any of them concerns the same infrastructure as
+   your work, you are second: call `unset_lock`, then stop or call
+   `schedule_agent` with that `lock_id`.
+3. Locks set after yours are not your concern. Their holders see yours in their
+   own `earlier`.
+4. If any lock tool fails, do not start the change.
+
+Every lock write takes one database-wide advisory lock, so locks commit in the
+order of their `seq`. For any two locks, the answer to the later `set_lock`
+contains the earlier one. When two agents agree that their work overlaps,
+exactly one of them backs off.
+
+Lock names and descriptions are written by other agents, so they can carry a
+prompt injection. The text block puts them inside a
+`<<< BEGIN LOCKS … >>>` / `<<< END LOCKS >>>` block that labels them as data,
+and quotes each one.
+
+### `set_lock`
+
+Registers that the calling run is working on something, or refreshes a lock it
+already holds.
+
+| Argument | Type | Required | Default | Notes |
+|---|---|---|---|---|
+| `name` | string | yes | — | 1 to 128 bytes, one line. System and environment, such as `prod/db/orders` |
+| `description` | string | yes | — | Up to 1024 bytes, one line. What is being done and for about how long |
+| `ttl_seconds` | integer | no | the run's timeout | At least 60. A longer value is cut to the run's `timeout_seconds` |
+
+Control characters, line breaks and bidirectional overrides are refused, not
+removed. A run holds at most 8 live locks.
+
+Calling it again with a name the run holds keeps the lock's `lock_id`, `seq`
+and place in the order, and replaces its description and expiry. A lock that
+had expired is replaced by a new one with a new place.
+
+```json
+{
+  "lock": {"lock_id": "01JD…", "name": "prod/db/orders", "description": "…", "expires_at": "…", "seq": 42},
+  "earlier": [
+    {"lock_id": "01JC…", "seq": 41, "name": "prod/db/orders", "description": "…",
+     "held_by_run": "01JB…", "holder_status": "Running",
+     "holder_started_at": "…", "holder_last_activity_at": "…",
+     "acquired_at": "…", "expires_at": "…"}
+  ]
+}
+```
+
+A conflict is not an error. `isError` is set only for a refusal: a bad
+argument, the limit of 8, a run that has ended.
+
+### `unset_lock`
+
+Releases the calling run's locks.
+
+| Argument | Type | Required | Notes |
+|---|---|---|---|
+| `lock_id` | string | no | |
+| `name` | string | no | |
+
+With neither argument, every lock of the calling run is released. Another
+run's lock is never released, and naming one is not an error: `removed` is
+simply empty. The answer is `{"removed": ["01JD…"]}`.
+
+### `list_locks`
+
+Every live lock, oldest first. Takes no arguments. Each entry has the same
+fields as an `earlier` entry, plus `mine` when the caller is a run.
+`holder_last_activity_at` moves with every heartbeat the holder's cluster
+sends. A holder that still says `Running` but went quiet minutes ago is on a
+cluster that stopped reporting.
+
+No prompt, result or credential of the holder is returned.
+
+### `schedule_agent`
+
+Hands the rest of the task to a new run, which starts once none of the given
+locks is held, at a time, or both. The calling run should then finish.
+
+| Argument | Type | Required | Default | Notes |
+|---|---|---|---|---|
+| `prompt` | string | yes | — | The rest of the task, written to stand on its own |
+| `wait_for_locks` | array of string | no | — | `lock_id` values. Names are not accepted: they are not unique across runs |
+| `not_before` | string | no | — | RFC 3339 |
+| `give_up_after_seconds` | integer | no | 86400 | 60 to 604800 |
+| `model` | string | no | the parent's default | |
+| `timeout_seconds` | integer | no | the default | 60 to 86400 |
+
+At least one of `wait_for_locks` and `not_before` is required. The new run is
+a child of the calling run. It inherits the role, the repository and the cost
+ceiling, is one level deeper, and counts against the parent's limit of 10
+children. A run started from chat replies in the same thread when the
+continuation ends. The request is checked against admission when the tool is
+called, so a deleted role or a bad timeout is refused now, not when the run
+starts.
+
+If every lock it names has already been released and there is no
+`not_before`, nothing is saved, and the answer tells the agent to carry on
+itself. If the run cannot start before `give_up_after_seconds` passes, it
+expires. A run that admission refuses when it is due also expires, with the
+reason. The answer is
+`{"deferred_id": "…", "state": "waiting", "give_up_at": "…", "wait_for_locks": [...], "not_before": …}`.
+
+When the locks go, every run waiting on them starts. If two of them want the
+same thing, both call `set_lock`, and the protocol makes the later one yield
+and defer again.
+
+The calling run usually ends `Succeeded`, which means only that it exited with
+code 0. The run's page in the UI shows that it deferred work.
+
 ---
 
 ## Tasks
@@ -286,4 +414,7 @@ deeper, and inherits the parent's `role` and `repo` when it names neither.
 
 The maximum depth is 8.
 
-Such a caller sees five tools, not six.
+Such a caller does not see `list_clusters`, and does see the four lock tools:
+`set_lock`, `unset_lock`, `list_locks` and `schedule_agent`. An operator's
+token sees `list_locks` (with `runs:read`) and `list_clusters`, but cannot hold
+a lock or defer work.

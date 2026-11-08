@@ -243,6 +243,27 @@ const schedules = [
 ]
 const triggeredRuns = []
 
+// Locks and deferred runs: what agents say they are working on, and the work
+// waiting for it. Text in the locks is an agent's own words.
+const locks = [
+  {
+    lock_id: '01JD9T0000LOCK0000000PRODDB', seq: 41, name: 'prod/db/orders',
+    description: 'migrating the orders schema (adds refund_state), about 20 minutes',
+    acquired_at: iso(6 * 60000), updated_at: iso(6 * 60000), expires_at: iso(-54 * 60000),
+    held_by_run: '01JD8Q7NN9GG8HH7II6JJ5KKLL', holder_status: 'Running', holder_role: 'coder',
+    holder_created_at: iso(9 * 60000), holder_started_at: iso(8 * 60000), holder_last_activity_at: iso(20000),
+  },
+]
+const deferredRuns = [
+  {
+    deferred_id: '01JD9T0000DEFERRED00000001', parent_run_id: '01JD8Q7NN9GG8HH7II6JJ5KKLL', state: 'waiting',
+    run: { prompt: 'Backfill refund_state for orders created before the migration, then verify the totals.',
+      role: 'coder', repo: 'https://github.com/acme/checkout' },
+    wait_for_locks: [{ lock_id: '01JD9T0000LOCK0000000PRODDB', live: true }],
+    give_up_at: iso(-23 * 3600000), created_by: 'run:01JD8Q7NN9GG8HH7II6JJ5KKLL', created_at: iso(4 * 60000),
+  },
+]
+
 function saveSchedule(target, payload) {
   const next = { ...target, ...payload, run: payload?.run ?? target.run }
   if (!/^[a-z0-9]([-a-z0-9_.]*[a-z0-9])?$/.test(next.name ?? '')) {
@@ -341,6 +362,34 @@ const routes = [
   ['POST', /^\/api\/v1\/runs\/([^/]+)\/(cancel|retry)$/, (m, _u, { runs }) => runs.find((r) => r.run_id === m[1]) ?? 404],
   ['POST', /^\/api\/v1\/runs$/, (_m, _u, { runs }) => runs[0]],
   ['GET', /^\/api\/v1\/roles$/, (_m, _u, { roles }) => ({ roles })],
+  ['GET', /^\/api\/v1\/locks$/, (_m, u) => {
+    const run = u.searchParams.get('run_id')
+    return { locks: locks.filter((l) => !run || l.held_by_run === run) }
+  }],
+  ['DELETE', /^\/api\/v1\/locks\/([^/]+)$/, (m) => {
+    const i = locks.findIndex((l) => l.lock_id === m[1])
+    if (i < 0) return 404
+    locks.splice(i, 1)
+    for (const d of deferredRuns) for (const w of d.wait_for_locks) if (w.lock_id === m[1]) w.live = false
+    return {}
+  }],
+  ['GET', /^\/api\/v1\/deferred-runs$/, (_m, u) => {
+    const q = u.searchParams
+    return {
+      deferred_runs: deferredRuns.filter((d) =>
+        (!q.get('state') || d.state === q.get('state')) &&
+        (!q.get('parent_run_id') || d.parent_run_id === q.get('parent_run_id')) &&
+        (!q.get('run_id') || d.run_id === q.get('run_id'))),
+    }
+  }],
+  ['GET', /^\/api\/v1\/deferred-runs\/([^/]+)$/, (m) => deferredRuns.find((d) => d.deferred_id === m[1]) ?? 404],
+  ['POST', /^\/api\/v1\/deferred-runs\/([^/]+)\/cancel$/, (m) => {
+    const d = deferredRuns.find((x) => x.deferred_id === m[1])
+    if (!d) return 404
+    if (d.state !== 'waiting') return conflict('deferred_settled', 'this deferred run is no longer waiting')
+    Object.assign(d, { state: 'cancelled', reason: 'cancelled by maria-admin', finished_at: iso(0) })
+    return d
+  }],
   ['GET', /^\/api\/v1\/schedules$/, () => ({ schedules: [...schedules].sort((a, b) => a.name.localeCompare(b.name)) })],
   ['GET', /^\/api\/v1\/schedules\/([^/]+)$/, (m) => schedules.find((s) => s.id === m[1]) ?? 404],
   ['POST', /^\/api\/v1\/schedules$/, (_m, _u, _fx, payload) => {

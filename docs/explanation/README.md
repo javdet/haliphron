@@ -40,6 +40,12 @@ Almost every awkward mechanism in the system is downstream of one of these.
 - [About artifact modes](artifact-modes.md) — relay or object storage, why the
   awkward one is the default, and how to choose.
 
+## Agents working side by side
+
+- [About cooperative locks](cooperative-locks.md) — how agents tell each other
+  what shared infrastructure they are changing, why the backend never decides
+  what conflicts, and what the locks do not protect against.
+
 ## A note on `docs/architecture.md`
 
 The [design document](../architecture.md) at the root of `docs/` is the

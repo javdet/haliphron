@@ -626,6 +626,83 @@ NULL` for the same reason in the other direction: run retention deletes runs.
 The partial index `runs_schedule` serves the Forbid and Replace policies and
 the UI's list of a schedule's runs.
 
+### Resource locks and deferred runs
+
+**A lock is a registration, not a lock manager** (0015). `resource_locks` holds
+a free-form `name` and `description`, written by an agent, and the run that
+holds them. Nothing in the schema or the backend compares two locks, refuses
+one because of another, or holds a run back because of one. What the store
+guarantees is housekeeping and order.
+
+**A lock dies with its run, in the same transaction.** The trigger
+`runs_release_locks` (`AFTER UPDATE OF status ON runs`, when the new status is
+`Succeeded`, `Failed`, `TimedOut` or `Cancelled` and differs from the old)
+deletes the run's locks. It is a trigger and not a line next to
+`RevokeRunTokens` for the reason `runs_close_attempt` is one: there are several
+paths to a terminal status, and the next one is the one that forgets. A
+requested cancellation sets `cancel_requested_at`, not the status, and releases
+nothing: the pod is alive until the heartbeat delivers the cancel. A run that
+leaves a terminal status again under a higher attempt (`runs_guard` allows it)
+has already lost its locks; the attempt that ended has no pod, and the next one
+sets its locks again. A lock belongs to the run, not the epoch: an epoch rise
+releases nothing, because the old pod on a partitioned cluster may still be
+working. `run_id` cascades on delete.
+
+**Every lock expires.** `expires_at` defaults to `now() + runs.timeout_seconds`
+and is never later than that. Every read filters on `expires_at > now()`, so an
+expired lock is invisible at once. The sweeper deletes the rows later. Time is
+the database's `now()`, never a replica's clock.
+
+**Lock writes serialise on one advisory lock, and that is what makes `earlier`
+correct.** `SetLock` (in `backend/store/locks.go`) takes
+`pg_advisory_xact_lock(4729105830174629183)`, locks the holder's run row
+`FOR SHARE`, deletes the holder's own expired lock of that name, checks the
+limit of 8 live locks per run, and runs
+`INSERT … ON CONFLICT (run_id, name) DO UPDATE`. The upsert keeps `id`, `seq`
+and `acquired_at`, and replaces `description`, `expires_at` and `lease_epoch`.
+Then, in the same transaction, it reads every live lock of another run with a
+lower `seq`. Without the advisory lock, identity order and commit order can
+differ: a lower `seq` can commit after a higher one has already read, and the
+two agents each miss the other. With it, for any two locks, the later one's
+`earlier` contains the earlier one. Lock writes are rare, so serialising them
+costs nothing that can be measured. The `FOR SHARE` makes a terminal status
+racing the insert wait for it, so its trigger then deletes the new lock rather
+than missing it. An expired lock is deleted before the upsert, not revived:
+reviving its old `seq` would put it ahead of locks set while it was invisible,
+and their holders never saw it.
+
+**Only the holder removes a lock through an agent's path.** `UnsetLocks` is
+`DELETE … WHERE run_id = $holder`, so another run's lock cannot match.
+`ForceUnsetLock` is the operator's path (REST, `admin`). The trigger, the expiry
+and the sweeper are the only other ways a lock row goes.
+
+**A deferred run is a request waiting for locks, a time, or both.**
+`deferred_runs.template` is the run request in the public snake_case shape,
+like `schedules.run`. It is checked against admission when the row is saved.
+`wait_for_locks` holds lock ids, not names, because names are not unique across
+runs. A waited id with no live row counts as gone. A CHECK requires at least one
+lock or a `not_before`, and another says `finished_at` is NULL exactly while
+`state = 'waiting'`. The row is not a `runs.status`: nothing a cluster could
+lease exists until it fires, so no contract changes.
+
+**A deferred row becomes a run only inside `InsertRun`.** A fire reads due rows
+(waiting, `not_before` passed or unset, `give_up_at` not yet passed, none of
+`wait_for_locks` live, oldest first, no lock) and admits each as a child of
+`parent_run_id`. In the run's own transaction, after the run row is written,
+`linkDeferredFire` runs
+
+```sql
+UPDATE deferred_runs SET state = 'submitted', run_id = $run, finished_at = now()
+WHERE id = $id AND state = 'waiting'
+```
+
+and a statement that changes no row rolls the insert back with
+`ErrDeferredSettled`. Two replicas firing one row admit one run. A cancel or
+an expiry that lands first also wins. Never write `state = 'submitted'` from
+another path. Saving a row counts it against the parent's fan-out with the
+children already started, under the parent's row lock. `InsertRun` counts again
+at fire time, against the children alone.
+
 ---
 
 ## 12. There is no table of downward commands
@@ -722,6 +799,11 @@ real PostgreSQL — generated columns, domains, partial indexes,
 - [x] deleting a run deletes the chat trigger linked to it
 - [x] `created_via` accepts `mattermost`
 - [x] a Slack message is claimed under its own platform, and an unknown platform is refused
+- [x] a status that becomes terminal deletes the run's locks in the same statement, and a rollback keeps them
+- [x] a requested cancellation and `Unknown` keep the locks; a new attempt after a terminal one does not bring them back and can set them again
+- [x] deleting a run deletes its locks and its deferred runs
+- [x] a run holds a lock name once, two runs may hold the same name, and a name outside 1 to 128 bytes or an already expired lock is refused
+- [x] a deferred run waits for a lock or a time, has `finished_at` exactly when it is not waiting, and waits only on lock ids
 - [x] the migrations apply from scratch, roll back to an empty database and apply again
 - [x] `Migrate` is idempotent (every replica calls it at startup)
 - [x] every contract query `PREPARE`s against the schema it ships with
@@ -733,6 +815,16 @@ same real PostgreSQL rather than here:
 - [x] a run that succeeded without an answer gets one plain sentence, with no run identifier
 - [x] a child and a grandchild of a chat run are told where the message came from; the classificator's sentence is posted, a run that handed the request on without a word is settled without a post, and the grandchild's failure is posted in the parent's thread
 - [x] a run not started from chat gives its children no chat header
+
+The lock statements are store and `app` together, so they are exercised in
+[test/backend](../../test/backend) (`locks_test.go`):
+
+- [x] sixteen concurrent `SetLock` calls: every answer's `earlier` is exactly the locks with a lower `seq`, and no pair of locks misses each other
+- [x] setting a held name again keeps `id`, `seq` and `acquired_at` and replaces the text and expiry; an expired lock set again is a new lock with a new place
+- [x] the limit of 8 per run, the expiry cut to the run's timeout, and the text limits
+- [x] `UnsetLocks` with another run's id or name removes nothing
+- [x] two concurrent fires of one deferred row admit one run; a deferred row fires only after its lock goes, as a child with the parent, depth, cost ceiling and chat follow-up row; one past `give_up_at` expires
+- [x] deferred rows count against the parent's child limit
 
 The Slack adapter is exercised end to end in the same suite
 (`slack_test.go`), against a fake workspace:

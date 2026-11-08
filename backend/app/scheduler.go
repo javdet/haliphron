@@ -42,7 +42,8 @@ type FireResult struct {
 // next passes rather than in one long one.
 const dueBatch = 100
 
-// RunScheduler fires due schedules on an interval until the context ends.
+// RunScheduler fires due schedules, and due deferred runs, on an interval
+// until the context ends.
 //
 // The interval is the lateness a fire may have. Cron's resolution is a minute,
 // so ten seconds is well inside it and costs one indexed query per tick.
@@ -60,6 +61,11 @@ func (s *Service) RunScheduler(ctx context.Context, interval time.Duration) {
 		case <-ticker.C:
 			if _, err := s.FireDueSchedules(ctx, s.now()); err != nil && !ctxDone(ctx) {
 				s.log.Error("scheduler pass failed", "error", err)
+			}
+			// Deferred runs ride the same loop: one loop per replica, no
+			// leader, and the fence in InsertRun deciding which fire commits.
+			if _, err := s.FireDueDeferred(ctx); err != nil && !ctxDone(ctx) {
+				s.log.Error("deferred-run pass failed", "error", err)
 			}
 		}
 	}
