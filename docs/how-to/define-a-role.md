@@ -109,10 +109,15 @@ agent process.
 
 Two consequences to plan for. That one credential must reach both the run's
 repository and the marketplace — a per-repository token that opens only the
-former fails the plugins phase with exit 30 and a "repository not found". And
-the credential is offered **only to the run repository's own host**, so a
+former cannot fetch the marketplace ("repository not found" in the run's log).
+And the credential is offered **only to the run repository's own host**, so a
 private marketplace on a different forge cannot be fetched; put it on the same
 forge, or make it public.
+
+A marketplace that cannot be fetched, or a plugin that will not install, does
+not fail the run. The run's log and the pod's stderr say why, the agent starts
+without those plugins, and its instructions name what is missing so that it can
+say so in its answer.
 
 Pin a version with `ref`:
 

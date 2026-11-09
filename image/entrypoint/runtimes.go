@@ -112,6 +112,14 @@ func systemPrompt(r *Run) string {
 	if len(r.nodeSchema) > 0 {
 		fmt.Fprintf(&b, "The output object must satisfy this JSON Schema:\n%s\n", r.nodeSchema)
 	}
+	if len(r.missingPlugins) > 0 {
+		b.WriteString("Some plugins configured for this run could not be set up and are not available:\n")
+		for _, m := range r.missingPlugins {
+			fmt.Fprintf(&b, "- %s: %s\n", m.what, m.reason)
+		}
+		b.WriteString("Do the task as well as you can without them. If the answer is incomplete " +
+			"because of a missing plugin, say so in your answer.\n")
+	}
 	if r.rolePrompt != "" {
 		b.WriteString("\n")
 		b.WriteString(r.rolePrompt)

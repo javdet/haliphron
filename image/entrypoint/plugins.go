@@ -60,24 +60,78 @@ func phasePlugins(ctx context.Context, r *Run) error {
 	r.logf("plugins: %d marketplace(s), %d plugin(s), from %s",
 		len(found.spec.Marketplaces), len(found.spec.Enabled), found.origin)
 
+	// Best effort, all of it. A marketplace that cannot be fetched or a plugin
+	// that will not install costs the run that plugin and nothing else: the
+	// agent still starts, is told what it is missing, and answers with what it
+	// has. Failing the run instead turns an unreachable catalogue into a
+	// request nobody gets an answer to — in chat, a bare "couldn't finish" —
+	// when the agent could have done most of the work, or said itself which
+	// tool it lacked.
+	unavailable := map[string]string{}
 	for _, m := range found.spec.Marketplaces {
 		if err := r.addMarketplace(ctx, installer, m); err != nil {
-			return err
+			reason := pluginProblemReason(err)
+			r.errorf("plugins: the marketplace %s is unavailable, continuing without it: %v", m.URL, err)
+			r.missingPlugins = append(r.missingPlugins,
+				missingPlugin{what: "the marketplace " + marketplaceLabel(m), reason: reason})
+			unavailable[m.Name] = reason
 		}
 	}
 
 	for _, id := range found.spec.Enabled {
+		if reason, gone := unavailable[pluginMarketplace(id)]; gone {
+			r.logf("plugins: not installing %s: its marketplace is unavailable", id)
+			r.missingPlugins = append(r.missingPlugins, missingPlugin{what: "the plugin " + id, reason: reason})
+			continue
+		}
 		out, err := r.runPluginCommand(ctx, installer.InstallPlugin(r, id))
 		if err != nil {
-			// Exit 30, not 20: a name that is not in the catalogue will not
-			// appear on a second attempt, and the run has not paid for the
-			// model yet.
-			return fail(runv1.ExitConfig, "PluginInstallFailed",
-				"installing %s: %s", id, firstLines(out, 6))
+			r.errorf("plugins: installing %s failed, continuing without it: %s", id, firstLines(out, 6))
+			r.missingPlugins = append(r.missingPlugins,
+				missingPlugin{what: "the plugin " + id, reason: "it did not install"})
+			continue
 		}
 		r.logf("plugins: installed %s", id)
 	}
 	return nil
+}
+
+// missingPlugin is something the plugins phase was asked for and could not
+// deliver, in the words the agent is told it in.
+type missingPlugin struct {
+	what   string
+	reason string
+}
+
+// pluginMarketplace is the marketplace half of `plugin@marketplace`.
+func pluginMarketplace(id string) string {
+	if i := strings.LastIndex(id, "@"); i >= 0 {
+		return id[i+1:]
+	}
+	return ""
+}
+
+func marketplaceLabel(m runv1.PluginMarketplace) string {
+	if m.Name != "" {
+		return m.Name + " (" + m.URL + ")"
+	}
+	return m.URL
+}
+
+// pluginProblemReason is the short cause the agent is given. Deliberately not
+// the CLI's or git's output: that stays in the run log, where a person reads
+// it, and out of the model's context.
+func pluginProblemReason(err error) string {
+	var f *Failure
+	if errors.As(err, &f) {
+		switch f.Reason {
+		case "MarketplaceUnreachable":
+			return "it could not be downloaded"
+		case "MarketplaceUnusable":
+			return "it could not be registered"
+		}
+	}
+	return "it could not be set up"
 }
 
 // addMarketplace fetches a catalogue and registers it with the runtime.
@@ -90,8 +144,9 @@ func phasePlugins(ctx context.Context, r *Run) error {
 // source costs nothing and needs no token.
 //
 // Only that case falls back. A private marketplace that fails for any other
-// reason fails the run, rather than quietly retrying in a way that would ask
-// the CLI for a credential it does not have and produce a worse error.
+// reason is reported as unavailable, rather than quietly retried in a way that
+// would ask the CLI for a credential it does not have and produce a worse
+// error.
 func (r *Run) addMarketplace(ctx context.Context, installer PluginInstaller, m runv1.PluginMarketplace) error {
 	dir, err := r.fetchMarketplace(ctx, m)
 	if err != nil {

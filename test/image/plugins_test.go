@@ -274,50 +274,68 @@ func TestRepositorySourcesAreIgnoredWhenTheRoleDoesNotTrustThem(t *testing.T) {
 	}
 }
 
-func TestAnUnreachableMarketplaceIsRetryableAndARefusedOneIsNot(t *testing.T) {
+func TestAMarketplaceThatCannotBeFetchedDoesNotStopTheAgent(t *testing.T) {
 	t.Parallel()
 
-	cases := map[string]struct {
-		output string
-		want   int32
-	}{
-		"a forge that is briefly down": {
-			output: "fatal: unable to access 'https://github.com/playneta/claude-plugin/': 503\n",
-			want:   runv1.ExitGit,
-		},
-		"a private repository this token cannot see": {
-			output: "remote: Repository not found.\nfatal: repository not found\n",
-			want:   runv1.ExitConfig,
-		},
+	cases := map[string]string{
+		"a forge that is briefly down":               "fatal: unable to access 'https://github.com/playneta/claude-plugin/': 503\n",
+		"a private repository this token cannot see": "remote: Repository not found.\nfatal: repository not found\n",
 	}
-	for name, tc := range cases {
+	for name, output := range cases {
 		t.Run(name, func(t *testing.T) {
 			t.Parallel()
 			h := pluginRun(t, controlplane.RunRequest{
 				RoleConfig: pluginConfig(t, runv1.PluginSpec{
-					Marketplaces: []runv1.PluginMarketplace{{Name: "playneta", URL: "playneta/claude-plugin"}},
+					Marketplaces: []runv1.PluginMarketplace{
+						{Name: "playneta", URL: "playneta/claude-plugin"},
+						{Name: "other", URL: "other/plugins"},
+					},
+					Enabled: []string{"infra@playneta", "tools@other"},
 				}),
-			})
-			h.commander.handle = gitWithChanges(func(c entrypoint.Command) (entrypoint.CommandResult, error) {
-				return agentScript(h, "done", `{"summary":"ok"}`)(c)
 			})
 			inner := h.commander.handle
 			h.commander.handle = func(c entrypoint.Command) (entrypoint.CommandResult, error) {
 				if c.Path == "git" && gitSubcommand(c.Args) == "clone" &&
 					strings.Contains(strings.Join(c.Args, " "), "playneta") {
-					fmt.Fprint(c.Stdout, tc.output)
+					fmt.Fprint(c.Stdout, output)
 					return entrypoint.CommandResult{ExitCode: 128}, nil
 				}
 				return inner(c)
 			}
 
 			run, code := h.executeRun()
-			if code != tc.want {
-				t.Fatalf("exit %d, want %d (%v)", code, tc.want, run.Failure())
+			if code != runv1.ExitSuccess {
+				t.Fatalf("exit %d, want 0: a missing marketplace costs its plugins, not the run (%v)",
+					code, run.Failure())
 			}
-			// The model must not have been paid for: the phase is before run.
-			if h.commander.called("claude") && agentWasLaunched(h) {
-				t.Error("the agent was launched after the plugins phase failed")
+			if !agentWasLaunched(h) {
+				t.Fatal("the agent was not launched")
+			}
+			if outcome := phaseOutcome(run, runv1.RuntimePhasePlugins); outcome != runv1.PhaseOutcomeOK {
+				t.Errorf("the plugins phase ended %q, want ok", outcome)
+			}
+
+			cmds := pluginCommands(h)
+			if containsAll(cmds, "plugin install infra@playneta") {
+				t.Errorf("a plugin of the unavailable marketplace was still installed: %v", cmds)
+			}
+			if !containsAll(cmds, "plugin install tools@other") {
+				t.Errorf("the other marketplace's plugin was not installed: %v", cmds)
+			}
+
+			// The agent cannot see that a tool it was meant to have is absent,
+			// so it is told, or it could not say so in its answer.
+			prompt := appendedSystemPrompt(t, h)
+			for _, want := range []string{"playneta", "infra@playneta", "could not be downloaded"} {
+				if !strings.Contains(prompt, want) {
+					t.Errorf("the agent was not told about %q: %q", want, prompt)
+				}
+			}
+			if strings.Contains(prompt, "tools@other") {
+				t.Errorf("an installed plugin was reported as missing: %q", prompt)
+			}
+			if strings.Contains(prompt, "fatal:") {
+				t.Errorf("git's output reached the model's context: %q", prompt)
 			}
 		})
 	}
@@ -366,11 +384,12 @@ func TestAnOfficialMarketplaceIsRegisteredBySourceWhenItsNameIsReserved(t *testi
 	}
 }
 
-func TestAMarketplaceRefusedForAnyOtherReasonFailsTheRun(t *testing.T) {
+func TestAMarketplaceRefusedForAnyOtherReasonIsReportedAndSkipped(t *testing.T) {
 	t.Parallel()
 	h := pluginRun(t, controlplane.RunRequest{
 		RoleConfig: pluginConfig(t, runv1.PluginSpec{
 			Marketplaces: []runv1.PluginMarketplace{{Name: "playneta", URL: "playneta/claude-plugin"}},
+			Enabled:      []string{"infra@playneta"},
 		}),
 	})
 	var attempts int
@@ -385,27 +404,34 @@ func TestAMarketplaceRefusedForAnyOtherReasonFailsTheRun(t *testing.T) {
 	}
 
 	run, code := h.executeRun()
-	if code != runv1.ExitConfig {
-		t.Fatalf("exit %d, want %d (%v)", code, runv1.ExitConfig, run.Failure())
+	if code != runv1.ExitSuccess {
+		t.Fatalf("exit %d, want 0 (%v)", code, run.Failure())
 	}
 	// Retrying by source would ask the CLI to fetch a private catalogue with a
 	// credential it does not have, and report that instead of the real problem.
 	if attempts != 1 {
 		t.Errorf("the registration was attempted %d times, want 1", attempts)
 	}
+	if containsAll(pluginCommands(h), "plugin install infra@playneta") {
+		t.Errorf("a plugin of an unregistered marketplace was still installed: %v", pluginCommands(h))
+	}
+	if prompt := appendedSystemPrompt(t, h); !strings.Contains(prompt, "infra@playneta") {
+		t.Errorf("the agent was not told its plugin is missing: %q", prompt)
+	}
 }
 
-func TestAFailedInstallStopsTheRunBeforeTheModelIsPaidFor(t *testing.T) {
+func TestAFailedInstallIsReportedToTheAgentAndTheRunGoesOn(t *testing.T) {
 	t.Parallel()
 	h := pluginRun(t, controlplane.RunRequest{
 		RoleConfig: pluginConfig(t, runv1.PluginSpec{
 			Marketplaces: []runv1.PluginMarketplace{{Name: "playneta", URL: "playneta/claude-plugin"}},
-			Enabled:      []string{"missing@playneta"},
+			Enabled:      []string{"missing@playneta", "present@playneta"},
 		}),
 	})
 	inner := h.commander.handle
 	h.commander.handle = func(c entrypoint.Command) (entrypoint.CommandResult, error) {
-		if c.Path == "claude" && len(c.Args) > 1 && c.Args[0] == "plugin" && c.Args[1] == "install" {
+		if c.Path == "claude" && len(c.Args) > 2 && c.Args[0] == "plugin" && c.Args[1] == "install" &&
+			c.Args[2] == "missing@playneta" {
 			fmt.Fprintln(c.Stdout, "Plugin not found in marketplace: missing")
 			return entrypoint.CommandResult{ExitCode: 1}, nil
 		}
@@ -413,14 +439,54 @@ func TestAFailedInstallStopsTheRunBeforeTheModelIsPaidFor(t *testing.T) {
 	}
 
 	run, code := h.executeRun()
-	// A name that is not in the catalogue is not going to appear on a retry.
-	if code != runv1.ExitConfig {
-		t.Fatalf("exit %d, want %d (%v)", code, runv1.ExitConfig, run.Failure())
+	if code != runv1.ExitSuccess {
+		t.Fatalf("exit %d, want 0 (%v)", code, run.Failure())
 	}
-	if agentWasLaunched(h) {
-		t.Error("the agent ran although its role's plugin was missing; " +
-			"it would have done the work without the tools it was promised")
+	if !containsAll(pluginCommands(h), "plugin install present@playneta") {
+		t.Errorf("one failed install stopped the others: %v", pluginCommands(h))
 	}
+	prompt := appendedSystemPrompt(t, h)
+	if !strings.Contains(prompt, "missing@playneta") {
+		t.Errorf("the agent was not told its plugin is missing: %q", prompt)
+	}
+	if strings.Contains(prompt, "present@playneta") {
+		t.Errorf("an installed plugin was reported as missing: %q", prompt)
+	}
+}
+
+func TestAnAgentWithEveryPluginIsToldNothingAboutPlugins(t *testing.T) {
+	t.Parallel()
+	h := pluginRun(t, controlplane.RunRequest{
+		RoleConfig: pluginConfig(t, runv1.PluginSpec{
+			Marketplaces: []runv1.PluginMarketplace{{Name: "playneta", URL: "playneta/claude-plugin"}},
+			Enabled:      []string{"infra@playneta"},
+		}),
+	})
+	run, code := h.executeRun()
+	if code != runv1.ExitSuccess {
+		t.Fatalf("exit %d, want 0 (%v)", code, run.Failure())
+	}
+	if prompt := appendedSystemPrompt(t, h); strings.Contains(prompt, "plugin") {
+		t.Errorf("a run with every plugin installed was told about plugins: %q", prompt)
+	}
+}
+
+// appendedSystemPrompt is the --append-system-prompt the agent was launched
+// with.
+func appendedSystemPrompt(t *testing.T, h *harness) string {
+	t.Helper()
+	for _, c := range h.commander.invocations("claude") {
+		if len(c.Args) == 0 || c.Args[0] != "-p" {
+			continue
+		}
+		for i, arg := range c.Args {
+			if arg == "--append-system-prompt" && i+1 < len(c.Args) {
+				return c.Args[i+1]
+			}
+		}
+	}
+	t.Fatal("claude was never launched with an appended system prompt")
+	return ""
 }
 
 func TestAResumedAttemptDoesNotFetchAMarketplaceTwice(t *testing.T) {

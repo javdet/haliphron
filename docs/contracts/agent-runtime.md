@@ -265,7 +265,7 @@ not logging.
 | 5 | `auth` | Model credentials, git credential helper, `gh`/`glab` | 30 |
 | 6 | `clone` | Clone, checkout base, create the target branch | 20 / 30 |
 | 7 | `role` | The resolution chain, intersected with the policy ceiling | 30 |
-| 8 | `plugins` | Register the role's marketplaces and install its plugins | 20 / 30 |
+| 8 | `plugins` | Register the role's marketplaces and install its plugins; best effort | — |
 | 9 | `mcp-prepare` | Render the MCP configuration for the runtime, secrets by reference | 30 |
 | 10 | `mcp-verify` | Check that the servers came up | 30 |
 | 11 | `run` | The agent CLI under a timeout, tee'd to the log and chunked upstream | 10 / 11 |
@@ -654,10 +654,21 @@ plugins in the background, and the same role could run different code on two
 attempts of one run — reaching the network from inside the model's turn, which
 is the one place this image cannot report a failure from.
 
-A marketplace that cannot be reached is exit 20 and retryable; one that is
-refused — 404, 403, bad credential — is exit 30, by the same classification the
-`clone` phase uses. A plugin that will not install is exit 30: a name that is
-not in the catalogue will not appear on a second attempt.
+**The phase is best effort.** A marketplace that cannot be cloned — unreachable,
+404, 403, a bad credential — or registered costs the run that marketplace's
+plugins; a plugin that will not install costs the run that plugin. Neither fails
+the run. The cause goes to the run log and to stderr, the remaining marketplaces
+and plugins are still installed, and the agent starts. Failing the run instead
+would turn one unreachable catalogue into a request that gets no answer at all —
+in chat, a bare "couldn't finish" — when the agent could have done most of the
+work, or said which tool it lacked.
+
+The agent cannot see that a tool it was meant to have is absent, so it is told:
+the entrypoint's instruction (step 2 of [7b](#7b-the-roles-system-prompt)) lists
+each marketplace and plugin that could not be set up, with a short cause, and
+asks the agent to say so when its answer is incomplete because of one. The CLI's
+and git's output is not included — it stays in the log, out of the model's
+context. A run with every plugin installed gets no such text.
 
 ### What a plugin can do
 
@@ -696,7 +707,8 @@ and the order is fixed:
 
 1. the CLI's own system prompt
 2. the entrypoint's instruction — the output file, the artifacts directory, the
-   branch rule, the node's output schema
+   branch rule, the node's output schema, and the plugins that could not be set
+   up ([7a](#7a-plugins)), when there are any
 3. the role's prompt
 
 claude-code receives 2 and 3 as one `--append-system-prompt` argument, and is
