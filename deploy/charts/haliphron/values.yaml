@@ -793,7 +793,10 @@ networkPolicy:
   #  - namespaceSelector:
   #      matchLabels:
   #        kubernetes.io/metadata.name: ingress-nginx
-  # Where the backend may go. DNS is always allowed.
+  # Where the backend may go. DNS is always allowed. Besides Postgres and the
+  # object store, the role form's marketplace lookup reads from your git forge
+  # (api.github.com, or your GitHub/GitLab host) on 443; without it the form
+  # still works, and the marketplace name is typed by hand.
   egressTo: []
   #  - to:
   #      - ipBlock:

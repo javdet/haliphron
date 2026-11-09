@@ -5,6 +5,25 @@ of `VERSION`, and it is the tag of the published images.
 
 ## Unreleased
 
+### Changed
+
+- **Adding a marketplace to a role takes only its repository.** The role form
+  reads the catalogue's `marketplace.json` from GitHub or GitLab, with the
+  installation's git token, fills in the marketplace name, and lists its
+  plugins as checkboxes. A plugin is now picked or typed by its own name, and
+  the form adds the `@marketplace` part. When the catalogue cannot be read,
+  nothing is filled in and both the name and the plugins can be typed as
+  before. A name you type, or one already saved in a role, is kept, and the
+  form warns if it differs from the catalogue's. Renaming a marketplace renames
+  its plugins too, and removing one removes them. The role document's format is
+  unchanged.
+
+### Added
+
+- `POST /api/v1/plugin-marketplaces/inspect` (`admin`) returns a marketplace's
+  declared name and plugins, which the form uses. It needs outbound HTTPS from
+  the backend to the forge, through `HTTPS_PROXY` if one is set.
+
 ## 0.6.0 — 2026-11-08
 
 ### Added

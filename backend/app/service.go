@@ -17,6 +17,7 @@ import (
 
 	clusterv1 "github.com/automagicops/haliphron/api/cluster/v1"
 	"github.com/automagicops/haliphron/backend/artifacts"
+	"github.com/automagicops/haliphron/backend/forge"
 	"github.com/automagicops/haliphron/backend/run"
 	"github.com/automagicops/haliphron/backend/store"
 )
@@ -26,6 +27,7 @@ type Service struct {
 	store     *store.Store
 	artifacts artifacts.Store
 	git       GitTokenMinter
+	repoFiles RepoFiles
 	log       *slog.Logger
 
 	timings  clusterv1.Timings
@@ -93,6 +95,9 @@ type Options struct {
 	Store     *store.Store
 	Artifacts artifacts.Store
 	Git       GitTokenMinter
+	// RepoFiles reads marketplace manifests for the role form. Nil means the
+	// forge APIs, reached directly.
+	RepoFiles RepoFiles
 	Logger    *slog.Logger
 
 	Timings  clusterv1.Timings
@@ -132,11 +137,16 @@ func New(opts Options) *Service {
 	if logger == nil {
 		logger = slog.Default()
 	}
+	repoFiles := opts.RepoFiles
+	if repoFiles == nil {
+		repoFiles = &forge.Client{}
+	}
 
 	return &Service{
 		store:     opts.Store,
 		artifacts: opts.Artifacts,
 		git:       opts.Git,
+		repoFiles: repoFiles,
 		log:       logger,
 		timings:   timings,
 		versions:  opts.Versions,

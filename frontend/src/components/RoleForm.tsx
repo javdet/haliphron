@@ -1,12 +1,12 @@
-import { useMemo, useState } from 'react'
+import { useCallback, useState } from 'react'
 import { Field, Rows, Section, StringList } from './ui'
+import { marketplaceIn, marketplaceOut, PluginsEditor, type MarketplaceRow, type PluginsState } from './PluginsEditor'
 import { useSecrets } from '../api/hooks'
 import {
   AGENT_TYPES,
   PERMISSION_MODES,
   type McpServer,
   type McpTransport,
-  type PluginMarketplace,
   type RoleSpec,
 } from '../api/types'
 
@@ -41,7 +41,7 @@ export interface RoleFormState {
   systemPrompt: string
   allow: string[]
   deny: string[]
-  marketplaces: PluginMarketplace[]
+  marketplaces: MarketplaceRow[]
   plugins: string[]
   trustRepositorySources: boolean
   mcpServers: McpServer[]
@@ -83,7 +83,7 @@ export function split(spec: RoleSpec | undefined): RoleFormState {
     systemPrompt: s.systemPrompt ?? '',
     allow: s.toolPolicy?.allow ?? [],
     deny: s.toolPolicy?.deny ?? [],
-    marketplaces: s.plugins?.marketplaces ?? [],
+    marketplaces: (s.plugins?.marketplaces ?? []).map(marketplaceIn),
     plugins: s.plugins?.enabled ?? [],
     // Unset means true. The default is the product decision and the form must
     // not turn "the role never said" into "the role said no".
@@ -132,7 +132,7 @@ export function merge(form: RoleFormState): RoleSpec {
   }
   set('toolPolicy', policy, Object.keys(policy).length > 0)
 
-  const marketplaces = form.marketplaces.filter((m) => m.url.trim())
+  const marketplaces = form.marketplaces.filter((m) => m.url.trim()).map(marketplaceOut)
   const plugins = {
     ...form.restPlugins,
     ...(marketplaces.length ? { marketplaces } : {}),
@@ -203,34 +203,16 @@ export function agentEnvNameError(name: string): string | undefined {
   return undefined
 }
 
-/** Mirrors api/run/v1.PluginID, so a typo is caught before the round trip. */
-function badPluginID(entry: string, declared: string[]): string | undefined {
-  const at = entry.indexOf('@')
-  if (at < 0) return 'name the marketplace too: plugin@marketplace'
-  const plugin = entry.slice(0, at)
-  const marketplace = entry.slice(at + 1)
-  const name = /^[A-Za-z0-9][A-Za-z0-9._-]*$/
-  if (!name.test(plugin)) return `${plugin || '(empty)'} is not a usable plugin name`
-  if (!name.test(marketplace)) return `${marketplace || '(empty)'} is not a usable marketplace name`
-  // Unconditional, like the backend's own check: the pod resolves one source
-  // and that source is the only one that speaks, so a plugin whose marketplace
-  // this role does not name could never be installed.
-  if (!declared.includes(marketplace)) {
-    return `no marketplace named ${marketplace} is declared above`
-  }
-  return undefined
-}
-
 export function RoleForm({
   form,
   set,
 }: {
   form: RoleFormState
-  set: (next: Partial<RoleFormState>) => void
+  set: SetRoleForm
 }) {
-  const declared = useMemo(
-    () => form.marketplaces.map((m) => m.name?.trim()).filter((n): n is string => !!n),
-    [form.marketplaces],
+  const updatePlugins = useCallback(
+    (fn: (s: PluginsState) => Partial<PluginsState>) => set((f) => fn(f)),
+    [set],
   )
   const secrets = useSecrets()
   const secretEnvErrors = form.secretEnv
@@ -303,56 +285,10 @@ export function RoleForm({
       </Field>
 
       <Section title="Plugins" hint="marketplaces to fetch, and what to install from them" open>
-        <Field
-          label="Marketplaces"
-          hint="owner/repo or an https URL. Private repositories are fetched with the run's own git credential."
-        >
-          <Rows
-            value={form.marketplaces}
-            onChange={(marketplaces) => set({ marketplaces })}
-            empty={(): PluginMarketplace => ({ name: '', url: '', ref: '' })}
-            addLabel="Add a marketplace"
-          >
-            {(row, setRow) => (
-              <>
-                <input
-                  value={row.url}
-                  placeholder="playneta/claude-plugin"
-                  aria-label="Repository"
-                  onChange={(e) => setRow({ ...row, url: e.target.value })}
-                />
-                <input
-                  value={row.name ?? ''}
-                  placeholder="name, e.g. playneta"
-                  aria-label="Marketplace name"
-                  onChange={(e) => setRow({ ...row, name: e.target.value })}
-                />
-                <input
-                  value={row.ref ?? ''}
-                  placeholder="branch or tag"
-                  aria-label="Ref"
-                  onChange={(e) => setRow({ ...row, ref: e.target.value })}
-                />
-              </>
-            )}
-          </Rows>
-        </Field>
-
-        <Field
-          label="Plugins to install"
-          hint={
-            declared.length
-              ? `plugin@marketplace — the marketplace half is one of: ${declared.join(', ')}.`
-              : 'plugin@marketplace. Name a marketplace above first: a plugin is installed from a marketplace this role declares.'
-          }
-        >
-          <StringList
-            value={form.plugins}
-            onChange={(plugins) => set({ plugins })}
-            placeholder="playneta-infra-coder@playneta"
-            validate={(entry) => badPluginID(entry, declared)}
-          />
-        </Field>
+        <PluginsEditor
+          state={{ marketplaces: form.marketplaces, plugins: form.plugins }}
+          update={updatePlugins}
+        />
 
         <label className={form.trustRepositorySources ? 'check on' : 'check'}>
           <input
@@ -555,11 +491,21 @@ export function RawSpecEditor({
   )
 }
 
+/**
+ * Sets some fields. A function is applied to the state as it is when the update
+ * lands, which is what two marketplace rows filling themselves in during the
+ * same render need: each from a snapshot, the second would undo the first.
+ */
+export type SetRoleForm = (
+  next: Partial<RoleFormState> | ((f: RoleFormState) => Partial<RoleFormState>),
+) => void
+
 export function useRoleForm(spec: RoleSpec | undefined) {
   const [form, setForm] = useState<RoleFormState>(() => split(spec))
-  return {
-    form,
-    set: (next: Partial<RoleFormState>) => setForm((f) => ({ ...f, ...next })),
-    replace: (next: RoleFormState) => setForm(next),
-  }
+  const set: SetRoleForm = useCallback(
+    (next) => setForm((f) => ({ ...f, ...(typeof next === 'function' ? next(f) : next) })),
+    [],
+  )
+  const replace = useCallback((next: RoleFormState) => setForm(next), [])
+  return { form, set, replace }
 }

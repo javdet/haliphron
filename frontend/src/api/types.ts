@@ -239,6 +239,29 @@ export interface PluginMarketplace {
   ref?: string
 }
 
+/** One plugin a marketplace's manifest offers. */
+export interface MarketplacePluginInfo {
+  name: string
+  description?: string
+  version?: string
+}
+
+/**
+ * What POST /plugin-marketplaces/inspect read from a repository. Advisory: when
+ * `found` is false, `problem` says why and the form is typed into instead.
+ */
+export interface MarketplaceInspection {
+  url: string
+  ref?: string
+  found: boolean
+  /** The name the catalogue gives itself — the `@suffix` of its plugins. */
+  name?: string
+  description?: string
+  manifest_path?: string
+  plugins: MarketplacePluginInfo[]
+  problem?: string
+}
+
 export interface PluginSpec {
   marketplaces?: PluginMarketplace[]
   /** `plugin@marketplace`, one per plugin. */

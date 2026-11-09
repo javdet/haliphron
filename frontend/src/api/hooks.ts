@@ -27,6 +27,7 @@ import {
   type GitTokenProvider,
   type Lock,
   type LogPage,
+  type MarketplaceInspection,
   type ModelCredential,
   type ModelCredentialType,
   type Role,
@@ -58,6 +59,7 @@ export const keys = {
   logs: (id: string) => ['run', id, 'logs'] as const,
   result: (id: string, key?: string) => ['run', id, 'result', key ?? ''] as const,
   roles: () => ['roles'] as const,
+  marketplace: (url: string, ref: string) => ['plugin-marketplaces', url, ref] as const,
   schedules: () => ['schedules'] as const,
   schedule: (id: string) => ['schedules', id] as const,
   clusters: () => ['clusters'] as const,
@@ -485,6 +487,29 @@ export function useRemoveToken() {
     mutationFn: (id: string) =>
       request<void>(`/tokens/${encodeURIComponent(id)}/remove`, { method: 'POST' }),
     onSuccess: () => void qc.invalidateQueries({ queryKey: keys.tokens() }),
+  })
+}
+
+/**
+ * Reads a marketplace's manifest, for the role form. Keyed by source and ref, so
+ * the same repository typed into two rows, or reopened, is read once.
+ *
+ * Not retried: an unreadable catalogue is an answer (`found: false`), and a
+ * refusal — a 422 for a source still being typed, a 403 for a reader — will not
+ * change by asking again.
+ */
+export function useMarketplaceInspection(url: string, ref: string, enabled: boolean) {
+  return useQuery({
+    queryKey: keys.marketplace(url, ref),
+    queryFn: ({ signal }) =>
+      request<MarketplaceInspection>('/plugin-marketplaces/inspect', {
+        method: 'POST',
+        body: ref ? { url, ref } : { url },
+        signal,
+      }),
+    enabled: enabled && !!url,
+    staleTime: 5 * 60_000,
+    retry: false,
   })
 }
 

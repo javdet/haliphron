@@ -121,6 +121,10 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("PUT "+BasePath+"/roles/{name}", s.scoped(store.ScopeAdmin, s.putRole))
 	mux.HandleFunc("GET "+BasePath+"/roles/{name}", s.scoped(store.ScopeRunsRead, s.getRole))
 	mux.HandleFunc("DELETE "+BasePath+"/roles/{name}", s.scoped(store.ScopeAdmin, s.deleteRole))
+	// Admin, like the role write it serves: it spends the installation's git
+	// token on a repository the caller names.
+	mux.HandleFunc("POST "+BasePath+"/plugin-marketplaces/inspect",
+		s.scoped(store.ScopeAdmin, s.inspectMarketplace))
 
 	mux.HandleFunc("GET "+BasePath+"/clusters", s.scoped(store.ScopeRunsRead, s.listClusters))
 	mux.HandleFunc("POST "+BasePath+"/clusters/bootstrap-tokens", s.scoped(store.ScopeAdmin, s.createBootstrapToken))

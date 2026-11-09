@@ -484,6 +484,38 @@ not a JSON object is refused with `422`.
 `DELETE` is a soft delete. Runs already admitted under the role keep naming
 it.
 
+### `POST /api/v1/plugin-marketplaces/inspect`
+
+Scope: `admin`. Reads a marketplace's manifest, so the role form can fill in
+the marketplace's name and offer its plugins. Nothing is stored, and a role is
+validated on save exactly as without it.
+
+| Field | Type | Meaning |
+|---|---|---|
+| `url` | string | required: `owner/repo` or an `https://` URL, as in a role's `plugins.marketplaces` |
+| `ref` | string | a branch or tag; absent for the default branch |
+
+A `url` or `ref` a role could not be saved with is refused with `422` naming the
+field. Otherwise the answer is `200`:
+
+| Field | Type | Meaning |
+|---|---|---|
+| `url`, `ref` | string | as checked and trimmed |
+| `found` | boolean | whether a manifest was read and declares a usable name |
+| `name` | string | the name the catalogue declares — the `@suffix` of its plugins |
+| `description` | string | the catalogue's own, clipped to 300 characters |
+| `manifest_path` | string | `.claude-plugin/marketplace.json` or `.agents/plugins/marketplace.json`, the first found |
+| `plugins` | array | `{name, description?, version?}` per plugin; names a role could not enable are left out |
+| `problem` | string | why `found` is false |
+
+The file is read through the forge's API — GitHub (`github.com` and hosts named
+`github.*`) and GitLab (hosts named `gitlab.*`) — with the git token a run on
+that forge would clone with. Any other host, a missing file, a refusal or an
+unreachable forge is `found: false` with a `problem`, not an error: the form
+then leaves the name and plugins to be typed. The backend needs outbound HTTPS
+to the forge for this; it honours `HTTPS_PROXY`, and with the chart's
+`networkPolicy.enabled` the forge must be in `networkPolicy.egressTo`.
+
 ---
 
 ## Clusters

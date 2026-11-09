@@ -275,3 +275,44 @@ func TestAnOversizedDescriptionIsRefusedWhenTheRoleIsSaved(t *testing.T) {
 		t.Errorf("the refusal names field %q, want description: %v", field, out)
 	}
 }
+
+// Inspecting a marketplace spends the installation's git token on a repository
+// the caller names, so it is the role writer's, and a source a role could not
+// be saved with is refused before any forge is asked. The read itself is
+// covered in backend/app and backend/forge, where no network is needed.
+func TestInspectingAMarketplaceIsAnAdminCallThatRefusesAnUnsavableSource(t *testing.T) {
+	h := newHarness(t)
+	reader := h.Token(store.ScopeRunsRead)
+	admin := h.Token(store.ScopeAdmin)
+
+	if status := h.call(t, reader, http.MethodPost, "/api/v1/plugin-marketplaces/inspect",
+		map[string]any{"url": "playneta/claude-plugin"}, nil); status != http.StatusForbidden {
+		t.Errorf("a reader inspected a marketplace: status %d", status)
+	}
+
+	var problem struct {
+		Error struct {
+			Field string `json:"field"`
+		} `json:"error"`
+	}
+	if status := h.call(t, admin, http.MethodPost, "/api/v1/plugin-marketplaces/inspect",
+		map[string]any{"url": "git@github.com:playneta/claude-plugin.git"}, &problem); status != http.StatusUnprocessableEntity {
+		t.Errorf("an ssh source: status %d, want 422", status)
+	}
+	if problem.Error.Field != "url" {
+		t.Errorf("the refusal names field %q, want url", problem.Error.Field)
+	}
+
+	var got struct {
+		Found   bool   `json:"found"`
+		Problem string `json:"problem"`
+		Plugins []any  `json:"plugins"`
+	}
+	if status := h.call(t, admin, http.MethodPost, "/api/v1/plugin-marketplaces/inspect",
+		map[string]any{"url": "https://git.example.com/o/r"}, &got); status != http.StatusOK {
+		t.Fatalf("a forge this cannot read: status %d, want 200 with a problem", status)
+	}
+	if got.Found || got.Problem == "" || got.Plugins == nil {
+		t.Errorf("a forge this cannot read answers %+v", got)
+	}
+}

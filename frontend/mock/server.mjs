@@ -362,6 +362,25 @@ const routes = [
   ['POST', /^\/api\/v1\/runs\/([^/]+)\/(cancel|retry)$/, (m, _u, { runs }) => runs.find((r) => r.run_id === m[1]) ?? 404],
   ['POST', /^\/api\/v1\/runs$/, (_m, _u, { runs }) => runs[0]],
   ['GET', /^\/api\/v1\/roles$/, (_m, _u, { roles }) => ({ roles })],
+  // Advisory, like the real one: a source it cannot read is a 200 with a problem.
+  ['POST', /^\/api\/v1\/plugin-marketplaces\/inspect$/, (_m, _url, _fx, payload) => {
+    const url = String(payload?.url ?? '').trim()
+    if (!/^[\w.-]+\/[\w.-]+$/.test(url) && !url.startsWith('https://')) {
+      return invalid('url', `${url} is neither owner/repo nor an https:// url`)
+    }
+    if (url.includes('playneta')) {
+      return {
+        url, found: true, name: 'playneta', description: "Playneta's agents and skills",
+        manifest_path: '.claude-plugin/marketplace.json',
+        plugins: [
+          { name: 'playneta-infra-coder', description: 'Terraform and Helm changes', version: '1.4.0' },
+          { name: 'playneta-reviewer', description: 'Reviews a pull request against the house rules' },
+          { name: 'playneta-oncall', description: 'Reads alerts and dashboards' },
+        ],
+      }
+    }
+    return { url, found: false, plugins: [], problem: 'no .claude-plugin/marketplace.json on the default branch: the repository may not exist or may not be a marketplace' }
+  }],
   ['GET', /^\/api\/v1\/locks$/, (_m, u) => {
     const run = u.searchParams.get('run_id')
     return { locks: locks.filter((l) => !run || l.held_by_run === run) }

@@ -73,6 +73,47 @@ func (s *Server) putRole(w http.ResponseWriter, r *http.Request, c caller) {
 	s.write(w, http.StatusOK, roleView(role))
 }
 
+type inspectMarketplaceRequest struct {
+	URL string `json:"url"`
+	Ref string `json:"ref,omitempty"`
+}
+
+// inspectMarketplace reads a marketplace's manifest for the role form. A
+// catalogue that cannot be read is a 200 with found false and a problem: the
+// request was fine, and the form falls back to being typed into.
+func (s *Server) inspectMarketplace(w http.ResponseWriter, r *http.Request, _ caller) {
+	var req inspectMarketplaceRequest
+	if _, ok := s.decode(w, r, &req); !ok {
+		return
+	}
+	got, err := s.app.InspectMarketplace(r.Context(), req.URL, req.Ref)
+	if err != nil {
+		s.failFor(w, r, err)
+		return
+	}
+	plugins := make([]map[string]any, 0, len(got.Plugins))
+	for _, p := range got.Plugins {
+		item := map[string]any{"name": p.Name}
+		if p.Description != "" {
+			item["description"] = p.Description
+		}
+		if p.Version != "" {
+			item["version"] = p.Version
+		}
+		plugins = append(plugins, item)
+	}
+	body := map[string]any{"url": got.URL, "found": got.Found, "plugins": plugins}
+	for k, v := range map[string]string{
+		"ref": got.Ref, "name": got.Name, "description": got.Description,
+		"manifest_path": got.ManifestPath, "problem": got.Problem,
+	} {
+		if v != "" {
+			body[k] = v
+		}
+	}
+	s.write(w, http.StatusOK, body)
+}
+
 // deleteRole is a soft delete. Runs admitted under the role keep naming it:
 // their specs are frozen, and the role is part of what they froze.
 func (s *Server) deleteRole(w http.ResponseWriter, r *http.Request, _ caller) {

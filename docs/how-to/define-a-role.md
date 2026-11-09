@@ -97,6 +97,15 @@ declares for itself**, which is not always the repository's: a catalogue in
 `claude plugin marketplace list` after adding the repository locally, or read
 the `name` at the top of its `marketplace.json`.
 
+In the UI's role form you only type the repository. For GitHub and GitLab the
+backend reads the catalogue's `marketplace.json` with the installation's git
+token, fills in the name, and lists the plugins as checkboxes that add the
+`@name` part for you. If it cannot read the catalogue, nothing is filled in and
+you type the name and the plugin names yourself. You can still change the name.
+A name that is already saved is never replaced, but the form warns when it
+differs from the one the catalogue declares, because the CLI registers the
+marketplace under the catalogue's name.
+
 A run under this role installs them before the agent starts, in the `plugins`
 phase, and the run's log names each one.
 
