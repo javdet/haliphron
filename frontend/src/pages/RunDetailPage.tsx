@@ -4,6 +4,7 @@ import {
   isLive,
   useAttempts,
   useCancelRun,
+  useClusters,
   useDeferredRuns,
   useLocks,
   useLogs,
@@ -102,6 +103,10 @@ function LocksAndDeferrals({ id, live }: { id: string; live: boolean }) {
 }
 
 function Summary({ run }: { run: Run }) {
+  const clusters = useClusters()
+  // A run records the cluster by identifier only. Until the cluster list has
+  // loaded, or if it fails, the identifier is still an answer.
+  const clusterName = clusters.data?.find((c) => c.cluster_id === run.cluster_id)?.name
   return (
     <div className="grid-2">
       <Card title="Run">
@@ -140,9 +145,23 @@ function Summary({ run }: { run: Run }) {
             {run.agent} <span className="faint">{run.model}</span>
           </dd>
           <dt>Role</dt>
-          <dd>{run.role || <span className="faint">default</span>}</dd>
+          <dd>
+            {run.role ? <Link to="/roles">{run.role}</Link> : <span className="faint">default</span>}
+          </dd>
           <dt>Cluster</dt>
-          <dd className="mono small">{run.cluster_id || <span className="faint">unassigned</span>}</dd>
+          <dd>
+            {!run.cluster_id ? (
+              <span className="faint">unassigned</span>
+            ) : clusterName ? (
+              <Link to="/clusters" title={run.cluster_id}>
+                {clusterName}
+              </Link>
+            ) : (
+              <Link to="/clusters" className="mono small">
+                {run.cluster_id}
+              </Link>
+            )}
+          </dd>
         </dl>
       </Card>
 
