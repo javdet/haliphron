@@ -1020,6 +1020,42 @@ func TestAnAgentThatSaidNothingStillProducesAResult(t *testing.T) {
 	}
 }
 
+func TestAFileTheAgentKeptIsStoredAndNamedInTheEnvelopeInEitherMode(t *testing.T) {
+	t.Parallel()
+	h := newHarness(t, controlplane.RunRequest{Prompt: "audit the cluster and keep a report"})
+	agent := agentScript(h, "the audit is in the report", "")
+	h.commander.handle = func(c entrypoint.Command) (entrypoint.CommandResult, error) {
+		if c.Path == "claude" && len(c.Args) > 0 && c.Args[0] == "-p" {
+			dir := filepath.Join(h.layout.Artifacts, "reports")
+			if err := os.MkdirAll(dir, 0o755); err != nil {
+				t.Fatalf("preparing the artifacts directory: %v", err)
+			}
+			if err := os.WriteFile(filepath.Join(dir, "audit.md"), []byte("# findings\n"), 0o644); err != nil {
+				t.Fatalf("writing the artifact: %v", err)
+			}
+		}
+		return agent(c)
+	}
+
+	run, code := h.executeRun()
+	if code != runv1.ExitSuccess {
+		// Relay mode has no presigned bundle, and building the artifact list
+		// from one is what took the run down after the model had been paid for.
+		t.Fatalf("exit %d, want 0 (%v)", code, run.Failure())
+	}
+	const rel = "artifacts/reports/audit.md"
+	if got := string(h.mustObject(rel)); got != "# findings\n" {
+		t.Errorf("%s holds %q", rel, got)
+	}
+	arts := h.envelope().Artifacts
+	if len(arts) != 1 {
+		t.Fatalf("the envelope names %d artifacts, want 1: %+v", len(arts), arts)
+	}
+	if arts[0].Path != "reports/audit.md" || arts[0].Key != h.prefix()+rel {
+		t.Errorf("the artifact is %+v, want path reports/audit.md under key %s", arts[0], h.prefix()+rel)
+	}
+}
+
 func TestUsageIsNormalisedForBothRuntimes(t *testing.T) {
 	t.Parallel()
 

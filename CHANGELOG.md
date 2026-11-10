@@ -24,6 +24,14 @@ of `VERSION`, and it is the tag of the published images.
   declared name and plugins, which the form uses. It needs outbound HTTPS from
   the backend to the forge, through `HTTPS_PROXY` if one is set.
 
+### Fixed
+
+- **A run in relay mode no longer fails when the agent keeps a file.** If the
+  agent wrote anything to its artifacts directory, the `output` phase crashed
+  after the model had finished, and the run ended with exit 12
+  (`EntrypointPanic`). In chat this showed as "Sorry, I couldn't finish this".
+  Relay is the default artifact mode. Object-store mode was not affected.
+
 ## 0.6.0 — 2026-11-08
 
 ### Added

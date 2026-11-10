@@ -35,10 +35,16 @@ func phaseOutput(_ context.Context, r *Run) error {
 	if err != nil {
 		return err
 	}
+	// The key each artifact will have, from the run's fixed prefix rather than
+	// from the presigned bundle: there is no bundle in relay mode, and the
+	// prefix is the same in both modes — the controller stamps it from the CR
+	// on the one path and the backend scopes the capabilities to it on the
+	// other. uploadArtifacts replaces it with what storage acknowledged.
+	prefix := sprintf(runv1.StoragePrefixRun, r.cfg.RunID)
 	for _, name := range names {
 		r.artifacts = append(r.artifacts, runv1.OutputArtifact{
 			Path:        name,
-			Key:         r.secrets.Bundle.KeyPrefix + "artifacts/" + name,
+			Key:         prefix + "artifacts/" + name,
 			ContentType: contentTypeFor(name),
 		})
 	}
