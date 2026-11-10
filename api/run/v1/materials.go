@@ -75,6 +75,14 @@ const (
 	SecretKeyCallbackToken = "callback-token"
 )
 
+// PlatformMCPServer is the name the backend gives its own MCP server in
+// SecretKeyMCPConfig, the one that carries the per-run token for run_agent
+// and the other orchestration tools. The image pre-approves every tool of a
+// server by this name: the agent runs headless, where a tool call that needs
+// approval is refused, and a role's allow list that forgot it would leave the
+// agent seeing the server and refused every call. A deny still wins.
+const PlatformMCPServer = "haliphron"
+
 // ArtifactMode selects how a run's results reach durable storage. One port,
 // two implementations, and nothing above the port knows which is in force —
 // the callback path, the report ordering and the CompletedWithoutResult

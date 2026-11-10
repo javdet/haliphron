@@ -756,6 +756,17 @@ discrepancy. The table above is normative, and an equivalence test against it is
 mandatory: for every role in the fixture, compare the effective set of permitted
 operations on both runtimes.
 
+**The platform's own MCP server is always allowed.** When `mcp.json` carries
+the server named `haliphron` (`runv1.PlatformMCPServer`), claude-code is launched
+with `mcp__haliphron__*` appended to `--allowedTools`, whatever
+`HALIPHRON_ALLOWED_TOOLS` says. `--allowedTools` grants approval, it does not
+narrow what the agent sees, and under `-p` a call that needs approval is
+refused: without the rule a role whose allow list forgot the server — or that
+has none, in the default permission mode — gets an agent that sees `run_agent`
+and is refused every call. Nothing is widened: the token is the run's own and
+depth, children and budget are enforced behind the server.
+`HALIPHRON_DENIED_TOOLS` still wins.
+
 **Secrets in the MCP configuration.** Header values do not land in the file in
 plaintext: they are exported into the child process's environment variables and
 substituted by reference (`env_http_headers` in codex, `${VAR}` substitution in

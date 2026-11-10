@@ -8,6 +8,7 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -320,8 +321,8 @@ func (claudeCode) Launch(r *Run) Command {
 	if r.cfg.PermissionMode != "" {
 		args = append(args, "--permission-mode", r.cfg.PermissionMode)
 	}
-	if len(r.cfg.AllowedTools) > 0 {
-		args = append(args, "--allowedTools", strings.Join(r.cfg.AllowedTools, ","))
+	if allowed := r.claudeAllowedTools(); len(allowed) > 0 {
+		args = append(args, "--allowedTools", strings.Join(allowed, ","))
 	}
 	if len(r.cfg.DeniedTools) > 0 {
 		args = append(args, "--disallowedTools", strings.Join(r.cfg.DeniedTools, ","))
@@ -331,6 +332,28 @@ func (claudeCode) Launch(r *Run) Command {
 	}
 	return Command{Path: "claude", Args: args, Dir: r.layout.Workspace, Env: r.agentEnv,
 		Stdin: bytes.NewReader(r.prompt)}
+}
+
+// platformToolsRule pre-approves every tool of the platform's own MCP server.
+const platformToolsRule = "mcp__" + runv1.PlatformMCPServer + "__*"
+
+// claudeAllowedTools is the role's allow list, plus the platform's own MCP
+// tools whenever the run carries that server.
+//
+// Always, and not left to the role. --allowedTools grants approval; it does not
+// narrow what the agent sees. Under -p a call that needs approval is refused, so
+// a role whose list does not name the server — or a role with no list at all in
+// the default permission mode — gets an agent that sees run_agent and is refused
+// every call to it. Nothing is widened by adding it: the server is the
+// platform's, its token is this run's, and depth, children and budget are
+// enforced behind it. --disallowedTools still wins over this, so a ceiling that
+// denies the server or one of its tools is honoured.
+func (r *Run) claudeAllowedTools() []string {
+	allowed := r.cfg.AllowedTools
+	if _, ok := r.mcpServers()[runv1.PlatformMCPServer]; !ok || slices.Contains(allowed, platformToolsRule) {
+		return allowed
+	}
+	return append(slices.Clone(allowed), platformToolsRule)
 }
 
 // claudeResult is the shape of `claude -p --output-format json`.

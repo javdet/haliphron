@@ -275,9 +275,11 @@ allows `0.0.0.0/0` minus RFC1918 and link-local ranges
 hostname, never the in-cluster Service. If it is not, narrow the exceptions in
 the runtime chart instead.
 
-A role with no `toolPolicy.allow` gets every tool the installation permits. A
-role that sets `allow` must list `mcp__haliphron__*` for `list_roles` and
-`run_agent`, or the agent sees the server and is refused every call.
+The haliphron server's tools (`list_roles`, `run_agent` and the rest) are
+always allowed on claude-code: the image adds `mcp__haliphron__*` to
+`--allowedTools` whenever the run carries the server, whatever the role's
+`toolPolicy.allow` says. Only a deny, in the role or the ceiling, takes them
+away.
 
 ### What every agent is told
 

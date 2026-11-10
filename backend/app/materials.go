@@ -298,7 +298,7 @@ func (s *Service) mcpConfig(ctx context.Context, runID runv1.ULID, spec runv1.Re
 		if err != nil {
 			return "", fmt.Errorf("mint per-run MCP token for %s: %w", runID, err)
 		}
-		servers["haliphron"] = map[string]any{
+		servers[runv1.PlatformMCPServer] = map[string]any{
 			"type":    "http",
 			"url":     s.limits.MCPEndpoint,
 			"headers": map[string]string{"Authorization": "Bearer " + token.Secret},

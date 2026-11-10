@@ -221,6 +221,10 @@ A deny in the ceiling cannot be lifted by a role.
 The intersection is computed by the backend at admission. Neither the
 controller nor the pod recomputes it.
 
+One rule is added in the pod: on claude-code, a run that carries the platform's
+own MCP server always gets `mcp__haliphron__*` in `--allowedTools`, so `allow`
+never has to name it. A deny of the server or one of its tools still wins.
+
 ## `resources`
 
 Container limits. The controller sets requests equal to limits, which places

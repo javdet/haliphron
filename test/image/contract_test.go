@@ -1655,3 +1655,73 @@ func TestTheAgentCannotExfiltrateSecretsThroughItsOwnOutput(t *testing.T) {
 		})
 	}
 }
+
+// The platform's own MCP server is pre-approved whatever the role's allow list
+// says: headless, a call that needs approval is refused, and an agent that sees
+// run_agent and is refused every call to it is the failure being prevented.
+func TestThePlatformsOwnMCPToolsAreAlwaysAllowedAndADenyStillWins(t *testing.T) {
+	t.Parallel()
+	platform := `{"mcpServers":{"` + runv1.PlatformMCPServer + `":{"type":"http","url":"https://mcp.invalid/mcp"}}}`
+	cases := []struct {
+		name    string
+		mcp     string
+		allowed []string
+		denied  []string
+		want    string // the --allowedTools value, "" for none
+	}{
+		{"no allow list", platform, nil, nil, "mcp__haliphron__*"},
+		{"an allow list that forgot it", platform, []string{"Read", "Bash"}, nil, "Read,Bash,mcp__haliphron__*"},
+		{"an allow list that names it", platform, []string{"mcp__haliphron__*", "Read"}, nil, "mcp__haliphron__*,Read"},
+		{"no platform server", `{"mcpServers":{"jira":{"command":"jira-mcp"}}}`, []string{"Read"}, nil, "Read"},
+		{"a denied tool", platform, nil, []string{"mcp__haliphron__run_agent"}, "mcp__haliphron__*"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			h := newHarness(t, controlplane.RunRequest{
+				Prompt:       "use your tools",
+				Agent:        runv1.AgentClaudeCode,
+				AllowedTools: tc.allowed,
+				DeniedTools:  tc.denied,
+				Secrets:      map[string]string{runv1.SecretKeyMCPConfig: tc.mcp},
+			})
+			agent := agentScript(h, "done", "")
+			h.commander.handle = func(c entrypoint.Command) (entrypoint.CommandResult, error) {
+				if c.Path == "claude" && len(c.Args) > 0 && c.Args[0] == "mcp" {
+					if slices.Equal(c.Args, []string{"mcp", "list"}) {
+						for _, name := range []string{runv1.PlatformMCPServer, "jira"} {
+							fmt.Fprintf(c.Stdout, "%s: https://mcp.invalid/mcp (HTTP) - ✔ Connected\n", name)
+						}
+					}
+					return entrypoint.CommandResult{}, nil
+				}
+				return agent(c)
+			}
+
+			run, code := h.executeRun()
+			if code != runv1.ExitSuccess {
+				t.Fatalf("exit %d, want 0 (%v)", code, run.Failure())
+			}
+			var launch []string
+			for _, c := range h.commander.invocations("claude") {
+				if len(c.Args) > 0 && c.Args[0] == "-p" {
+					launch = c.Args
+				}
+			}
+			if got := flagValue(launch, "--allowedTools"); got != tc.want {
+				t.Errorf("--allowedTools %q, want %q", got, tc.want)
+			}
+			if want := strings.Join(tc.denied, ","); flagValue(launch, "--disallowedTools") != want {
+				t.Errorf("--disallowedTools %q, want %q", flagValue(launch, "--disallowedTools"), want)
+			}
+		})
+	}
+}
+
+// flagValue is the argument after flag, or "" when the flag is absent.
+func flagValue(args []string, flag string) string {
+	if i := slices.Index(args, flag); i >= 0 && i+1 < len(args) {
+		return args[i+1]
+	}
+	return ""
+}
