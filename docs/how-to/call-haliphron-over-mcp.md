@@ -41,7 +41,10 @@ curl -sX POST https://haliphron.example.com/api/v1/tokens \
 what makes the audit log readable later.
 
 `list_clusters` requires `runs:read` like the rest, but is offered only to
-tokens that are not per-run tokens.
+tokens that are not per-run tokens. The same holds for the role configuration
+tools: `get_role` with `runs:read`, and `put_role`, `delete_role` and
+`inspect_marketplace` with `admin`. An agent that Haliphron started never sees
+them.
 
 ## Check it from the command line first
 
@@ -51,7 +54,11 @@ curl -sX POST https://mcp.haliphron.example.com/mcp \
   -d '{"jsonrpc":"2.0","id":1,"method":"tools/list"}'
 ```
 
-Six tools come back — five if the token is a per-run token. `initialize` and
+Which tools come back depends on the token. A `runs:read` + `runs:write`
+token gets eight: `run_agent`, `get_run_result`, `cancel_run`, `list_runs`,
+`list_roles`, `list_locks`, `get_role` and `list_clusters`. An `admin` token
+gets `put_role`, `delete_role` and `inspect_marketplace` as well. A per-run
+token gets the first five and the four lock tools. `initialize` and
 `ping` need no token; everything else does.
 
 ## Start a run

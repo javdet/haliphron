@@ -247,6 +247,17 @@ curl -s https://haliphron.example.com/api/v1/roles \
   -H "Authorization: Bearer $TOKEN"
 ```
 
+## Set roles up from your own agent
+
+An agent connected to the MCP listener with an `admin` token can do all of the
+above with `get_role`, `put_role` and `delete_role`, and can fill a role's
+plugins with `inspect_marketplace`. See [MCP tools](../reference/mcp-tools.md#role-configuration).
+`put_role` replaces the whole spec, like `PUT`, so ask the agent to read the
+role with `get_role` before it changes one. These tools are never offered to an
+agent that Haliphron itself started.
+
+## List roles over MCP
+
 Callers can also list roles over MCP with `list_roles`, which is how an agent
 discovers what it may start a child run under. It returns only each role's name
 and `description`, so the description is the only thing an agent has to choose

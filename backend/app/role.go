@@ -161,6 +161,9 @@ func RoleDescription(r store.Role) string {
 // notices until the lease is cut, an hour later, in a pod, with the run already
 // paid for.
 func (s *Service) PutRole(ctx context.Context, name string, spec json.RawMessage, by string) (store.Role, error) {
+	if err := RoleName(name); err != nil {
+		return store.Role{}, &run.InvalidRequestError{Field: "name", Detail: err.Error()}
+	}
 	if len(spec) == 0 || spec[0] != '{' {
 		return store.Role{}, &run.InvalidRequestError{Field: "spec", Detail: "a role spec is an object"}
 	}
@@ -273,3 +276,22 @@ func configFileKey(key string) error {
 }
 
 var configFileKeyPattern = regexp.MustCompile(`^[A-Za-z0-9._-]+$`)
+
+// RoleName admits what the roles table admits. The table's CHECK would refuse
+// the rest anyway, but as an internal error; refused here, the caller is told
+// which name and why.
+func RoleName(name string) error {
+	switch {
+	case name == "":
+		return fmt.Errorf("a role needs a name")
+	case len(name) > 253:
+		return fmt.Errorf("%q is longer than 253 characters", name)
+	case !roleNamePattern.MatchString(name):
+		return fmt.Errorf("%q is not a usable role name: lower-case letters, digits, %q, %q and %q, "+
+			"starting and ending with a letter or a digit", name, "-", "_", ".")
+	}
+	return nil
+}
+
+// roleNamePattern is the roles_name CHECK of db/migrations/0004_identity.sql.
+var roleNamePattern = regexp.MustCompile(`^[a-z0-9]([-a-z0-9_.]*[a-z0-9])?$`)

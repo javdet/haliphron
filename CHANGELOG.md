@@ -5,6 +5,24 @@ of `VERSION`, and it is the tag of the published images.
 
 ## Unreleased
 
+### Added
+
+- **Roles can be configured over MCP.** An operator's own agent, connected to
+  the MCP listener, can read, create, replace and delete roles with
+  `get_role`, `put_role` and `delete_role`, and can read a plugin marketplace
+  with `inspect_marketplace` to fill a role's plugins. The scopes are the same
+  as over REST: `runs:read` to read, `admin` to write. The validation is the
+  same as in the UI. These tools are never offered to a per-run token, so an
+  agent that Haliphron started cannot change the roles that decide its own
+  children's tools, servers and secrets.
+
+### Changed
+
+- **A role name the database cannot store is refused with a reason.** `PUT
+  /api/v1/roles/{name}` with a name such as `Infra Coder` used to fail with an
+  internal error. It now returns `400` with a `name` field. The allowed names
+  are the same as before.
+
 ## 0.6.1 — 2026-11-10
 
 ### Changed

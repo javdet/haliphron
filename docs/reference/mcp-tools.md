@@ -173,6 +173,90 @@ Scope: `runs:read`.
 **Not offered to a per-run token.** `tools/list` omits this tool when the
 caller is an agent inside a pod. It exists for an operator without a UI.
 
+## Role configuration
+
+Four tools let an operator's own agent set roles up without the UI. They are
+the [REST role endpoints](rest-api.md#roles) under other names, with the same
+scopes and the same validation: a role saved here and a role saved from the UI
+are admitted by the same rules.
+
+**Never offered to a per-run token**, whatever scopes it carries. `tools/list`
+omits them for an agent inside a pod, and a call from one is refused. A role
+decides which tools, MCP servers, secrets and system prompt an agent gets. An
+agent that could edit roles could widen its own children's permissions, and it
+may be acting on a prompt injection from the repository it works in.
+
+| Tool | Scope | Offered when |
+|---|---|---|
+| `get_role` | `runs:read` | the token has `runs:read` |
+| `put_role` | `admin` | the token has `admin` |
+| `delete_role` | `admin` | the token has `admin` |
+| `inspect_marketplace` | `admin` | the token has `admin` |
+
+A refusal is a tool result with `isError` set. A validation refusal starts with
+the field it concerns, such as `configFiles: ...` or `secretEnv[0].secret: ...`,
+so the agent can correct the spec and call again.
+
+### `get_role`
+
+One role's whole spec.
+
+| Argument | Type | Required |
+|---|---|---|
+| `name` | string | yes |
+
+The structured content is the same object as `GET /api/v1/roles/{name}`:
+
+```json
+{"name": "coder", "spec": { }, "created_by": "alice", "updated_at": "2026-11-10T10:00:00Z"}
+```
+
+The text block is `role <name>`, then the spec as indented JSON. A role that
+does not exist is `no role named "<name>"`.
+
+### `put_role`
+
+Creates a role, or replaces an existing role's spec whole.
+
+| Argument | Type | Required | Notes |
+|---|---|---|---|
+| `name` | string | yes | lower-case letters, digits, `-`, `_` and `.`, starting and ending with a letter or digit; at most 253 characters |
+| `spec` | object | yes | the [role spec](role-spec.md) |
+
+Nothing is merged: a field left out of `spec` is removed from the role. To
+edit, call `get_role`, change the spec, and send it back. Runs that were
+already admitted keep the spec they were admitted with. A `spec` passed as a
+string that holds a JSON object is accepted as that object.
+
+The answer is the saved role, shaped as in `get_role`. `created_by` is the
+token's `subject`, or `token:<name>`.
+
+### `delete_role`
+
+| Argument | Type | Required |
+|---|---|---|
+| `name` | string | yes |
+
+A soft delete, as over REST. Runs already admitted under the role keep running
+and keep naming it. A new run naming it is refused, and the name can be used
+again. The answer is `{"name": "...", "deleted": true}`.
+
+### `inspect_marketplace`
+
+Reads a claude-code plugin marketplace's manifest with the installation's git
+token. Use it to fill a role's `plugins` before `put_role`.
+
+| Argument | Type | Required | Notes |
+|---|---|---|---|
+| `url` | string | yes | `owner/repo` or an https git URL, as `plugins.marketplaces[].url` takes it |
+| `ref` | string | no | a branch or tag; default branch when omitted |
+
+The structured content is the same as `POST /api/v1/plugin-marketplaces/inspect`:
+`url`, `found`, `plugins` (`name`, and `version` and `description` when the
+manifest has them), and, when set, `ref`, `name`, `description`,
+`manifest_path` and `problem`. A marketplace that cannot be read is not a
+refusal: `found` is `false` and `problem` says why.
+
 ## Resource locks
 
 Four tools let agents that change shared infrastructure (a load balancer, a
@@ -414,7 +498,9 @@ deeper, and inherits the parent's `role` and `repo` when it names neither.
 
 The maximum depth is 8.
 
-Such a caller does not see `list_clusters`, and does see the four lock tools:
-`set_lock`, `unset_lock`, `list_locks` and `schedule_agent`. An operator's
-token sees `list_locks` (with `runs:read`) and `list_clusters`, but cannot hold
-a lock or defer work.
+Such a caller does not see `list_clusters` or any of the
+[role configuration](#role-configuration) tools, and does see the four lock
+tools: `set_lock`, `unset_lock`, `list_locks` and `schedule_agent`. An
+operator's token sees `list_locks` and `get_role` (with `runs:read`),
+`put_role`, `delete_role` and `inspect_marketplace` (with `admin`), and
+`list_clusters`, but cannot hold a lock or defer work.

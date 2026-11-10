@@ -129,6 +129,9 @@ func toolDefinitions(c Caller, tasks bool) []tool {
 		// An operator may look at the locks; holding one takes a run.
 		tools = append(tools, lockToolDefinitions(c)...)
 	}
+	// Configuring roles is for an operator's own agent connecting from
+	// outside, never for an agent this platform started: see roles.go.
+	tools = append(tools, roleToolDefinitions(c)...)
 	return append(tools, tool{
 		Name:        "list_clusters",
 		Title:       "List clusters",
@@ -195,6 +198,14 @@ func (s *Server) call(r *http.Request, c Caller, raw json.RawMessage) (any, *rpc
 		return s.listRuns(r, c, args)
 	case "list_roles":
 		return s.listRoles(r)
+	case "get_role":
+		return s.getRole(r, c, args)
+	case "put_role":
+		return s.putRole(r, c, args)
+	case "delete_role":
+		return s.deleteRole(r, c, args)
+	case "inspect_marketplace":
+		return s.inspectMarketplace(r, c, args)
 	case "set_lock":
 		return s.setLock(r, c, args)
 	case "unset_lock":
