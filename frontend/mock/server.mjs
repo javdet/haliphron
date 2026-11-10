@@ -190,6 +190,21 @@ let slack = {
 let runRetention = { failed_retention_seconds: 3 * 86400, retention_seconds: 0, source: 'default' }
 
 // Starts empty, so the prompt to set one is what the mock shows first.
+const apiTokens = [
+  { token_id: '01JD7C0000TOKEN000000001', name: 'ci-pipeline', kind: 'service',
+    scopes: ['runs:read', 'runs:write'], subject: 'ci', expires_at: iso(-60 * 86400000),
+    created_at: iso(30 * 86400000) },
+  { token_id: '01JD7C0000TOKEN000000002', name: 'maria-admin', kind: 'service',
+    scopes: ['admin'], subject: 'maria', created_at: iso(44 * 86400000) },
+  { token_id: '01JD7C0000TOKEN000000003', name: 'run 01JD8QK3R4ZP7WN2XA5T6M9BCD', kind: 'run-mcp',
+    scopes: ['runs:write', 'runs:read'], run_id: '01JD8QK3R4ZP7WN2XA5T6M9BCD',
+    expires_at: iso(-110 * 60000), created_at: iso(9 * 60000) },
+  { token_id: '01JD7C0000TOKEN000000004', name: 'old-laptop', kind: 'service',
+    scopes: ['runs:read'], created_at: iso(200 * 86400000), revoked_at: iso(20 * 86400000) },
+  { token_id: '01JD7C0000TOKEN000000005', name: 'bootstrap', kind: 'user',
+    scopes: ['admin'], created_at: iso(60 * 86400000) },
+]
+
 const gitTokens = [
   { secret_name: 'git-token', configured: false },
   { provider: 'github', secret_name: 'git-token-github', configured: false },
@@ -479,19 +494,17 @@ const routes = [
         max_uses: 3, uses: 0, created_by: 'dmitri', created_at: iso(2 * 86400000) },
     ],
   })],
-  ['GET', /^\/api\/v1\/tokens$/, () => ({
-    tokens: [
-      { token_id: '01JD7C0000TOKEN000000001', name: 'ci-pipeline', kind: 'service',
-        scopes: ['runs:read', 'runs:write'], subject: 'ci', expires_at: iso(-60 * 86400000),
-        created_at: iso(30 * 86400000) },
-      { token_id: '01JD7C0000TOKEN000000002', name: 'maria-admin', kind: 'service',
-        scopes: ['admin'], subject: 'maria', created_at: iso(44 * 86400000) },
-      { token_id: '01JD7C0000TOKEN000000003', name: 'run-01JD8QK3', kind: 'run-mcp',
-        scopes: ['runs:write'], run_id: '01JD8QK3R4ZP7WN2XA5T6M9BCD', created_at: iso(9 * 60000) },
-      { token_id: '01JD7C0000TOKEN000000004', name: 'old-laptop', kind: 'service',
-        scopes: ['runs:read'], created_at: iso(200 * 86400000), revoked_at: iso(20 * 86400000) },
-    ],
-  })],
+  ['GET', /^\/api\/v1\/tokens$/, (_m, url) => {
+    // The backend narrows by kind (repeatable) and run_id; so does this.
+    const kinds = url.searchParams.getAll('kind')
+    const runId = url.searchParams.get('run_id')
+    return {
+      tokens: apiTokens.filter((t) =>
+        !deletedRuns.has(t.run_id) &&
+        (kinds.length === 0 || kinds.includes(t.kind)) &&
+        (!runId || t.run_id === runId)),
+    }
+  }],
   ['DELETE', /^\/api\/v1\/tokens\/([^/]+)$/, () => ({})],
   ['POST', /^\/api\/v1\/tokens\/([^/]+)\/remove$/, () => ({})],
   ['GET', /^\/api\/v1\/model-credential$/, () => modelCredential],

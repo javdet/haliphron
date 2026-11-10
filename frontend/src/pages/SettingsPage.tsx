@@ -2,6 +2,7 @@ import { useEffect, useState } from 'react'
 import { usePutRunRetention, usePutTokenRetention, useRunRetention, useTokenRetention } from '../api/hooks'
 import { Card, ErrorBanner, Field, Spinner, Time } from '../components/ui'
 import type { RunRetention, TokenRetention } from '../api/types'
+import { ApiTokensCard } from '../components/ApiTokens'
 
 /**
  * Installation-wide settings an operator changes from here rather than from the
@@ -241,7 +242,7 @@ function TokenRetentionCard() {
           set={set}
           label="Per-run tokens"
           error={problem}
-          hint="Every run gets its own MCP token, which stops working when the run ends. An ended per-run token is deleted from the tokens list this long after it was created. Tokens minted by hand are never deleted automatically."
+          hint="Every run gets its own MCP token, which stops working when the run ends. An ended per-run token is deleted this long after it was created, or with its run if that goes first. Tokens minted by hand are never deleted automatically."
         />
 
         <div className="row" style={{ justifyContent: 'space-between' }}>
@@ -277,6 +278,7 @@ export function SettingsPage() {
         </div>
       </header>
       <div className="content">
+        <ApiTokensCard />
         <RunRetentionCard />
         <TokenRetentionCard />
       </div>

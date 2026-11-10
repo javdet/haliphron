@@ -1,5 +1,5 @@
 import { useState } from 'react'
-import { Link, NavLink, Route, Routes, useLocation } from 'react-router-dom'
+import { Link, NavLink, Navigate, Route, Routes, useLocation } from 'react-router-dom'
 import { useGitCredential, useModelCredential } from './api/hooks'
 import { gitProblems } from './api/gitToken'
 import { RunsPage } from './pages/RunsPage'
@@ -10,7 +10,6 @@ import { ClustersPage } from './pages/ClustersPage'
 import { LocksPage } from './pages/LocksPage'
 import { StatsPage } from './pages/StatsPage'
 import { RolesPage } from './pages/RolesPage'
-import { TokensPage } from './pages/TokensPage'
 import { SecretsPage } from './pages/SecretsPage'
 import { IntegrationsPage } from './pages/IntegrationsPage'
 import { SettingsPage } from './pages/SettingsPage'
@@ -45,7 +44,6 @@ function Sidebar() {
         <NavLink to="/roles">Roles</NavLink>
         <NavLink to="/secrets">Secrets</NavLink>
         <NavLink to="/integrations">Integrations</NavLink>
-        <NavLink to="/tokens">Tokens</NavLink>
         <NavLink to="/settings">Settings</NavLink>
       </nav>
 
@@ -173,7 +171,8 @@ export default function App() {
           <Route path="/roles" element={<RolesPage />} />
           <Route path="/secrets" element={<SecretsPage />} />
           <Route path="/integrations" element={<IntegrationsPage />} />
-          <Route path="/tokens" element={<TokensPage />} />
+          {/* Tokens are kept where they belong now; an old bookmark lands on the hand-minted ones. */}
+          <Route path="/tokens" element={<Navigate to="/settings" replace />} />
           <Route path="/settings" element={<SettingsPage />} />
           <Route
             path="*"

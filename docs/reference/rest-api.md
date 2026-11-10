@@ -935,7 +935,14 @@ Returns `201` with `token_id`, `name`, `token`, `scopes` and `expires_at`.
 ### `GET /api/v1/tokens`
 
 Scope: `admin`. Returns `token_id`, `name`, `kind`, `scopes`, `subject`,
-`run_id`, `expires_at`, `created_at` and `revoked_at` per token.
+`run_id`, `expires_at`, `created_at` and `revoked_at` per token, newest first.
+
+| Query | Notes |
+|---|---|
+| `kind` | `user`, `service` or `run-mcp`; repeat it to keep several kinds. An unknown kind is refused with `422 invalid_request` |
+| `run_id` | keeps the per-run tokens of one run |
+
+Without either, every token is listed. A per-run token is deleted with its run.
 
 ### `DELETE /api/v1/tokens/{id}`
 

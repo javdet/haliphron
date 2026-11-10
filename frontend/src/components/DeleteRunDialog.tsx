@@ -47,7 +47,7 @@ export function DeleteRunDialog({
         {runId}
       </p>
       <p className="small muted" style={{ margin: 0 }}>
-        The run, its attempts, its logs and its result are deleted for good. Runs it started are
+        The run, its attempts, its logs, its result and its MCP token are deleted for good. Runs it started are
         kept, without their link back to it. The audit log keeps a record that it existed and what it
         cost. Deleting needs an admin token.
       </p>

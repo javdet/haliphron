@@ -32,7 +32,7 @@ func (h *harness) aServiceToken(t *testing.T, name string, ttl time.Duration) st
 
 func (h *harness) listsToken(t *testing.T, id runv1.ULID) bool {
 	t.Helper()
-	tokens, err := h.Store.ListTokens(context.Background())
+	tokens, err := h.Store.ListTokens(context.Background(), store.TokenFilter{})
 	if err != nil {
 		t.Fatalf("list tokens: %v", err)
 	}
@@ -174,5 +174,79 @@ func TestRemovingATokenNeedsAdmin(t *testing.T) {
 	}
 	if !h.listsToken(t, victim.ID) {
 		t.Fatal("a refused removal removed the token")
+	}
+}
+
+// The UI shows each kind of token where it belongs: user and service tokens in
+// the settings, a run's own token on the run. Both lists are narrowed by the
+// backend, so neither page reads a row per run it does not show.
+func TestTheTokensListNarrowsByKindAndByRun(t *testing.T) {
+	h := newHarness(t)
+	admin := h.Token(store.ScopeAdmin)
+	service := h.aServiceToken(t, "ci", 0)
+	user := h.aUserToken("alice")
+	mine, other := h.Submit(), h.Submit()
+	mineToken := h.aRunToken(mine.ID)
+	otherToken := h.aRunToken(other.ID)
+
+	list := func(query string) map[runv1.ULID]bool {
+		t.Helper()
+		var body struct {
+			Tokens []struct {
+				TokenID runv1.ULID `json:"token_id"`
+			} `json:"tokens"`
+		}
+		if status := h.call(t, admin, http.MethodGet, "/api/v1/tokens"+query, nil, &body); status != http.StatusOK {
+			t.Fatalf("list %q: %d", query, status)
+		}
+		ids := map[runv1.ULID]bool{}
+		for _, tok := range body.Tokens {
+			ids[tok.TokenID] = true
+		}
+		return ids
+	}
+
+	byHand := list("?kind=user&kind=service")
+	if !byHand[service.ID] || !byHand[user.ID] {
+		t.Error("the user and service tokens are missing from their own list")
+	}
+	if byHand[mineToken.ID] || byHand[otherToken.ID] {
+		t.Error("a per-run token is listed among the tokens minted by hand")
+	}
+
+	ofRun := list("?run_id=" + string(mine.ID))
+	if len(ofRun) != 1 || !ofRun[mineToken.ID] {
+		t.Errorf("the tokens of run %s are %v, want only %s", mine.ID, ofRun, mineToken.ID)
+	}
+
+	all := list("")
+	for _, id := range []runv1.ULID{service.ID, user.ID, mineToken.ID, otherToken.ID} {
+		if !all[id] {
+			t.Errorf("the unfiltered list is missing %s", id)
+		}
+	}
+
+	if status := h.call(t, admin, http.MethodGet, "/api/v1/tokens?kind=robot", nil, nil); status != http.StatusUnprocessableEntity {
+		t.Errorf("an unknown kind: %d, want 422", status)
+	}
+}
+
+// A run's token is part of the run: deleting the run deletes it, whatever the
+// token retention says, and leaves every other token alone.
+func TestDeletingARunDeletesItsTokens(t *testing.T) {
+	h := newHarness(t)
+	admin := h.Token(store.ScopeAdmin)
+	victim, bystander := h.aFinishedRun(), h.aFinishedRun()
+	victimToken := h.aRunToken(victim.ID)
+	bystanderToken := h.aRunToken(bystander.ID)
+
+	if status := h.call(t, admin, http.MethodDelete, deletePath(victim.ID), nil, nil); status != http.StatusNoContent {
+		t.Fatalf("delete a finished run: %d", status)
+	}
+	if h.tokenExists(victimToken.ID) {
+		t.Error("the deleted run's token is still stored")
+	}
+	if !h.tokenExists(bystanderToken.ID) {
+		t.Error("deleting one run deleted another run's token")
 	}
 }

@@ -145,11 +145,26 @@ func (s *Store) AuthenticateToken(ctx context.Context, presented string) (Token,
 	return t, nil
 }
 
+// TokenFilter narrows ListTokens. The zero value lists every token.
+//
+// The UI shows each kind where it belongs — user and service tokens in the
+// settings, a run's own token on the run — and one list of every kind grows by
+// a row per run, so the narrowing is done here rather than in a browser.
+type TokenFilter struct {
+	// Kinds keeps the tokens of any of these kinds. Empty keeps every kind.
+	Kinds []string
+	// RunID keeps the per-run tokens of one run.
+	RunID runv1.ULID
+}
+
 // ListTokens returns the issued credentials, without a secret among them.
-func (s *Store) ListTokens(ctx context.Context) ([]Token, error) {
+func (s *Store) ListTokens(ctx context.Context, filter TokenFilter) ([]Token, error) {
 	rows, err := s.db.QueryContext(ctx, `
 		SELECT id, name, kind, scopes, subject, run_id, expires_at, created_by, created_at, revoked_at
-		FROM api_tokens ORDER BY created_at DESC`)
+		FROM api_tokens
+		WHERE (cardinality($1::text[]) = 0 OR kind = ANY($1::text[]))
+		  AND ($2::text IS NULL OR run_id = $2::text)
+		ORDER BY created_at DESC`, textArray(filter.Kinds), nullString(string(filter.RunID)))
 	if err != nil {
 		return nil, fmt.Errorf("store: list tokens: %w", err)
 	}

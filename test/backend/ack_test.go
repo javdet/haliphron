@@ -257,7 +257,7 @@ func TestAckTimeoutsStopAtTheCeilingAndFailTheRun(t *testing.T) {
 		t.Errorf("the last holder's late ack got %+v, want abandon", problem)
 	}
 
-	tokens, err := h.Store.ListTokens(ctx)
+	tokens, err := h.Store.ListTokens(ctx, store.TokenFilter{})
 	if err != nil {
 		t.Fatalf("list tokens: %v", err)
 	}

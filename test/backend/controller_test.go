@@ -6,6 +6,7 @@ import (
 
 	clusterv1 "github.com/automagicops/haliphron/api/cluster/v1"
 	runv1 "github.com/automagicops/haliphron/api/run/v1"
+	"github.com/automagicops/haliphron/backend/store"
 	"github.com/automagicops/haliphron/fake/controller"
 )
 
@@ -100,7 +101,7 @@ func TestARunGoesFromAdmissionToResult(t *testing.T) {
 
 	// The per-run MCP token dies with the run. A token that outlives it is a
 	// way to start work charged to a budget nobody is watching.
-	tokens, err := h.Store.ListTokens(ctx)
+	tokens, err := h.Store.ListTokens(ctx, store.TokenFilter{})
 	if err != nil {
 		t.Fatalf("list tokens: %v", err)
 	}

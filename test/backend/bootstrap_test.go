@@ -53,7 +53,7 @@ func TestTheBootstrapTokenOpensAnInstallationThatHasNoOtherCredential(t *testing
 
 	// And it is visible as what it is, rather than as an entry nobody can
 	// account for.
-	tokens, err := h.Store.ListTokens(ctx)
+	tokens, err := h.Store.ListTokens(ctx, store.TokenFilter{})
 	if err != nil {
 		t.Fatalf("list tokens: %v", err)
 	}
@@ -91,7 +91,7 @@ func TestInstallingTheBootstrapTokenTwiceIsOneRow(t *testing.T) {
 		}
 	}
 
-	tokens, err := h.Store.ListTokens(ctx)
+	tokens, err := h.Store.ListTokens(ctx, store.TokenFilter{})
 	if err != nil {
 		t.Fatalf("list tokens: %v", err)
 	}

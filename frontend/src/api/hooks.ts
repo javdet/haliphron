@@ -38,6 +38,7 @@ import {
   type Schedule,
   type ScheduleRequest,
   type Secret,
+  type TokenKind,
   type TokenRetention,
 } from './types'
 
@@ -65,7 +66,7 @@ export const keys = {
   clusters: () => ['clusters'] as const,
   runStats: (since: string | null) => ['stats', 'runs', since ?? 'all'] as const,
   bootstrapTokens: () => ['bootstrap-tokens'] as const,
-  tokens: () => ['tokens'] as const,
+  tokens: (filter?: TokenFilter) => (filter ? (['tokens', filter] as const) : (['tokens'] as const)),
   secrets: () => ['secrets'] as const,
   modelCredential: () => ['model-credential'] as const,
   gitCredential: () => ['git-credential'] as const,
@@ -220,7 +221,11 @@ export function useDeleteRun() {
   const qc = useQueryClient()
   return useMutation({
     mutationFn: (id: string) => request<void>(`/runs/${encodeURIComponent(id)}`, { method: 'DELETE' }),
-    onSuccess: () => void qc.invalidateQueries({ queryKey: ['runs'] }),
+    onSuccess: () => {
+      void qc.invalidateQueries({ queryKey: ['runs'] })
+      // The run's own tokens are deleted with it.
+      void qc.invalidateQueries({ queryKey: keys.tokens() })
+    },
   })
 }
 
@@ -454,11 +459,25 @@ export function useCreateBootstrapToken() {
 // tokens and secrets
 // ---------------------------------------------------------------------------
 
-export function useTokens() {
+/**
+ * Narrows the token list. Each kind is shown where it belongs: the tokens
+ * minted by hand in the settings, a run's own token on the run.
+ */
+export interface TokenFilter {
+  kind?: TokenKind[]
+  run_id?: string
+}
+
+/** Admin only; `enabled` lets a page that is not about tokens skip the call. */
+export function useTokens(filter: TokenFilter, enabled = true) {
   return useQuery({
-    queryKey: keys.tokens(),
+    queryKey: keys.tokens(filter),
     queryFn: ({ signal }) =>
-      request<{ tokens: ApiToken[] }>('/tokens', { signal }).then((r) => r.tokens),
+      request<{ tokens: ApiToken[] }>('/tokens', {
+        signal,
+        query: { kind: filter.kind, run_id: filter.run_id },
+      }).then((r) => r.tokens),
+    enabled,
   })
 }
 

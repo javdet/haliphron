@@ -29,14 +29,14 @@ is the one component that has to change when that arrives.
 | Page | What it does |
 |---|---|
 | Runs | Filter by status, role, agent and text; submit a run; delete a finished run; page with the `before` cursor |
-| Run | Status, accounting, source; result, logs and the attempt ledger; cancel, retry, delete |
+| Run | Status, accounting, source; result, logs and the attempt ledger; the run's MCP token, revocable while live; cancel, retry, delete (the token goes with the run) |
 | Schedules | Create, edit, enable/disable and delete schedules (cron, timezone, concurrency policy, starting deadline, the run template); run now; next fire and what the last fire did |
 | Schedule | One schedule's definition and template, and every run it started |
 | Clusters | Registered clusters with heartbeat and slots; revoke; delete a revoked one no run ran on; mint bootstrap tokens |
 | Statistics | Runs per cluster and status over 24 hours, 7 days, 30 days or all time; duration and queue-wait p50/p95; active runs, free slots and heartbeat per cluster |
 | Roles | Create, edit and soft-delete role specs |
 | Secrets | The model credential and the git token, each with its own card; list, add and rotate the rest. Values are never shown because the API never returns them |
-| Tokens | List, mint and revoke API tokens; remove revoked or expired ones |
+| Settings | API tokens minted by hand: list, mint, revoke, remove revoked or expired ones; run and per-run token retention |
 
 Not covered, because the backend has none of it: workflows and audit. Logs are polled rather than streamed — the API pages over chunks and
 offers no SSE.

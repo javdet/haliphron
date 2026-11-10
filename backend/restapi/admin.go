@@ -616,8 +616,21 @@ func (s *Server) createToken(w http.ResponseWriter, r *http.Request, c caller) {
 	})
 }
 
+// listTokens narrows by ?kind= (repeatable) and ?run_id=. An unknown kind is
+// refused rather than matching nothing: an empty list read as "no tokens of
+// that kind exist" is the wrong answer to a typo.
 func (s *Server) listTokens(w http.ResponseWriter, r *http.Request, _ caller) {
-	tokens, err := s.app.Store().ListTokens(r.Context())
+	query := r.URL.Query()
+	filter := store.TokenFilter{Kinds: query["kind"], RunID: runv1.ULID(query.Get("run_id"))}
+	for _, kind := range filter.Kinds {
+		switch kind {
+		case store.TokenKindUser, store.TokenKindService, store.TokenKindRunMCP:
+		default:
+			s.fail(w, http.StatusUnprocessableEntity, "invalid_request", "unknown token kind "+kind, "kind")
+			return
+		}
+	}
+	tokens, err := s.app.Store().ListTokens(r.Context(), filter)
 	if err != nil {
 		s.failFor(w, r, err)
 		return

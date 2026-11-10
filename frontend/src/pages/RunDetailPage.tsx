@@ -12,6 +12,7 @@ import {
   useRun,
 } from '../api/hooks'
 import { DeleteRunDialog } from '../components/DeleteRunDialog'
+import { RunTokensCard } from '../components/ApiTokens'
 import { DeferredRunsTable } from './LocksPage'
 import { FailureBadge, StatusBadge } from '../components/StatusBadge'
 import {
@@ -473,6 +474,7 @@ export function RunDetailPage() {
         <ErrorBanner error={retry.error} what="retry the run" />
         <Summary run={data} />
         <LocksAndDeferrals id={id} live={live} />
+        <RunTokensCard runId={id} live={live} />
 
         <Card tight>
           <div className="tabs">

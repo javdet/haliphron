@@ -393,10 +393,13 @@ export type Scope = 'runs:read' | 'runs:write' | 'admin'
 
 export const SCOPES: Scope[] = ['runs:read', 'runs:write', 'admin']
 
+/** user and service tokens are minted by hand; run-mcp is minted for each run. */
+export type TokenKind = 'user' | 'service' | 'run-mcp'
+
 export interface ApiToken {
   token_id: string
   name: string
-  kind: string
+  kind: TokenKind
   scopes: Scope[]
   subject?: string
   run_id?: string
