@@ -5,6 +5,8 @@ of `VERSION`, and it is the tag of the published images.
 
 ## Unreleased
 
+## 0.6.2 — 2026-11-10
+
 ### Added
 
 - **Roles can be configured over MCP.** An operator's own agent, connected to
@@ -22,6 +24,18 @@ of `VERSION`, and it is the tag of the published images.
   /api/v1/roles/{name}` with a name such as `Infra Coder` used to fail with an
   internal error. It now returns `400` with a `name` field. The allowed names
   are the same as before.
+- **API tokens are shown where they belong.** The tokens minted by hand are
+  listed, minted, revoked and removed on the Settings page; a run's own MCP
+  token is shown on the run, revocable while the run is live. The separate
+  Tokens page is gone, and `/tokens` redirects to `/settings`. A per-run token
+  is deleted with its run.
+- **`GET /api/v1/tokens` can be filtered.** `kind` (`user`, `service` or
+  `run-mcp`, repeatable) and `run_id` narrow the list, which is now newest
+  first. An unknown kind is refused with `422 invalid_request`.
+- **A run's card names its cluster and links to it.** The cluster is shown by
+  name instead of identifier (the identifier is still the fallback while the
+  cluster list loads), and both the cluster and the role link to the Clusters
+  and Roles pages.
 
 ## 0.6.1 — 2026-11-10
 
