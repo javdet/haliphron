@@ -5,7 +5,22 @@ of `VERSION`, and it is the tag of the published images.
 
 ## Unreleased
 
+## 0.6.1 — 2026-11-10
+
 ### Changed
+
+- **A plugin that cannot be set up no longer fails the run.** If a marketplace
+  cannot be fetched or registered, the run continues without its plugins. If a
+  plugin will not install, the run continues without that plugin. Before, the
+  run failed with exit 20 or 30. Now the run's log and the pod's stderr give
+  the cause, the other plugins are still installed, and the agent starts. Its
+  instructions list what is missing and ask it to say so in its answer.
+- **The platform's own MCP tools no longer need to be in a role's allow
+  list.** On claude-code, a run that carries the `haliphron` MCP server always
+  gets `mcp__haliphron__*` in `--allowedTools`. Before, a role whose
+  `toolPolicy.allow` left the server out got an agent that could see
+  `run_agent` and was refused every call. A deny in the role or the ceiling
+  still removes these tools.
 
 - **Adding a marketplace to a role takes only its repository.** The role form
   reads the catalogue's `marketplace.json` from GitHub or GitLab, with the
