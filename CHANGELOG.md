@@ -29,6 +29,21 @@ of `VERSION`, and it is the tag of the published images.
   (`runtime_kind`, `docker_version`) show the kind, and show the Docker version
   in place of the Kubernetes one. Placement and leasing do not read the kind.
   Migration 0017 adds `clusters.runtime_kind` and `clusters.docker_version`.
+- **Agents can run on one Docker host instead of Kubernetes.** The new
+  controller `haliphron-dockerhost` (image `haliphron-dockerhost`, module
+  `dockerhost/`) registers as a cluster with `runtimeKind: docker`, leases
+  work over the same Cluster API and runs the unchanged agent image as hardened
+  containers: uid 1000, read-only root, no capabilities, four named volumes,
+  secret files on tmpfs, no published ports. A bridge network with
+  inter-container traffic off and an installed firewall (DROP, never REJECT)
+  give agents the same reach as the runtime chart's default NetworkPolicy, and
+  the controller checks that from a probe container every ten minutes, taking
+  no work while it fails. Runs are retried, cancelled, abandoned and reaped by
+  the same rules as on Kubernetes; a daemon restart is an infra failure
+  (`HostRestarted`). `deploy/dockerhost/install.sh` installs it, optionally
+  with the control plane on the same host (`--with-control-plane`). The
+  Kubernetes controller is unchanged. Contract: `docs/contracts/docker-host.md`.
+  Not yet verified on a real host: the network assumptions listed in its §12.
 
 ## 0.6.2 — 2026-11-10
 

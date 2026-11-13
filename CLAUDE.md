@@ -4,7 +4,8 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## What this is
 
-Haliphron runs headless coding agents (claude-code, codex) as one-shot Kubernetes Jobs, on
+Haliphron runs headless coding agents (claude-code, codex) as one-shot Kubernetes Jobs — or as
+containers on one Docker host, through the second controller in `dockerhost/` — on
 request from REST, MCP, Slack or a UI, and orchestrates them into workflows. On-prem, single
 tenant, delivered as two Helm charts.
 
@@ -18,7 +19,7 @@ there is no workflow engine yet — its domain model is designed but unimplement
 Everything builds and tests **inside a container**. Neither a laptop nor CI is expected to
 have a Go toolchain, and the generated contract artifacts must come out byte-identical in
 both. Do not run `go build` / `go test` on the host as a shortcut — the module set is a
-`go.work` of eleven modules and several suites need envtest binaries or PostgreSQL that only
+`go.work` of thirteen modules and several suites need envtest binaries or PostgreSQL that only
 the Makefile wires up.
 
 ```sh
@@ -35,6 +36,9 @@ make db-test          # test/store — needs a real PostgreSQL
 
 make backend-build backend-image
 make controller-build controller-image
+make dockerhost-test                  # dockerhost/... then test/dockerhost — no daemon needed
+make dockerhost-build dockerhost-image
+make dockerhost-e2e                   # opt-in, Linux, root: a real daemon and real iptables
 make image-build                      # the agent image
 make chart-lint chart-template chart-package
 ```
@@ -87,6 +91,7 @@ NetworkPolicy.
 | `api/` | the four wire contracts as Go types + OpenAPI/JSON Schema. Depends on nothing internal |
 | `backend/` | control plane: `restapi` `mcp` `clusterapi` listeners and the `mattermost` bot adapter → `app` use cases → `store` (pgx) |
 | `controller/` | the in-cluster controller: `lease` → `materialize` → `agentrun` reconciler → `launcher` (Job) |
+| `dockerhost/` | the second runtime, one Docker host: `lease` → `materialize` (SQLite row) → `reconcile` → `launcher` (container); reuses `controller/`'s Kubernetes-free packages and its env builder. Contract: `docs/contracts/docker-host.md` |
 | `image/` | the agent image entrypoint: nineteen phases, `entrypoint/runner.go` is the spine |
 | `db/` | migrations and the contract queries (`lease.sql`, `expire_*.sql`, `lock_run.sql`) |
 | `fake/` | `backend`, `controller`, `controlplane` — one faithful implementation of each contract side |
@@ -104,7 +109,7 @@ API replica holds its own socket, and a webhook may deliver the same post again,
 
 The HTTP stack is stdlib `net/http`, not gin, despite what `docs/architecture.md` says.
 
-### Four contracts, and `docs/` is normative
+### Five contracts, and `docs/` is normative
 
 `docs/contracts/*.md` are not commentary. The schema says what is transmitted; the contract
 document says what it means and how to behave — fencing, deadlines, monotonicity, idempotency,
@@ -117,6 +122,7 @@ not a stale doc.
 | `AgentRun` CRD (controller ↔ k8s) | `docs/contracts/agentrun-crd.md` | `api/agentrun/v1alpha1` |
 | Agent runtime (controller ↔ pod) | `docs/contracts/agent-runtime.md` | `api/runtime/v1`, `api/run/v1` |
 | State store | `docs/contracts/run-store.md` | `db/migrations`, `db/queries` |
+| Docker host runtime (controller ↔ Docker, the host's network) | `docs/contracts/docker-host.md` | `dockerhost/state`, `dockerhost/launcher`, `deploy/dockerhost` |
 
 `test/contract/` enforces the joins between them: `drift_test.go` compares the hand-written
 OpenAPI against the generated CRD key by key, and `runtime_test.go` parses the tables in

@@ -5,11 +5,13 @@ use (
 	./backend
 	./controller
 	./db
+	./dockerhost
 	./fake
 	./image
 	./test/backend
 	./test/contract
 	./test/controller
+	./test/dockerhost
 	./test/image
 	./test/store
 )

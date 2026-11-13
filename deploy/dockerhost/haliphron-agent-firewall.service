@@ -1,0 +1,19 @@
+# The agents network's firewall, applied after Docker and re-applied whenever
+# Docker restarts (PartOf). Docker never flushes DOCKER-USER, but a reboot
+# empties every table, and a firewall reload by another tool may too: the
+# controller's network check notices either within ten minutes and stops
+# taking work until this unit has run again.
+[Unit]
+Description=Haliphron agents network firewall
+After=docker.service
+Requires=docker.service
+PartOf=docker.service
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/usr/local/lib/haliphron/firewall.sh apply /etc/haliphron/firewall.env
+ExecStop=/usr/local/lib/haliphron/firewall.sh remove /etc/haliphron/firewall.env
+
+[Install]
+WantedBy=multi-user.target docker.service

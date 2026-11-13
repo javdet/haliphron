@@ -1,0 +1,13 @@
+# The Docker host controller's build context: dockerhost/, controller/ and
+# api/, and nothing else. See controller/Dockerfile.dockerignore for why this
+# is a file and not a convention.
+*
+!api/
+!controller/
+!dockerhost/
+
+**/.git
+**/node_modules
+**/.DS_Store
+dockerhost/Dockerfile*
+controller/Dockerfile*

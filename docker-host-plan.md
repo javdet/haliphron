@@ -1,6 +1,11 @@
 # Docker host runtime — implementation plan
 
-Status: plan, not started. Branch `docker-host-controller`.
+Status: implemented in code — steps 1 to 6a. Not yet done: step 0 (the spike on a
+real Linux host) and the on-host acceptance of steps 5, 6, 6a and 7, which need a
+Linux machine with Docker. The normative description is now
+[docs/contracts/docker-host.md](docs/contracts/docker-host.md); its §11 lists where the
+implementation departs from this plan, and §12 what is still unverified. Branch
+`docker-host-controller`.
 
 ## 1. Goal
 

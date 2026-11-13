@@ -38,6 +38,18 @@ do in v1.
 | pod ↔ the artifact store | this contract, section 9 (which of the two paths — contract 1, `ArtifactBundle`) |
 | client ↔ backend | the external REST `/api/v1` |
 
+**The same contract on a Docker host.** Everything here applies unchanged to a
+container started by the Docker host controller (`haliphron-dockerhost`,
+[docker-host.md](docker-host.md)) as to a pod started by a Job. Wherever this
+document says "pod", read "the agent container" there: the image gets the same
+variables, the same files under the same paths, the same four writable
+directories over a read-only root, the same uid, and reports to the same three
+callback paths. The only difference the image can observe is that
+`HALIPHRON_PROMPT` is a literal value in the container's configuration rather
+than a `secretKeyRef` — the image reads a variable either way.
+[docker-host.md](docker-host.md) §5 states what that controller sets on the
+container, item by item, as section 11 of the CRD contract does for the Job.
+
 The pod is the **least trusted component in the system**. It executes text that
 came from outside, with tools that this text selects, in a repository whose
 contents also influence the model's behavior. Everything in this document starts

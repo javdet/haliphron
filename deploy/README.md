@@ -15,6 +15,10 @@ target cluster therefore needs no database, no UI and no engine.
 
 For a single-cluster installation both charts go into the same cluster, in
 different namespaces.
+
+Without Kubernetes, agents can run on one Linux host with Docker:
+[`dockerhost/`](dockerhost/README.md) installs the Docker host controller in
+place of the runtime chart, and optionally the control plane beside it.
 ## Installing
 
 The procedures live in the documentation set rather than here:

@@ -16,9 +16,11 @@ PLATFORM      ?= linux/amd64
 AGENT_IMAGE   ?= $(REGISTRY)/haliphron-agent:$(IMAGE_TAG)
 AGENT_VERSION ?= $(IMAGE_TAG)
 CONTROLLER_VERSION ?= 0.1.0
+DOCKERHOST_VERSION ?= 0.1.0
 BACKEND_VERSION    ?= 0.1.0
 BACKEND_IMAGE      ?= $(REGISTRY)/haliphron-backend:$(IMAGE_TAG)
 CONTROLLER_IMAGE   ?= $(REGISTRY)/haliphron-controller:$(IMAGE_TAG)
+DOCKERHOST_IMAGE   ?= $(REGISTRY)/haliphron-dockerhost:$(IMAGE_TAG)
 FRONTEND_IMAGE     ?= $(REGISTRY)/haliphron-frontend:$(IMAGE_TAG)
 FRONTEND_VERSION   ?= $(IMAGE_TAG)
 NODE_IMAGE         ?= node:22-alpine
@@ -51,6 +53,7 @@ DOCKER_RUN     = docker run --rm -e GOMAXPROCS=2 \
 .PHONY: backend-push controller-push frontend-push image-push images-push digests
 .PHONY: frontend-deps frontend-check frontend-build frontend-dev
 .PHONY: pull-go pull-node pull-pg
+.PHONY: dockerhost-test dockerhost-build dockerhost-image dockerhost-push dockerhost-e2e
 
 ## pull-go: the Go toolchain image, retrying a registry that is only
 ##          intermittently reachable
@@ -92,6 +95,24 @@ controller-test: pull-go
 ## controller-build: the controller binary
 controller-build: pull-go
 	$(DOCKER_RUN) sh -c 'cd /w/controller && CGO_ENABLED=0 go build -ldflags "-X github.com/automagicops/haliphron/controller/version.Version=$(CONTROLLER_VERSION)" -o /w/bin/haliphron-controller ./cmd/haliphron-controller'
+
+## dockerhost-test: the Docker host controller's own tests, and its contract
+##                  suite against FakeBackend and an in-memory daemon
+dockerhost-test: pull-go
+	$(DOCKER_RUN) sh /w/hack/dockerhosttest.sh
+
+## dockerhost-build: the Docker host controller binary
+dockerhost-build: pull-go
+	$(DOCKER_RUN) sh -c 'cd /w/dockerhost && CGO_ENABLED=0 go build -ldflags "-X github.com/automagicops/haliphron/dockerhost/version.Version=$(DOCKERHOST_VERSION)" -o /w/bin/haliphron-dockerhost ./cmd/haliphron-dockerhost'
+
+## dockerhost-e2e: against the real daemon of THIS machine, Linux only, opt-in.
+##                 Creates a scratch agents network and firewall rules, runs the
+##                 agent image hardened as an agent, and checks the network
+##                 check passes with the rules and fails without them. Needs
+##                 root (the firewall half runs in a privileged host-network
+##                 container) and AGENT_IMAGE present or pullable.
+dockerhost-e2e: pull-go
+	AGENT_IMAGE=$(AGENT_IMAGE) GO_IMAGE=$(GO_IMAGE) sh hack/dockerhost-e2e.sh
 
 ## backend-test: the backend's tests, and the contract tests against FakeController
 ##               and a real PostgreSQL
@@ -151,12 +172,16 @@ backend-image:
 controller-image:
 	docker build -f controller/Dockerfile -t $(CONTROLLER_IMAGE) --build-arg VERSION=$(CONTROLLER_VERSION) .
 
+## dockerhost-image: the Docker host controller image
+dockerhost-image:
+	docker build -f dockerhost/Dockerfile -t $(DOCKERHOST_IMAGE) --build-arg VERSION=$(DOCKERHOST_VERSION) .
+
 ## frontend-image: the UI image — the bundle plus the nginx that proxies /api
 frontend-image:
 	docker build -f frontend/Dockerfile -t $(FRONTEND_IMAGE) --build-arg VERSION=$(FRONTEND_VERSION) frontend
 
 ## images: every image, for this machine's architecture
-images: backend-image controller-image frontend-image image-build
+images: backend-image controller-image dockerhost-image frontend-image image-build
 
 ## *-push: build for $(PLATFORM) and push to the registry the charts default to.
 ##         buildx and not build: a laptop's native build is arm64, and the
@@ -169,6 +194,10 @@ controller-push:
 	docker buildx build --platform $(PLATFORM) -f controller/Dockerfile \
 	  -t $(CONTROLLER_IMAGE) --build-arg VERSION=$(CONTROLLER_VERSION) --push .
 
+dockerhost-push:
+	docker buildx build --platform $(PLATFORM) -f dockerhost/Dockerfile \
+	  -t $(DOCKERHOST_IMAGE) --build-arg VERSION=$(DOCKERHOST_VERSION) --push .
+
 frontend-push:
 	docker buildx build --platform $(PLATFORM) -f frontend/Dockerfile \
 	  -t $(FRONTEND_IMAGE) --build-arg VERSION=$(FRONTEND_VERSION) --push frontend
@@ -177,13 +206,13 @@ image-push:
 	docker buildx build --platform $(PLATFORM) -f image/Dockerfile \
 	  -t $(AGENT_IMAGE) --build-arg VERSION=$(AGENT_VERSION) --push .
 
-## images-push: all four, to $(REGISTRY)
-images-push: backend-push controller-push image-push frontend-push
+## images-push: all five, to $(REGISTRY)
+images-push: backend-push controller-push dockerhost-push image-push frontend-push
 
 ## digests: what to pin. The agent image is passed to the chart by digest,
 ##          because the image is what every run executes.
 digests:
-	@for i in $(BACKEND_IMAGE) $(CONTROLLER_IMAGE) $(AGENT_IMAGE) $(FRONTEND_IMAGE); do \
+	@for i in $(BACKEND_IMAGE) $(CONTROLLER_IMAGE) $(DOCKERHOST_IMAGE) $(AGENT_IMAGE) $(FRONTEND_IMAGE); do \
 	  printf '%s\n' "$$(docker buildx imagetools inspect --format '{{.Name}}@{{.Manifest.Digest}}' $$i 2>/dev/null || echo "$$i not pushed")"; \
 	done
 

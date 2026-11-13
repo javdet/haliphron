@@ -1,0 +1,55 @@
+# The Docker host controller. Installed by install.sh to /opt/haliphron and
+# started with:
+#
+#   docker compose -p haliphron-dockerhost -f /opt/haliphron/compose.yaml \
+#     --env-file /etc/haliphron/compose.env up -d
+#
+# Its settings are in /etc/haliphron/dockerhost.env (see config.go for every
+# variable and its default).
+name: haliphron-dockerhost
+
+services:
+  dockerhost:
+    image: ${DOCKERHOST_IMAGE:-javdet/haliphron-dockerhost:latest}
+    container_name: haliphron-dockerhost
+    command: ["serve"]
+    restart: unless-stopped
+    env_file: /etc/haliphron/dockerhost.env
+    # The host's network namespace: the callback must listen on the agents
+    # bridge's gateway address, and health and metrics on the host's loopback.
+    network_mode: host
+    # Root inside the container, with every capability dropped but the three
+    # it needs to hand each run's secret files to uid 1000 and to remove them
+    # again from directories uid 1000 owns. It holds the
+    # Docker socket, which is root on the host in any case.
+    read_only: true
+    cap_drop: [ALL]
+    cap_add: [CHOWN, FOWNER, DAC_OVERRIDE]
+    security_opt: ["no-new-privileges:true"]
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+      # The same paths as on the host. The controller writes files here and
+      # asks the daemon to bind-mount them into agent containers, and the
+      # daemon resolves paths on the host: a different path inside would be
+      # a mount of nothing. The network check verifies it.
+      - /var/lib/haliphron:/var/lib/haliphron
+      - /run/haliphron:/run/haliphron
+      - /etc/haliphron/bootstrap-token:/etc/haliphron/bootstrap-token:ro
+      # Registry credentials for private agent images. Inline "auths" only;
+      # credential helpers are programs on the host this container cannot run.
+      - ${DOCKER_CONFIG_DIR:-/root/.docker}:/root/.docker:ro
+    healthcheck:
+      # Distroless has no shell and no curl; the binary asks its own health
+      # listener on the host's loopback.
+      test: ["CMD", "/haliphron-dockerhost", "healthcheck"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+    logging:
+      driver: local
+      options:
+        max-size: 20m
+        max-file: "5"
+    # Agents outlive this container on purpose: a controller restart is
+    # uneventful, and a grace period here would only delay it.
+    stop_grace_period: 15s

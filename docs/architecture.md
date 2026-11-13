@@ -1525,6 +1525,9 @@ The scheduler (shipped early, targeting runs; workflow targets follow phase 3), 
 
 **Phase 5 — opencode, approval steps, `run_agent(wait=true)`, parallel code editing with a conflict resolver.**
 
+**Built ahead of its phase — a single Docker host as a runtime.**
+`haliphron-dockerhost` (module `dockerhost/`) runs agents as containers on one Linux host with Docker, for installations without Kubernetes. It is a controller in the sense of section 7, not a `DockerLauncher` behind the Kubernetes one: it registers as a cluster with `runtimeKind: docker`, leases and reports over the unchanged Cluster API, and runs the unchanged image under contract 3. Its durable state is a SQLite row per run in place of the `AgentRun`, and its isolation is a bridge network with inter-container traffic off plus an installed firewall that the controller verifies behaviourally, in place of the NetworkPolicy (section 14). The Kubernetes controller is untouched; the backend change is the additive `runtimeKind`. Contract: [docker-host.md](contracts/docker-host.md).
+
 ---
 
 ## 20. What is reused

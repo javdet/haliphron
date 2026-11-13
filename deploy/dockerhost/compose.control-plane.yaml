@@ -1,0 +1,102 @@
+# The control plane on the same host as the agents (decision 8 of the plan):
+# PostgreSQL, the backend and the UI. A convenience for small installations;
+# the haliphron Helm chart remains the reference deployment.
+#
+# install.sh --with-control-plane writes /etc/haliphron/control-plane.env and
+# the secret files, then runs:
+#
+#   docker compose -p haliphron-control-plane -f /opt/haliphron/compose.control-plane.yaml \
+#     --env-file /etc/haliphron/control-plane.env up -d --wait
+#
+# Ports, and why each is bound where it is (docker-host.md §6.5):
+#   8080  public API      ${PUBLIC_ADDR}        for people and integrations
+#   8443  UI              ${PUBLIC_ADDR}        nginx, proxies /api to the backend
+#   8082  Cluster API     127.0.0.1             only the controller on this host
+#   8081  MCP             ${AGENT_GATEWAY}      agents call back in with their run
+#                                               token; the firewall allows exactly
+#                                               this address and port
+#   9090  metrics/health  not published
+#   5432  PostgreSQL      not published
+# A published port is reached through DNAT, so from the agents bridge it
+# crosses FORWARD, where the firewall drops private destinations; the network
+# check asserts 8080, 8082, 9090 and 5432 are closed to agents.
+name: haliphron-control-plane
+
+services:
+  postgres:
+    image: postgres:18.1-bookworm
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: haliphron
+      POSTGRES_USER: haliphron
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?run install.sh --with-control-plane}
+    volumes:
+      - pgdata:/var/lib/postgresql
+    networks: [control-plane]
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U haliphron -d haliphron"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+
+  backend:
+    image: ${BACKEND_IMAGE:-javdet/haliphron-backend:latest}
+    restart: unless-stopped
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      HALIPHRON_MODE: all
+      HALIPHRON_PUBLIC_ADDR: ":8080"
+      HALIPHRON_MCP_ADDR: ":8081"
+      HALIPHRON_CLUSTER_ADDR: ":8082"
+      HALIPHRON_METRICS_ADDR: ":9090"
+      HALIPHRON_DSN: ${HALIPHRON_DSN:?run install.sh --with-control-plane}
+      HALIPHRON_MIGRATE: "true"
+      HALIPHRON_ARTIFACT_MODE: relay
+      HALIPHRON_ARTIFACT_PATH: /var/lib/haliphron/artifacts
+      HALIPHRON_KEK_ID: install
+      HALIPHRON_KEK_FILE: /run/secrets/kek
+      HALIPHRON_BOOTSTRAP_TOKEN_FILE: /run/secrets/admin-token
+      HALIPHRON_AGENT_IMAGE: ${HALIPHRON_AGENT_IMAGE:?the agent image is required}
+      HALIPHRON_AGENT_IMAGE_PULL_POLICY: IfNotPresent
+      HALIPHRON_MCP_ENDPOINT: ${HALIPHRON_MCP_ENDPOINT:-}
+      HALIPHRON_LLM_SECRET: llm-api-key
+      HALIPHRON_GIT_SECRET: git-token
+    volumes:
+      - artifacts:/var/lib/haliphron/artifacts
+      - /etc/haliphron/kek:/run/secrets/kek:ro
+      - /etc/haliphron/admin-token:/run/secrets/admin-token:ro
+    ports:
+      - "${PUBLIC_ADDR:-0.0.0.0}:8080:8080"
+      - "127.0.0.1:8082:8082"
+      - "${AGENT_GATEWAY:-172.31.250.1}:${MCP_PORT:-8081}:8081"
+    networks: [control-plane]
+    read_only: true
+    cap_drop: [ALL]
+    security_opt: ["no-new-privileges:true"]
+
+  frontend:
+    image: ${FRONTEND_IMAGE:-javdet/haliphron-frontend:latest}
+    restart: unless-stopped
+    depends_on: [backend]
+    environment:
+      BACKEND_ORIGIN: http://backend:8080
+    ports:
+      - "${PUBLIC_ADDR:-0.0.0.0}:8443:8080"
+    networks: [control-plane]
+    cap_drop: [ALL]
+    security_opt: ["no-new-privileges:true"]
+    tmpfs: [/tmp]
+
+networks:
+  # A bridge of its own. Docker's isolation chains drop traffic between
+  # bridges, so agents never reach these containers directly; the published
+  # ports above are the only way in, and the firewall decides which of those
+  # an agent may use.
+  control-plane:
+    driver: bridge
+
+volumes:
+  pgdata:
+  artifacts:
