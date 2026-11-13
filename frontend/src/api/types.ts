@@ -329,14 +329,20 @@ export interface Role {
   updated_at: string
 }
 
+export type RuntimeKind = 'kubernetes' | 'docker'
+
 export interface Cluster {
   cluster_id: string
   name: string
   labels?: Record<string, string>
   status: string
+  /** Where agents run: a namespace, or for a Docker host the agents network. */
   agent_namespace: string
   controller_version: string
+  /** What executes agents behind the controller. */
+  runtime_kind: RuntimeKind
   k8s_version?: string
+  docker_version?: string
   runtimes?: string[]
   capacity_slots: number
   free_slots: number

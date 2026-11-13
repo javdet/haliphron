@@ -10,6 +10,7 @@ import (
 	"time"
 
 	clusterv1 "github.com/automagicops/haliphron/api/cluster/v1"
+	"github.com/automagicops/haliphron/backend/store"
 )
 
 // A controller that received its clusterID and crashed before writing it to
@@ -242,6 +243,123 @@ func TestACapacityAboveTheMaximumIsRefusedAtRegistration(t *testing.T) {
 		ControllerVersion: "1.0.0", AgentNamespace: "haliphron-agents",
 		CapacitySlots: clusterv1.MaxCapacitySlots + 1,
 	})
+	problem, ok := err.(*clusterv1.Problem)
+	if !ok {
+		t.Fatalf("expected a Problem, got %v", err)
+	}
+	if problem.Code != clusterv1.CodeInvalidRequest || problem.Action != clusterv1.ActionFatal {
+		t.Errorf("problem = %s/%s, want %s/fatal", problem.Code, problem.Action, clusterv1.CodeInvalidRequest)
+	}
+}
+
+// runtimeKindRegistration is a registration that differs from the usual one
+// only in what runs its agents, so the tests below are about nothing else.
+func runtimeKindRegistration(t *testing.T, name string, kind clusterv1.RuntimeKind, docker string) clusterv1.RegisterRequest {
+	t.Helper()
+	pub, _, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatalf("generate key: %v", err)
+	}
+	return clusterv1.RegisterRequest{
+		Name: name,
+		PublicKey: clusterv1.PublicKey{
+			KID: "kid-" + name, Alg: clusterv1.KeyAlgorithm,
+			Key: base64.RawURLEncoding.EncodeToString(pub),
+		},
+		ControllerVersion: "1.0.0", AgentNamespace: "haliphron-agents",
+		RuntimeKind: kind, DockerVersion: docker,
+	}
+}
+
+// runtimeKind came after the first controllers shipped. One that does not send
+// it is a Kubernetes cluster and must be recorded as one; a Docker host names
+// itself, its agentNamespace is the agents network, and its engine version is
+// kept where a cluster's Kubernetes version is — set at registration, moved by
+// a heartbeat's facts when the daemon is upgraded. The public listing shows
+// both, snake_case.
+func TestRegistrationRecordsTheRuntimeKindAndAbsentMeansKubernetes(t *testing.T) {
+	h := newHarness(t)
+	ctx := context.Background()
+
+	k8s, err := h.App.Register(ctx, h.BootstrapToken(), runtimeKindRegistration(t, "east", "", ""))
+	if err != nil {
+		t.Fatalf("register a cluster without runtimeKind: %v", err)
+	}
+	docker, err := h.App.Register(ctx, h.BootstrapToken(),
+		runtimeKindRegistration(t, "docker-host", clusterv1.RuntimeDocker, "28.5.1"))
+	if err != nil {
+		t.Fatalf("register a docker host: %v", err)
+	}
+
+	cluster, err := h.Store.ClusterByID(ctx, k8s.ClusterID)
+	if err != nil {
+		t.Fatalf("read cluster: %v", err)
+	}
+	if cluster.RuntimeKind != clusterv1.RuntimeKubernetes || cluster.DockerVersion != "" {
+		t.Errorf("a registration without runtimeKind stored %q/%q, want kubernetes and no docker version",
+			cluster.RuntimeKind, cluster.DockerVersion)
+	}
+
+	host, err := h.Store.ClusterByID(ctx, docker.ClusterID)
+	if err != nil {
+		t.Fatalf("read docker host: %v", err)
+	}
+	if host.RuntimeKind != clusterv1.RuntimeDocker || host.DockerVersion != "28.5.1" {
+		t.Errorf("docker host stored %q/%q, want docker/28.5.1", host.RuntimeKind, host.DockerVersion)
+	}
+	if host.AgentNamespace != "haliphron-agents" {
+		t.Errorf("agent_namespace = %q, want the agents network", host.AgentNamespace)
+	}
+
+	// A heartbeat without the fact leaves the version alone; one with it moves it.
+	if _, err := h.App.Heartbeat(ctx, host, clusterv1.HeartbeatRequest{FreeSlots: 1}); err != nil {
+		t.Fatalf("heartbeat without facts: %v", err)
+	}
+	if _, err := h.App.Heartbeat(ctx, host, clusterv1.HeartbeatRequest{
+		FreeSlots: 1, Cluster: &clusterv1.ClusterFacts{DockerVersion: "29.0.0"},
+	}); err != nil {
+		t.Fatalf("heartbeat with a new docker version: %v", err)
+	}
+	if host, err = h.Store.ClusterByID(ctx, docker.ClusterID); err != nil {
+		t.Fatalf("read docker host: %v", err)
+	}
+	if host.DockerVersion != "29.0.0" || host.RuntimeKind != clusterv1.RuntimeDocker {
+		t.Errorf("after the heartbeat the host is %q/%q, want docker/29.0.0", host.RuntimeKind, host.DockerVersion)
+	}
+
+	var listing struct {
+		Clusters []map[string]any `json:"clusters"`
+	}
+	if status := h.call(t, h.Token(store.ScopeRunsRead), http.MethodGet, "/api/v1/clusters", nil, &listing); status != http.StatusOK {
+		t.Fatalf("list clusters: status %d", status)
+	}
+	byName := map[string]map[string]any{}
+	for _, c := range listing.Clusters {
+		name, _ := c["name"].(string)
+		byName[name] = c
+	}
+	if got := byName["east"]["runtime_kind"]; got != "kubernetes" {
+		t.Errorf("east lists runtime_kind %v, want kubernetes", got)
+	}
+	if _, present := byName["east"]["docker_version"]; present {
+		t.Error("a kubernetes cluster lists a docker_version")
+	}
+	if got := byName["docker-host"]["runtime_kind"]; got != "docker" {
+		t.Errorf("docker-host lists runtime_kind %v, want docker", got)
+	}
+	if got := byName["docker-host"]["docker_version"]; got != "29.0.0" {
+		t.Errorf("docker-host lists docker_version %v, want 29.0.0", got)
+	}
+}
+
+// A kind this backend cannot name is refused rather than filed under the
+// default: recording it as kubernetes would tell the operator something false
+// about where that controller's agents run.
+func TestAnUnknownRuntimeKindIsRefusedAtRegistration(t *testing.T) {
+	h := newHarness(t)
+
+	_, err := h.App.Register(context.Background(), h.BootstrapToken(),
+		runtimeKindRegistration(t, "podman-host", "podman", ""))
 	problem, ok := err.(*clusterv1.Problem)
 	if !ok {
 		t.Fatalf("expected a Problem, got %v", err)

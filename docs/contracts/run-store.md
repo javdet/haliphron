@@ -355,6 +355,18 @@ of every cluster it admitted. The same transaction appends a
 `cluster.deleted` record with the name, the revocation reason and the
 bootstrap token.
 
+**What runs a cluster's agents is recorded, not acted on** (0017).
+`clusters.runtime_kind` is `kubernetes` or `docker` (a `CHECK`, default
+`kubernetes`, so every row from before the column and every registration
+that names no kind is a Kubernetes cluster), and `clusters.docker_version` is
+the Docker host's engine version, stored as `k8s_version` is: nullable, set at
+registration and overwritten by a heartbeat's facts. Both are written only by
+`Register` and `RecordHeartbeat` in
+[backend/store/clusters.go](../../backend/store/clusters.go). No placement,
+lease, expiry or report statement reads them, and no contract query changed.
+For a Docker host `agent_namespace` holds the agents network name, and its
+`NOT NULL` stands.
+
 ---
 
 ## 9. The contract queries

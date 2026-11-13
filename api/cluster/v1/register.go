@@ -58,11 +58,28 @@ type RegisterRequest struct {
 	PublicKey PublicKey `json:"publicKey"`
 
 	ControllerVersion string `json:"controllerVersion"`
-	// AgentNamespace is where the controller will create agent Jobs.
+	// AgentNamespace is where agents run. For a Kubernetes cluster that is the
+	// namespace the controller creates agent Jobs in; for a Docker host it is
+	// the name of the network agent containers are attached to
+	// (haliphron-agents). The field keeps one meaning across runtimes rather
+	// than growing a sibling per runtime, which is why it stays required: there
+	// is no runtime whose agents run nowhere.
 	AgentNamespace string `json:"agentNamespace"`
+
+	// RuntimeKind says what executes agents behind this controller. Absent
+	// means kubernetes, so a controller that predates the field registers
+	// exactly as it always has. The backend records it for the operator and
+	// does not place by it: both runtimes take the same lease and report the
+	// same way.
+	// +optional
+	RuntimeKind RuntimeKind `json:"runtimeKind,omitempty"`
 
 	// +optional
 	K8sVersion string `json:"k8sVersion,omitempty"`
+	// DockerVersion is the Docker Engine version of a Docker host, the
+	// counterpart of K8sVersion. A Kubernetes cluster leaves it empty.
+	// +optional
+	DockerVersion string `json:"dockerVersion,omitempty"`
 	// Runtimes restricts what may be scheduled here; it feeds the placement
 	// filter.
 	// +optional
@@ -76,6 +93,37 @@ type RegisterRequest struct {
 	// spec shape at all.
 	// +optional
 	CRDVersions []string `json:"crdVersions,omitempty"`
+}
+
+// RuntimeKind is what executes agents behind a controller.
+type RuntimeKind string
+
+const (
+	// RuntimeKubernetes is a cluster: agents run as Jobs in a namespace.
+	RuntimeKubernetes RuntimeKind = "kubernetes"
+	// RuntimeDocker is a single Docker host: agents run as containers on a
+	// network of their own.
+	RuntimeDocker RuntimeKind = "docker"
+)
+
+// OrDefault is the kind a registration means. The field is optional and a
+// controller written before it existed is a Kubernetes one, so absent reads as
+// kubernetes; every reader goes through here rather than spelling that rule
+// out again.
+func (k RuntimeKind) OrDefault() RuntimeKind {
+	if k == "" {
+		return RuntimeKubernetes
+	}
+	return k
+}
+
+// Known reports whether k, after defaulting, is a kind this side can record.
+func (k RuntimeKind) Known() bool {
+	switch k.OrDefault() {
+	case RuntimeKubernetes, RuntimeDocker:
+		return true
+	}
+	return false
 }
 
 // PublicKey is the half of the pair that leaves the cluster.

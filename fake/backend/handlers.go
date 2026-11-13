@@ -44,6 +44,14 @@ func (b *Backend) handleRegister(w http.ResponseWriter, r *http.Request) {
 		b.badRequest(w, "name and agentNamespace are required")
 		return
 	}
+	// Refused, as the real backend refuses it, rather than recorded as the
+	// default: a controller tested against a fake that took any string would
+	// meet its first refusal in production.
+	if !req.RuntimeKind.Known() {
+		b.badRequest(w, fmt.Sprintf("runtimeKind %q is not one of %s, %s",
+			req.RuntimeKind, clusterv1.RuntimeKubernetes, clusterv1.RuntimeDocker))
+		return
+	}
 	if req.CapacitySlots > clusterv1.MaxCapacitySlots {
 		b.badRequest(w, fmt.Sprintf("capacitySlots exceeds the maximum of %d", clusterv1.MaxCapacitySlots))
 		return
@@ -95,6 +103,8 @@ func (b *Backend) handleRegister(w http.ResponseWriter, r *http.Request) {
 		key:            key,
 		runtimes:       req.Runtimes,
 		agentNamespace: req.AgentNamespace,
+		runtimeKind:    req.RuntimeKind.OrDefault(),
+		dockerVersion:  req.DockerVersion,
 		version:        req.ControllerVersion,
 		capacitySlots:  req.CapacitySlots,
 	}
@@ -376,6 +386,9 @@ func (b *Backend) handleHeartbeat(w http.ResponseWriter, r *http.Request) {
 		c.quotaExhausted = req.Cluster.QuotaExhausted
 		if len(req.Cluster.Runtimes) > 0 {
 			c.runtimes = req.Cluster.Runtimes
+		}
+		if req.Cluster.DockerVersion != "" {
+			c.dockerVersion = req.Cluster.DockerVersion
 		}
 	}
 

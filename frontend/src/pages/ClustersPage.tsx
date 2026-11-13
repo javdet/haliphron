@@ -26,6 +26,16 @@ export function isStale(cluster: Cluster): boolean {
   return Date.now() - new Date(cluster.last_heartbeat_at).getTime() > STALE_AFTER_MS
 }
 
+// A backend older than the runtime_kind field sends none, and every cluster it
+// knows is a Kubernetes one, so absent reads as kubernetes here as on the wire.
+function isDocker(cluster: Cluster): boolean {
+  return cluster.runtime_kind === 'docker'
+}
+
+function runtimeLabel(cluster: Cluster): string {
+  return isDocker(cluster) ? 'Docker' : 'Kubernetes'
+}
+
 function RevokeDialog({ cluster, onClose }: { cluster: Cluster; onClose: () => void }) {
   const revoke = useRevokeCluster()
   const [reason, setReason] = useState('')
@@ -212,7 +222,8 @@ export function ClustersPage() {
                 <tr>
                   <th>Status</th>
                   <th>Cluster</th>
-                  <th>Namespace</th>
+                  <th>Runtime</th>
+                  <th>Agents in</th>
                   <th>Versions</th>
                   <th>Runtimes</th>
                   <th className="num">Slots</th>
@@ -234,10 +245,18 @@ export function ClustersPage() {
                         <div className="small muted">{cluster.revoked_reason}</div>
                       )}
                     </td>
-                    <td className="small muted nowrap">{cluster.agent_namespace}</td>
+                    <td className="nowrap">
+                      <span className="badge idle">{runtimeLabel(cluster)}</span>
+                    </td>
+                    <td className="small muted nowrap">
+                      <div>{cluster.agent_namespace}</div>
+                      <div className="faint">{isDocker(cluster) ? 'network' : 'namespace'}</div>
+                    </td>
                     <td className="small muted nowrap">
                       <div>controller {cluster.controller_version}</div>
-                      {cluster.k8s_version && <div className="faint">k8s {cluster.k8s_version}</div>}
+                      {isDocker(cluster)
+                        ? cluster.docker_version && <div className="faint">docker {cluster.docker_version}</div>
+                        : cluster.k8s_version && <div className="faint">k8s {cluster.k8s_version}</div>}
                     </td>
                     <td className="small muted">{cluster.runtimes?.join(', ') || '—'}</td>
                     <td className="num nowrap">

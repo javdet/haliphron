@@ -48,6 +48,7 @@ func (s *Service) Heartbeat(ctx context.Context, cluster store.Cluster,
 	}
 	if req.Cluster != nil {
 		facts.K8sVersion = req.Cluster.K8sVersion
+		facts.DockerVersion = req.Cluster.DockerVersion
 		facts.Runtimes = req.Cluster.Runtimes
 		facts.CRDVersions = req.Cluster.CRDVersions
 		facts.QuotaExhausted = req.Cluster.QuotaExhausted

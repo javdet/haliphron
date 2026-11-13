@@ -525,9 +525,15 @@ to the forge for this; it honours `HTTPS_PROXY`, and with the chart's
 Scope: `runs:read`.
 
 Each entry carries `cluster_id`, `name`, `labels`, `status`,
-`agent_namespace`, `controller_version`, `k8s_version`, `runtimes`,
-`capacity_slots`, `free_slots`, `active_runs`, `quota_exhausted`,
-`registered_at`, `last_heartbeat_at` and `revoked_reason`.
+`agent_namespace`, `controller_version`, `runtime_kind`, `k8s_version`,
+`docker_version`, `runtimes`, `capacity_slots`, `free_slots`, `active_runs`,
+`quota_exhausted`, `registered_at`, `last_heartbeat_at` and `revoked_reason`.
+
+`runtime_kind` is `kubernetes` or `docker`, and is always present: a cluster
+whose controller did not name a kind is `kubernetes`. For a Docker host,
+`agent_namespace` is the name of the agents network and `docker_version` is the
+Docker Engine version. `k8s_version` and `docker_version` are left out when the
+controller did not report them.
 
 `active_runs` is what the backend believes is on the cluster now: runs that
 are `Leased`, `Dispatched`, `Starting`, `Running` or `Unknown`. `free_slots`

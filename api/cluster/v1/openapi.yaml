@@ -15,7 +15,7 @@ openapi: 3.0.3
 
 info:
   title: Haliphron Cluster API
-  version: 1.0.0
+  version: 1.1.0
   description: |
     A pull model: the backend never initiates a connection into a cluster.
     The controller registers, leases work through a long poll, acknowledges
@@ -755,9 +755,18 @@ components:
         controllerVersion: {type: string, example: '1.2.0'}
         agentNamespace:
           type: string
-          description: The namespace in which the controller will create agent Jobs
+          description: |
+            Where agents run. For a Kubernetes cluster, the namespace in which
+            the controller creates agent Jobs; for a Docker host, the name of
+            the network agent containers are attached to. Required for every
+            runtime kind.
           example: haliphron-agents
+        runtimeKind: {$ref: '#/components/schemas/RuntimeKind'}
         k8sVersion: {type: string, example: v1.31.4}
+        dockerVersion:
+          type: string
+          description: The Docker Engine version of a Docker host. Empty for a Kubernetes cluster.
+          example: '28.5.1'
         runtimes:
           type: array
           description: Which agent runtimes the cluster is prepared to execute. Used in the placement filter.
@@ -775,6 +784,17 @@ components:
           type: array
           description: The installed versions of the AgentRun CRD. Lets the backend tell whether the cluster is ready for a new spec shape.
           items: {type: string, example: v1alpha1}
+
+    RuntimeKind:
+      type: string
+      enum: [kubernetes, docker]
+      default: kubernetes
+      description: |
+        What executes agents behind the controller. Absent means `kubernetes`,
+        so a controller that predates the field registers as it always has.
+        Recorded for the operator; placement does not read it. A value outside
+        the enum is refused at registration with `InvalidRequest`: the backend
+        would otherwise record a runtime it cannot name.
 
     PublicKey:
       type: object
@@ -1523,6 +1543,7 @@ components:
       description: Drift in the facts about the cluster — a node upgrade, an added CRD. Sent on change, not every time.
       properties:
         k8sVersion: {type: string}
+        dockerVersion: {type: string, description: "A Docker host's engine version, sent when it changes"}
         nodeCount: {type: integer, format: int32}
         runtimes: {type: array, items: {$ref: '#/components/schemas/AgentType'}}
         crdVersions: {type: array, items: {type: string}}

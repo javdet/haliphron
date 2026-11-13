@@ -424,6 +424,37 @@ The rules:
 Points 2 and 3 cost one line of code each and remove a whole class of upgrade
 failures. They are skipped just as regularly.
 
+### One protocol, two runtimes: `runtimeKind`
+
+A controller is either a Kubernetes cluster (agents run as Jobs in a namespace)
+or a single Docker host (agents run as containers on a network of their own).
+Both speak this contract unchanged: the same lease, ack, heartbeat, reports,
+epochs and deadlines. The difference is declared once, at registration, and
+added to the schema in Cluster API 1.1.0 without breaking anything older:
+
+- **`RegisterRequest.runtimeKind`** is `kubernetes` or `docker`. **Absent means
+  `kubernetes`**: every controller written before the field existed is a
+  Kubernetes one and registers exactly as before. The backend records the kind
+  for the operator. Placement, leasing and report handling do not read it.
+- **`agentNamespace` keeps its one meaning, "where agents run".** For a
+  Kubernetes cluster it is the agent namespace. For a Docker host it is the
+  name of the agents network (`haliphron-agents`). It stays required for both
+  kinds, and the backend keeps it in the same `NOT NULL` column.
+- **`dockerVersion`** is the Docker Engine version of a Docker host. It sits in
+  `RegisterRequest` beside `k8sVersion`, and in `ClusterFacts`, where it is sent
+  on change like every other fact (a daemon upgrade). A Kubernetes cluster
+  leaves it empty. The kind itself does not drift and is not a heartbeat fact.
+- A Docker host sends `crdVersions: ["v1alpha1"]`, meaning the spec shape it
+  materialises. The backend stores the value and does not gate on it.
+
+An **unknown `runtimeKind` is refused** at registration with 400
+`InvalidRequest`, `action: fatal`. This is a deliberate exception to point 3.
+Point 3 is about a value the receiver can safely skip. A registration carrying
+a kind the backend cannot name has nothing correct to store: recording it as
+`kubernetes` would tell the operator something false about where that
+controller's agents run. A controller of a new runtime therefore needs a
+backend that knows it, and finds that out at its first call.
+
 ---
 
 ## 12. Deltas to architecture.md
@@ -467,6 +498,7 @@ side.
 `FakeController` and a real PostgreSQL:
 
 - [x] a repeat `/register` with the same key → the same `clusterID`; with a different key → 401
+- [x] `/register` without `runtimeKind` → recorded as `kubernetes`; with `docker` → recorded as `docker` with its `dockerVersion`, which a heartbeat's `ClusterFacts` then moves; an unknown kind → 400 `InvalidRequest`, `fatal`
 - [x] `/leases` on an empty queue → 204 after exactly `waitSeconds`
 - [x] two concurrent leases for one cluster never hand out the same `runID` twice
 - [x] `ackDeadline` expiry → epoch +1, `Queued`, the work is offered again **on the same cluster**

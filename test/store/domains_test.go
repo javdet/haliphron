@@ -137,6 +137,45 @@ func TestObservedRankMatchesGoPhaseRank(t *testing.T) {
 	}
 }
 
+// clusters.runtime_kind is a CHECK rather than a domain, so the mirroredEnums
+// table above cannot see it. The rule is the same one: a kind the Cluster API
+// lets a controller register with and the column refuses is a registration
+// that dies with a constraint violation. A row that never names a kind — every
+// cluster registered before the column existed — reads as kubernetes.
+func TestClusterRuntimeKindMatchesTheOpenAPIEnum(t *testing.T) {
+	t.Parallel()
+	conn := newDB(t)
+	ctx := context.Background()
+	doc := openAPI(t)
+
+	cluster := newCluster(t, conn, "runtime-kind")
+
+	var kind string
+	if err := conn.QueryRowContext(ctx,
+		`SELECT runtime_kind FROM clusters WHERE id = $1`, cluster).Scan(&kind); err != nil {
+		t.Fatalf("read runtime_kind: %v", err)
+	}
+	if kind != "kubernetes" {
+		t.Errorf("a cluster inserted without a kind reads %q, want kubernetes", kind)
+	}
+	if def := dig(t, doc, "components", "schemas", "RuntimeKind", "default"); def != kind {
+		t.Errorf("the column defaults to %q, the Cluster API defaults to %v", kind, def)
+	}
+
+	for _, value := range enumAt(t, doc, "components", "schemas", "RuntimeKind", "enum") {
+		if _, err := conn.ExecContext(ctx,
+			`UPDATE clusters SET runtime_kind = $1 WHERE id = $2`, value, cluster); err != nil {
+			t.Errorf("runtime_kind refuses %q, which the Cluster API allows: %v", value, err)
+		}
+	}
+	for _, value := range []string{"podman", "Kubernetes", ""} {
+		if _, err := conn.ExecContext(ctx,
+			`UPDATE clusters SET runtime_kind = $1 WHERE id = $2`, value, cluster); err == nil {
+			t.Errorf("runtime_kind accepts %q, which the Cluster API does not", value)
+		}
+	}
+}
+
 // The ulid domain is the store's copy of the ULID pattern on the wire. The
 // negative cases are the ones that matter: Crockford base32 omits I, L, O and U
 // precisely so that a transcribed identifier cannot become a different valid

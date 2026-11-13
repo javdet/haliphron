@@ -51,6 +51,18 @@ func (s *Service) Register(ctx context.Context, token string, req clusterv1.Regi
 			Code:   clusterv1.CodeInvalidRequest, Action: clusterv1.ActionFatal,
 		}
 	}
+	// An unknown kind is refused rather than recorded as the default: a newer
+	// controller of a runtime this backend cannot name would otherwise be shown
+	// to the operator as a Kubernetes cluster, which is a false statement about
+	// where its agents run. The column's CHECK would refuse it anyway, as a 500.
+	if !req.RuntimeKind.Known() {
+		return clusterv1.RegisterResponse{}, &clusterv1.Problem{
+			Title: "invalid registration", Status: 400,
+			Detail: fmt.Sprintf("runtimeKind %q is not one of %s, %s",
+				req.RuntimeKind, clusterv1.RuntimeKubernetes, clusterv1.RuntimeDocker),
+			Code: clusterv1.CodeInvalidRequest, Action: clusterv1.ActionFatal,
+		}
+	}
 
 	cluster, err := s.store.Register(ctx, store.Registration{
 		BootstrapToken:    token,
@@ -60,7 +72,9 @@ func (s *Service) Register(ctx context.Context, token string, req clusterv1.Regi
 		PublicKey:         key,
 		ControllerVersion: req.ControllerVersion,
 		AgentNamespace:    req.AgentNamespace,
+		RuntimeKind:       req.RuntimeKind.OrDefault(),
 		K8sVersion:        req.K8sVersion,
+		DockerVersion:     req.DockerVersion,
 		Runtimes:          req.Runtimes,
 		CRDVersions:       req.CRDVersions,
 		CapacitySlots:     req.CapacitySlots,
@@ -90,7 +104,7 @@ func (s *Service) Register(ctx context.Context, token string, req clusterv1.Regi
 		SubjectKind: "cluster", SubjectID: string(cluster.ID), ClusterID: cluster.ID,
 		Payload: map[string]any{
 			"name": cluster.Name, "controllerVersion": req.ControllerVersion,
-			"namespace": req.AgentNamespace,
+			"namespace": req.AgentNamespace, "runtimeKind": string(req.RuntimeKind.OrDefault()),
 		},
 	}); err != nil {
 		return clusterv1.RegisterResponse{}, err

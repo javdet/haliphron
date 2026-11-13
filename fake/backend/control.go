@@ -150,8 +150,14 @@ func (r *run) snapshot() RunState {
 
 // ClusterState is a registered cluster as the control plane sees it.
 type ClusterState struct {
-	ID             runv1.ULID
-	Name           string
+	ID   runv1.ULID
+	Name string
+	// RuntimeKind is what the controller registered as, kubernetes when it
+	// did not say. AgentNamespace is where its agents run: the namespace of a
+	// cluster, the agents network of a Docker host.
+	RuntimeKind    clusterv1.RuntimeKind
+	AgentNamespace string
+	DockerVersion  string
 	Revoked        bool
 	Unreachable    bool
 	FreeSlots      int32
@@ -168,6 +174,8 @@ func (b *Backend) Clusters() []ClusterState {
 	for _, c := range b.clusters {
 		out = append(out, ClusterState{
 			ID: c.id, Name: c.name, Revoked: c.revoked,
+			RuntimeKind: c.runtimeKind, AgentNamespace: c.agentNamespace,
+			DockerVersion:  c.dockerVersion,
 			Unreachable:    !c.lastHeartbeat.IsZero() && b.now().Sub(c.lastHeartbeat) > b.staleAfter(),
 			FreeSlots:      c.freeSlots,
 			CapacitySlots:  c.capacitySlots,

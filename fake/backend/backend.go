@@ -106,6 +106,8 @@ type cluster struct {
 	runtimes []runv1.AgentType
 
 	agentNamespace string
+	runtimeKind    clusterv1.RuntimeKind
+	dockerVersion  string
 	version        string
 
 	freeSlots      int32

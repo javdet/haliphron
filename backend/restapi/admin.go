@@ -135,10 +135,14 @@ type clusterResponse struct {
 	Status            string            `json:"status"`
 	AgentNamespace    string            `json:"agent_namespace"`
 	ControllerVersion string            `json:"controller_version"`
-	K8sVersion        string            `json:"k8s_version,omitempty"`
-	Runtimes          []string          `json:"runtimes,omitempty"`
-	CapacitySlots     int32             `json:"capacity_slots"`
-	FreeSlots         int32             `json:"free_slots"`
+	// RuntimeKind is kubernetes or docker. For a Docker host agent_namespace
+	// is the agents network and docker_version stands where k8s_version does.
+	RuntimeKind   string   `json:"runtime_kind"`
+	K8sVersion    string   `json:"k8s_version,omitempty"`
+	DockerVersion string   `json:"docker_version,omitempty"`
+	Runtimes      []string `json:"runtimes,omitempty"`
+	CapacitySlots int32    `json:"capacity_slots"`
+	FreeSlots     int32    `json:"free_slots"`
 	// ActiveRuns is what the backend believes is on the cluster now, Leased
 	// through Running and Unknown — beside free_slots, which is what the
 	// cluster itself last said.
@@ -166,7 +170,8 @@ func (s *Server) listClusters(w http.ResponseWriter, r *http.Request, _ caller) 
 		items = append(items, clusterResponse{
 			ClusterID: string(c.ID), Name: c.Name, Labels: c.Labels, Status: c.Status,
 			AgentNamespace: c.AgentNamespace, ControllerVersion: c.ControllerVersion,
-			K8sVersion: c.K8sVersion, Runtimes: runtimes,
+			RuntimeKind: string(c.RuntimeKind), K8sVersion: c.K8sVersion,
+			DockerVersion: c.DockerVersion, Runtimes: runtimes,
 			CapacitySlots: c.CapacitySlots, FreeSlots: c.FreeSlots,
 			QuotaExhausted: c.QuotaExhausted, RegisteredAt: c.RegisteredAt,
 			LastHeartbeatAt: c.LastHeartbeatAt, RevokedReason: c.RevokedReason,

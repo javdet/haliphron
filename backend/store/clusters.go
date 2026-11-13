@@ -31,16 +31,19 @@ type Cluster struct {
 	PublicKey         []byte
 	AgentNamespace    string
 	ControllerVersion string
-	K8sVersion        string
-	Runtimes          []runv1.AgentType
-	CRDVersions       []string
-	CapacitySlots     int32
-	FreeSlots         int32
-	QuotaExhausted    bool
-	RegisteredAt      time.Time
-	LastHeartbeatAt   *time.Time
-	RevokedAt         *time.Time
-	RevokedReason     string
+	// RuntimeKind is never empty when read: the column defaults to kubernetes.
+	RuntimeKind     clusterv1.RuntimeKind
+	K8sVersion      string
+	DockerVersion   string
+	Runtimes        []runv1.AgentType
+	CRDVersions     []string
+	CapacitySlots   int32
+	FreeSlots       int32
+	QuotaExhausted  bool
+	RegisteredAt    time.Time
+	LastHeartbeatAt *time.Time
+	RevokedAt       *time.Time
+	RevokedReason   string
 }
 
 // Revoked reports whether this cluster may still act. Read from the row on
@@ -58,10 +61,13 @@ type Registration struct {
 
 	ControllerVersion string
 	AgentNamespace    string
-	K8sVersion        string
-	Runtimes          []runv1.AgentType
-	CRDVersions       []string
-	CapacitySlots     int32
+	// RuntimeKind may be empty, which is stored as kubernetes.
+	RuntimeKind   clusterv1.RuntimeKind
+	K8sVersion    string
+	DockerVersion string
+	Runtimes      []runv1.AgentType
+	CRDVersions   []string
+	CapacitySlots int32
 }
 
 // Registration failures, told apart because the controller must do different
@@ -144,12 +150,14 @@ func (s *Store) Register(ctx context.Context, reg Registration) (Cluster, error)
 			INSERT INTO clusters (id, name, labels, status, key_id, public_key,
 			                      bootstrap_token_id, agent_namespace, controller_version,
 			                      k8s_version, runtimes, crd_versions,
-			                      capacity_slots, free_slots)
+			                      capacity_slots, free_slots,
+			                      runtime_kind, docker_version)
 			VALUES ($1, $2, $3::jsonb, 'Active', $4, $5, $6, $7, $8, $9,
-			        $10::text[]::agent_type[], $11::text[], $12, $12)`,
+			        $10::text[]::agent_type[], $11::text[], $12, $12, $13, $14)`,
 			id, reg.Name, labels, reg.KeyID, reg.PublicKey, tokenID,
 			reg.AgentNamespace, reg.ControllerVersion, nullString(reg.K8sVersion),
-			agentTypeArray(reg.Runtimes), textArray(reg.CRDVersions), reg.CapacitySlots)
+			agentTypeArray(reg.Runtimes), textArray(reg.CRDVersions), reg.CapacitySlots,
+			string(reg.RuntimeKind.OrDefault()), nullString(reg.DockerVersion))
 		if err != nil {
 			if isUniqueViolation(err, "clusters_name_key") {
 				return ErrClusterNameTaken
@@ -224,6 +232,7 @@ type ClusterFacts struct {
 	CapacitySlots int32
 
 	K8sVersion     string
+	DockerVersion  string
 	NodeCount      *int32
 	Runtimes       []runv1.AgentType
 	CRDVersions    []string
@@ -251,13 +260,15 @@ func (s *Store) RecordHeartbeat(ctx context.Context, id runv1.ULID, facts Cluste
 			                          THEN $7::text[] ELSE crd_versions END,
 			quota_exhausted    = $8,
 			controller_version = COALESCE($9, controller_version),
+			docker_version     = COALESCE($10, docker_version),
 			status             = CASE WHEN status = 'Revoked' THEN status ELSE 'Active' END,
 			last_heartbeat_at  = now()
 		WHERE id = $1`,
 		id, facts.FreeSlots, facts.CapacitySlots,
 		nullString(facts.K8sVersion), nullInt32(facts.NodeCount),
 		agentTypeArray(facts.Runtimes), textArray(facts.CRDVersions),
-		facts.QuotaExhausted, nullString(facts.ControllerVersion))
+		facts.QuotaExhausted, nullString(facts.ControllerVersion),
+		nullString(facts.DockerVersion))
 	if err != nil {
 		return fmt.Errorf("store: record heartbeat for %s: %w", id, err)
 	}
@@ -481,7 +492,8 @@ const clusterColumns = `
 	SELECT id, name, labels, status, key_id, public_key, agent_namespace,
 	       controller_version, k8s_version, runtimes::text[], crd_versions,
 	       capacity_slots, free_slots, quota_exhausted,
-	       registered_at, last_heartbeat_at, revoked_at, revoked_reason`
+	       registered_at, last_heartbeat_at, revoked_at, revoked_reason,
+	       runtime_kind, docker_version`
 
 type rowScanner interface {
 	Scan(dest ...any) error
@@ -505,6 +517,7 @@ func scanCluster(row rowScanner) (Cluster, error) {
 		c          Cluster
 		labels     []byte
 		k8s        sql.NullString
+		docker     sql.NullString
 		runtimes   []string
 		crds       []string
 		heartbeat  sql.NullTime
@@ -514,7 +527,8 @@ func scanCluster(row rowScanner) (Cluster, error) {
 	err := row.Scan(&c.ID, &c.Name, &labels, &c.Status, &c.KeyID, &c.PublicKey,
 		&c.AgentNamespace, &c.ControllerVersion, &k8s, pgArray(&runtimes), pgArray(&crds),
 		&c.CapacitySlots, &c.FreeSlots, &c.QuotaExhausted,
-		&c.RegisteredAt, &heartbeat, &revokedAt, &revokedWhy)
+		&c.RegisteredAt, &heartbeat, &revokedAt, &revokedWhy,
+		&c.RuntimeKind, &docker)
 	if err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			return Cluster{}, err
@@ -528,6 +542,7 @@ func scanCluster(row rowScanner) (Cluster, error) {
 		}
 	}
 	c.K8sVersion = k8s.String
+	c.DockerVersion = docker.String
 	c.RevokedReason = revokedWhy.String
 	c.LastHeartbeatAt = timePtr(heartbeat)
 	c.RevokedAt = timePtr(revokedAt)

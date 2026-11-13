@@ -95,6 +95,53 @@ func TestRegisterReturnsTheOperationalParameters(t *testing.T) {
 	}
 }
 
+// A controller that does not name a runtime kind is a Kubernetes one: the field
+// came after the first controllers shipped, and they must register unchanged.
+// A Docker host names itself, and its agentNamespace is the agents network.
+// A kind neither side knows is refused rather than filed under the default.
+func TestRegisterRecordsTheRuntimeKindAndDefaultsItToKubernetes(t *testing.T) {
+	t.Parallel()
+	b := backend.New()
+	url := serve(t, b)
+
+	cluster := newClient(t, url, "kid-k8s")
+	cluster.mustRegister(b.BootstrapToken(), "cluster-k8s")
+
+	host := newClient(t, url, "kid-docker")
+	req := host.registerRequest("docker-host")
+	req.RuntimeKind = clusterv1.RuntimeDocker
+	req.DockerVersion = "28.5.1"
+	if resp := host.post("/register", b.IssueBootstrapToken(), req); resp.status != http.StatusOK {
+		t.Fatalf("register a docker host: status %d body %s", resp.status, resp.body)
+	}
+
+	byName := map[string]backend.ClusterState{}
+	for _, c := range b.Clusters() {
+		byName[c.Name] = c
+	}
+	if got := byName["cluster-k8s"].RuntimeKind; got != clusterv1.RuntimeKubernetes {
+		t.Errorf("a registration without runtimeKind recorded %q, want %q", got, clusterv1.RuntimeKubernetes)
+	}
+	docker := byName["docker-host"]
+	if docker.RuntimeKind != clusterv1.RuntimeDocker || docker.DockerVersion != "28.5.1" {
+		t.Errorf("docker host recorded as %q/%q, want docker/28.5.1", docker.RuntimeKind, docker.DockerVersion)
+	}
+	if docker.AgentNamespace != "haliphron-agents" {
+		t.Errorf("agentNamespace = %q, want the agents network", docker.AgentNamespace)
+	}
+
+	stranger := newClient(t, url, "kid-podman")
+	req = stranger.registerRequest("podman-host")
+	req.RuntimeKind = "podman"
+	resp := stranger.post("/register", b.IssueBootstrapToken(), req)
+	if resp.status != http.StatusBadRequest {
+		t.Fatalf("unknown runtimeKind: want 400, got %d body %s", resp.status, resp.body)
+	}
+	if p := resp.problem(t); p.Code != clusterv1.CodeInvalidRequest || p.Action != clusterv1.ActionFatal {
+		t.Fatalf("want InvalidRequest/fatal, got %s/%s", p.Code, p.Action)
+	}
+}
+
 // ---------------------------------------------------------------------------
 // authentication
 // ---------------------------------------------------------------------------

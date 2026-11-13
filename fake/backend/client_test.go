@@ -133,7 +133,13 @@ func (c *client) post(path string, auth string, body any) response {
 }
 
 func (c *client) register(token, name string) response {
-	return c.post("/register", token, clusterv1.RegisterRequest{
+	return c.post("/register", token, c.registerRequest(name))
+}
+
+// registerRequest is the registration every test sends unless it is about
+// one of the fields, in which case it changes that field and sends the rest.
+func (c *client) registerRequest(name string) clusterv1.RegisterRequest {
+	return clusterv1.RegisterRequest{
 		Name: name,
 		PublicKey: clusterv1.PublicKey{
 			KID: c.kid, Alg: clusterv1.KeyAlgorithm,
@@ -142,7 +148,7 @@ func (c *client) register(token, name string) response {
 		ControllerVersion: c.version,
 		AgentNamespace:    "haliphron-agents",
 		CapacitySlots:     10,
-	})
+	}
 }
 
 // mustRegister registers and adopts the returned identity, which every later

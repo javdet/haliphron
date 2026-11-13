@@ -111,6 +111,11 @@ type ControllerHealth struct {
 type ClusterFacts struct {
 	// +optional
 	K8sVersion string `json:"k8sVersion,omitempty"`
+	// DockerVersion is a Docker host's engine version, sent when it changes —
+	// a daemon upgrade is the Docker counterpart of a node upgrade. The runtime
+	// kind itself is not a fact that drifts and travels only in registration.
+	// +optional
+	DockerVersion string `json:"dockerVersion,omitempty"`
 	// +optional
 	NodeCount int32 `json:"nodeCount,omitempty"`
 	// +optional

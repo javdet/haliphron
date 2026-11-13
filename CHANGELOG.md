@@ -21,6 +21,14 @@ of `VERSION`, and it is the tag of the published images.
   `message.channels`, `message.groups` and `message.mpim` events added to the
   app's manifest; without them it keeps answering mentions only. Migration
   0016 adds the column and an index on `chat_triggers`.
+- **The backend records what runs a cluster's agents.** A controller may
+  register with `runtimeKind: docker` and a `dockerVersion` (Cluster API
+  1.1.0, additive). A controller that does not send the field is recorded as
+  `kubernetes`, as before. For a Docker host, `agentNamespace` carries the
+  agents network name. The clusters page and `GET /api/v1/clusters`
+  (`runtime_kind`, `docker_version`) show the kind, and show the Docker version
+  in place of the Kubernetes one. Placement and leasing do not read the kind.
+  Migration 0017 adds `clusters.runtime_kind` and `clusters.docker_version`.
 
 ## 0.6.2 — 2026-11-10
 
