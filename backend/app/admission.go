@@ -122,6 +122,10 @@ type submitLinks struct {
 	fire     *store.ScheduleFire
 	// deferred is the deferred run this admission is the fire of.
 	deferred runv1.ULID
+	// alertReceiver is the alert receiver whose notification the run
+	// answers, and alert the alerts it claims for the receiver's window.
+	alertReceiver runv1.ULID
+	alert         *store.AlertFire
 }
 
 // prepare applies admission's rules to a request and renders its spec,
@@ -219,6 +223,9 @@ func (s *Service) submit(ctx context.Context, req run.SubmitRequest, links submi
 		ScheduleID:     links.schedule,
 		ScheduleFire:   links.fire,
 		DeferredID:     links.deferred,
+
+		AlertReceiverID: links.alertReceiver,
+		AlertFire:       links.alert,
 	}); err != nil {
 		if errors.Is(err, store.ErrTooManyChildren) {
 			// Worth a line of its own: a run that hits this is either a
@@ -240,6 +247,7 @@ func (s *Service) submit(ctx context.Context, req run.SubmitRequest, links submi
 			"agent": spec.Agent, "model": spec.Model, "role": req.Role,
 			"repo": spec.Repo.URL, "via": req.CreatedVia, "parent": string(req.ParentRunID),
 			"schedule": string(links.schedule), "deferred": string(links.deferred),
+			"alert_receiver": string(links.alertReceiver),
 		},
 	}); err != nil {
 		return Submitted{}, err
@@ -279,9 +287,9 @@ func actorKindFor(via string) string {
 		return "agent"
 	case "ui", "slack", "mattermost":
 		return "user"
-	case "schedule":
-		// The fire is the scheduler's own; the person who created the
-		// schedule is in its audit record and in created_by, not here.
+	case "schedule", "alertmanager":
+		// The fire is the scheduler's own, or the alert receiver's; the
+		// person who created either is in its audit record, not here.
 		return "system"
 	default:
 		return "token"

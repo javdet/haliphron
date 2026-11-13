@@ -221,6 +221,16 @@ and never revive an expired lock's `seq`.
 Every replica's scheduler loop fires due rows, with no leader. Never write `state = 'submitted'`
 from another path.
 
+**An alert's suppression window advances only inside `InsertRun`.** `linkAlertFire`
+(`backend/store/alerts.go`) claims a run's alerts with `INSERT … ON CONFLICT (receiver_id,
+fingerprint) DO UPDATE … WHERE suppressed_until <= now()`, in fingerprint order, in the run's own
+transaction; a fingerprint it does not return was claimed by another run, and the whole insert rolls
+back with `AlertSettledError`. That is what makes concurrent Alertmanager deliveries, across
+replicas and HA peers, carry each alert in one run per window. Never write `suppressed_until` from
+another path; the only other writes are deletes (an operator's "clear suppression", and retention of
+rows long expired), which can cause an extra run and never a lost one. The delivery endpoint is the
+one REST route outside `scoped`: it authenticates with the receiver's own `hla_` credential in app.
+
 **Run notes are never deleted row by row to bound their size, and `runs.lineage` has one writer.**
 `run_notes` is partitioned by the owner run's `created_at`, one UTC day each, and space is reclaimed
 only by dropping a whole partition (`DropExpiredNotePartitions` in `backend/store/notes.go`); a

@@ -6,6 +6,8 @@ import { RunsPage } from './pages/RunsPage'
 import { RunDetailPage } from './pages/RunDetailPage'
 import { SchedulesPage } from './pages/SchedulesPage'
 import { ScheduleDetailPage } from './pages/ScheduleDetailPage'
+import { AlertReceiversPage } from './pages/AlertReceiversPage'
+import { AlertReceiverDetailPage } from './pages/AlertReceiverDetailPage'
 import { ClustersPage } from './pages/ClustersPage'
 import { LocksPage } from './pages/LocksPage'
 import { StatsPage } from './pages/StatsPage'
@@ -35,6 +37,7 @@ function Sidebar() {
       <nav className="nav">
         <NavLink to="/runs">Runs</NavLink>
         <NavLink to="/schedules">Schedules</NavLink>
+        <NavLink to="/alert-receivers">Alerts</NavLink>
         <NavLink to="/locks">Locks</NavLink>
         <NavLink to="/clusters">Clusters</NavLink>
         <NavLink to="/stats">Statistics</NavLink>
@@ -165,6 +168,8 @@ export default function App() {
           <Route path="/runs/:id" element={<RunDetailPage />} />
           <Route path="/schedules" element={<SchedulesPage />} />
           <Route path="/schedules/:id" element={<ScheduleDetailPage />} />
+          <Route path="/alert-receivers" element={<AlertReceiversPage />} />
+          <Route path="/alert-receivers/:id" element={<AlertReceiverDetailPage />} />
           <Route path="/locks" element={<LocksPage />} />
           <Route path="/clusters" element={<ClustersPage />} />
           <Route path="/stats" element={<StatsPage />} />

@@ -8,10 +8,11 @@
 // a field name in it — and the authentication model, which is a bearer token
 // with scopes rather than the self-signed cluster JWTs of the other listener.
 //
-// One exception to the bearer token: a chat server's outgoing webhook cannot
+// Two exceptions to the bearer token. A chat server's outgoing webhook cannot
 // hold one, and authenticates with the shared secret the chat server issued
-// instead. Such a handler is mounted by the package that owns the platform
-// (Mount), and checks that secret itself.
+// instead; such a handler is mounted by the package that owns the platform
+// (Mount), and checks that secret itself. And Alertmanager delivers to an
+// alert receiver with that receiver's own credential, which app checks.
 package restapi
 
 import (
@@ -107,6 +108,29 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("PATCH "+BasePath+"/schedules/{id}", s.scoped(store.ScopeRunsWrite, s.patchSchedule))
 	mux.HandleFunc("DELETE "+BasePath+"/schedules/{id}", s.scoped(store.ScopeRunsWrite, s.deleteSchedule))
 	mux.HandleFunc("POST "+BasePath+"/schedules/{id}/run", s.scoped(store.ScopeRunsWrite, s.triggerSchedule))
+
+	// Alert receivers. Managing one is admin, not runs:write: creating or
+	// rotating one mints a credential that starts runs on its own, and every
+	// agent pod holds runs:write. Reading them is runs:read, and never shows
+	// the credential.
+	mux.HandleFunc("GET "+BasePath+"/alert-receivers", s.scoped(store.ScopeRunsRead, s.listAlertReceivers))
+	mux.HandleFunc("POST "+BasePath+"/alert-receivers", s.scoped(store.ScopeAdmin, s.createAlertReceiver))
+	mux.HandleFunc("GET "+BasePath+"/alert-receivers/{id}", s.scoped(store.ScopeRunsRead, s.getAlertReceiver))
+	mux.HandleFunc("PATCH "+BasePath+"/alert-receivers/{id}", s.scoped(store.ScopeAdmin, s.patchAlertReceiver))
+	mux.HandleFunc("DELETE "+BasePath+"/alert-receivers/{id}", s.scoped(store.ScopeAdmin, s.deleteAlertReceiver))
+	mux.HandleFunc("POST "+BasePath+"/alert-receivers/{id}/rotate-token",
+		s.scoped(store.ScopeAdmin, s.rotateAlertReceiverToken))
+	mux.HandleFunc("GET "+BasePath+"/alert-receivers/{id}/deliveries",
+		s.scoped(store.ScopeRunsRead, s.listAlertDeliveries))
+	mux.HandleFunc("GET "+BasePath+"/alert-receivers/{id}/suppressions",
+		s.scoped(store.ScopeRunsRead, s.listAlertSuppressions))
+	mux.HandleFunc("DELETE "+BasePath+"/alert-receivers/{id}/suppressions",
+		s.scoped(store.ScopeAdmin, s.clearAlertSuppressions))
+	mux.HandleFunc("DELETE "+BasePath+"/alert-receivers/{id}/suppressions/{fingerprint}",
+		s.scoped(store.ScopeAdmin, s.clearAlertSuppressions))
+	// Alertmanager's delivery: outside the scopes, authenticated by the
+	// receiver's own credential in app.
+	mux.HandleFunc("POST "+BasePath+"/alert-receivers/{id}/alerts", s.receiveAlerts)
 
 	// Locks are set by agents through MCP. Reading them is runs:read; the
 	// force-release is admin, because every agent pod holds runs:write and
@@ -263,6 +287,11 @@ func (s *Server) failFor(w http.ResponseWriter, r *http.Request, err error) {
 	case errors.Is(err, app.ErrScheduleFromAgent):
 		s.fail(w, http.StatusForbidden, "forbidden",
 			"schedules are managed by operators; a run's own token cannot create, change or start one", "")
+	case errors.Is(err, store.ErrAlertReceiverNameTaken):
+		s.fail(w, http.StatusConflict, "name_taken", "an alert receiver with this name exists", "name")
+	case errors.Is(err, app.ErrAlertReceiverFromAgent):
+		s.fail(w, http.StatusForbidden, "forbidden",
+			"alert receivers are managed by operators; a run's own token cannot create or change one", "")
 	case errors.Is(err, app.ErrLockFromAgent):
 		s.fail(w, http.StatusForbidden, "forbidden",
 			"a run's own token cannot remove another run's lock", "")

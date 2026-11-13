@@ -11,6 +11,11 @@ import {
 import { fetchArtifact, fetchResult, newIdempotencyKey, request } from './client'
 import {
   TERMINAL_STATUSES,
+  type AlertDelivery,
+  type AlertReceiver,
+  type AlertReceiverRequest,
+  type AlertReceiverWithToken,
+  type AlertSuppression,
   type ApiToken,
   type ApiTokenSecret,
   type Attempt,
@@ -49,6 +54,7 @@ export interface RunFilter {
   cluster_id?: string
   parent_run_id?: string
   schedule_id?: string
+  alert_receiver_id?: string
   q?: string
   limit?: number
 }
@@ -63,6 +69,10 @@ export const keys = {
   marketplace: (url: string, ref: string) => ['plugin-marketplaces', url, ref] as const,
   schedules: () => ['schedules'] as const,
   schedule: (id: string) => ['schedules', id] as const,
+  alertReceivers: () => ['alert-receivers'] as const,
+  alertReceiver: (id: string) => ['alert-receivers', id] as const,
+  alertDeliveries: (id: string) => ['alert-receivers', id, 'deliveries'] as const,
+  alertSuppressions: (id: string) => ['alert-receivers', id, 'suppressions'] as const,
   clusters: () => ['clusters'] as const,
   runStats: (since: string | null) => ['stats', 'runs', since ?? 'all'] as const,
   bootstrapTokens: () => ['bootstrap-tokens'] as const,
@@ -301,6 +311,107 @@ export function useTriggerSchedule() {
       qc.setQueryData(keys.run(run.run_id), run)
       void qc.invalidateQueries({ queryKey: ['runs'] })
     },
+  })
+}
+
+// ---------------------------------------------------------------------------
+// alert receivers
+// ---------------------------------------------------------------------------
+
+/** Re-read like schedules: deliveries arrive while nobody is looking. */
+const ALERT_MS = 15000
+
+export function useAlertReceivers() {
+  return useQuery({
+    queryKey: keys.alertReceivers(),
+    queryFn: ({ signal }) =>
+      request<{ alert_receivers: AlertReceiver[] }>('/alert-receivers', { signal }).then((r) => r.alert_receivers),
+    refetchInterval: ALERT_MS,
+  })
+}
+
+export function useAlertReceiver(id: string) {
+  return useQuery({
+    queryKey: keys.alertReceiver(id),
+    queryFn: ({ signal }) => request<AlertReceiver>(`/alert-receivers/${encodeURIComponent(id)}`, { signal }),
+    refetchInterval: ALERT_MS,
+  })
+}
+
+export function useAlertDeliveries(id: string) {
+  return useQuery({
+    queryKey: keys.alertDeliveries(id),
+    queryFn: ({ signal }) =>
+      request<{ deliveries: AlertDelivery[] }>(`/alert-receivers/${encodeURIComponent(id)}/deliveries`, {
+        signal,
+        query: { limit: 100 },
+      }).then((r) => r.deliveries),
+    refetchInterval: ALERT_MS,
+  })
+}
+
+export function useAlertSuppressions(id: string) {
+  return useQuery({
+    queryKey: keys.alertSuppressions(id),
+    queryFn: ({ signal }) =>
+      request<{ suppressions: AlertSuppression[] }>(`/alert-receivers/${encodeURIComponent(id)}/suppressions`, {
+        signal,
+      }).then((r) => r.suppressions),
+    refetchInterval: ALERT_MS,
+  })
+}
+
+export function useCreateAlertReceiver() {
+  const qc = useQueryClient()
+  return useMutation({
+    mutationFn: (body: AlertReceiverRequest) =>
+      request<AlertReceiverWithToken>('/alert-receivers', { method: 'POST', body }),
+    onSuccess: () => void qc.invalidateQueries({ queryKey: keys.alertReceivers(), exact: true }),
+  })
+}
+
+/** A partial edit: what is sent changes, what is left out stays. */
+export function useUpdateAlertReceiver() {
+  const qc = useQueryClient()
+  return useMutation({
+    mutationFn: ({ id, patch }: { id: string; patch: Partial<AlertReceiverRequest> }) =>
+      request<AlertReceiver>(`/alert-receivers/${encodeURIComponent(id)}`, { method: 'PATCH', body: patch }),
+    onSuccess: (saved) => {
+      qc.setQueryData(keys.alertReceiver(saved.id), saved)
+      void qc.invalidateQueries({ queryKey: keys.alertReceivers(), exact: true })
+    },
+  })
+}
+
+export function useDeleteAlertReceiver() {
+  const qc = useQueryClient()
+  return useMutation({
+    mutationFn: (id: string) => request<void>(`/alert-receivers/${encodeURIComponent(id)}`, { method: 'DELETE' }),
+    // The list only, for the reason useDeleteSchedule gives.
+    onSuccess: () => void qc.invalidateQueries({ queryKey: keys.alertReceivers(), exact: true }),
+  })
+}
+
+export function useRotateAlertReceiverToken() {
+  const qc = useQueryClient()
+  return useMutation({
+    mutationFn: (id: string) =>
+      request<AlertReceiverWithToken>(`/alert-receivers/${encodeURIComponent(id)}/rotate-token`, { method: 'POST' }),
+    onSuccess: (saved) => void qc.invalidateQueries({ queryKey: keys.alertReceiver(saved.id), exact: true }),
+  })
+}
+
+/** Lifts one suppression, or every live one when no fingerprint is given. */
+export function useClearAlertSuppressions(id: string) {
+  const qc = useQueryClient()
+  return useMutation({
+    mutationFn: (fingerprint?: string) =>
+      request<{ cleared: number }>(
+        `/alert-receivers/${encodeURIComponent(id)}/suppressions` +
+          (fingerprint ? `/${encodeURIComponent(fingerprint)}` : ''),
+        { method: 'DELETE' },
+      ),
+    onSuccess: () => void qc.invalidateQueries({ queryKey: keys.alertSuppressions(id) }),
   })
 }
 

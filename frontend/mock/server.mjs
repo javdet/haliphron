@@ -261,6 +261,55 @@ const schedules = [
 ]
 const triggeredRuns = []
 
+// Alert receivers: what an Alertmanager notification starts, and the throttle.
+// The credential is minted on create and rotate and never shown again.
+let receiverSeq = 0
+const mintCredential = () => `hla_${Math.random().toString(36).slice(2)}${Math.random().toString(36).slice(2)}`
+const alertReceivers = [
+  {
+    id: '01JD9V0000ALERTRECEIVER001', name: 'on-call-triage', description: 'Production pages from the SRE route',
+    enabled: true, throttle_seconds: 3600, webhook_path: '/api/v1/alert-receivers/01JD9V0000ALERTRECEIVER001/alerts',
+    run: { prompt: 'Investigate the firing alerts below. Find the likely cause; if it is in this repository, open a pull request.',
+      agent: 'claude-code', role: 'coder', repo: 'https://github.com/acme/checkout', max_cost_usd: '3' },
+    last_received_at: iso(7 * 60000), last_outcome: 'throttled', last_run_id: '01JD8Q7NN9GG8HH7II6JJ5KKLL',
+    created_by: 'maria', created_at: iso(5 * 86400000), updated_by: 'maria', updated_at: iso(5 * 86400000),
+  },
+]
+const alertDeliveries = {
+  '01JD9V0000ALERTRECEIVER001': [
+    { id: '01JD9V0000DELIVERY00000003', received_at: iso(7 * 60000), group_key: '{}:{alertname="HighLatency"}',
+      status: 'firing', firing: 2, resolved: 0, throttled: ['3f1c9a0b7e2d4c51', 'a90e44c1d2b37f08'], outcome: 'throttled' },
+    { id: '01JD9V0000DELIVERY00000002', received_at: iso(12 * 60000), group_key: '{}:{alertname="HighLatency"}',
+      status: 'firing', firing: 2, resolved: 0, throttled: ['3f1c9a0b7e2d4c51'], outcome: 'submitted',
+      run_id: '01JD8Q7NN9GG8HH7II6JJ5KKLL' },
+    { id: '01JD9V0000DELIVERY00000001', received_at: iso(17 * 60000), group_key: '{}:{alertname="HighLatency"}',
+      status: 'firing', firing: 1, resolved: 0, throttled: [], outcome: 'submitted', run_id: '01JD8Q7NN9GG8HH7II6JJ5KKLL' },
+  ],
+}
+const alertSuppressions = {
+  '01JD9V0000ALERTRECEIVER001': [
+    { fingerprint: '3f1c9a0b7e2d4c51', alertname: 'HighLatency', suppressed_until: iso(-43 * 60000),
+      run_id: '01JD8Q7NN9GG8HH7II6JJ5KKLL', first_run_at: iso(17 * 60000), last_run_at: iso(17 * 60000), runs: 1, suppressed: 2 },
+    { fingerprint: 'a90e44c1d2b37f08', alertname: 'HighLatency', suppressed_until: iso(-48 * 60000),
+      run_id: '01JD8Q7NN9GG8HH7II6JJ5KKLL', first_run_at: iso(12 * 60000), last_run_at: iso(12 * 60000), runs: 1, suppressed: 1 },
+  ],
+}
+
+function saveAlertReceiver(target, payload) {
+  const next = { ...target, ...payload, run: payload?.run ?? target.run }
+  if (!/^[a-z0-9]([-a-z0-9_.]*[a-z0-9])?$/.test(next.name ?? '')) {
+    return invalid('name', "a name is lower-case letters, digits, '-', '_' and '.'")
+  }
+  if (!next.run?.role) return invalid('run.role', 'an alert receiver names the role its runs work under')
+  if (!next.run?.prompt?.trim()) return invalid('run.prompt', "an alert receiver's prompt is the instruction the alerts are handed over with")
+  if (alertReceivers.some((r) => r.name === next.name && r.id !== next.id)) {
+    return conflict('name_taken', 'an alert receiver with this name exists')
+  }
+  next.updated_by = 'maria-admin'
+  next.updated_at = iso(0)
+  return next
+}
+
 // Locks and deferred runs: what agents say they are working on, and the work
 // waiting for it. Text in the locks is an agent's own words.
 const locks = [
@@ -354,6 +403,9 @@ const routes = [
     const q = (url.searchParams.get('q') ?? '').toLowerCase()
     let out = [...triggeredRuns, ...runs].filter((r) => !deletedRuns.has(r.run_id))
     if (schedule) out = out.filter((r) => r.schedule_id === schedule)
+    // The fixture runs carry no receiver; the one the seeded receiver names stands in for its runs.
+    const receiver = url.searchParams.get('alert_receiver_id')
+    if (receiver) out = out.filter((r) => alertReceivers.some((a) => a.id === receiver && a.last_run_id === r.run_id))
     if (wanted.length) out = out.filter((r) => wanted.includes(r.status))
     if (role) out = out.filter((r) => r.role === role)
     if (agent) out = out.filter((r) => r.agent === agent)
@@ -426,6 +478,45 @@ const routes = [
     if (d.state !== 'waiting') return conflict('deferred_settled', 'this deferred run is no longer waiting')
     Object.assign(d, { state: 'cancelled', reason: 'cancelled by maria-admin', finished_at: iso(0) })
     return d
+  }],
+  ['GET', /^\/api\/v1\/alert-receivers$/, () => ({
+    alert_receivers: [...alertReceivers].sort((a, b) => a.name.localeCompare(b.name)),
+  })],
+  ['GET', /^\/api\/v1\/alert-receivers\/([^/]+)$/, (m) => alertReceivers.find((r) => r.id === m[1]) ?? 404],
+  ['POST', /^\/api\/v1\/alert-receivers$/, (_m, _u, _fx, payload) => {
+    const id = `01JD9V0000ALERTRECEIVER${String(++receiverSeq + 1).padStart(3, '0')}`
+    const saved = saveAlertReceiver({
+      id, description: '', enabled: true, throttle_seconds: 3600,
+      webhook_path: `/api/v1/alert-receivers/${id}/alerts`, created_by: 'maria-admin', created_at: iso(0),
+    }, payload)
+    if (saved.error) return saved
+    alertReceivers.push(saved)
+    return { ...saved, token: mintCredential() }
+  }],
+  ['PATCH', /^\/api\/v1\/alert-receivers\/([^/]+)$/, (m, _u, _fx, payload) => {
+    const i = alertReceivers.findIndex((r) => r.id === m[1])
+    if (i < 0) return 404
+    const saved = saveAlertReceiver(alertReceivers[i], payload)
+    if (!saved.error) alertReceivers[i] = saved
+    return saved
+  }],
+  ['DELETE', /^\/api\/v1\/alert-receivers\/([^/]+)$/, (m) => {
+    const i = alertReceivers.findIndex((r) => r.id === m[1])
+    if (i < 0) return 404
+    alertReceivers.splice(i, 1)
+    return {}
+  }],
+  ['POST', /^\/api\/v1\/alert-receivers\/([^/]+)\/rotate-token$/, (m) => {
+    const r = alertReceivers.find((x) => x.id === m[1])
+    return r ? { ...r, token: mintCredential() } : 404
+  }],
+  ['GET', /^\/api\/v1\/alert-receivers\/([^/]+)\/deliveries$/, (m) => ({ deliveries: alertDeliveries[m[1]] ?? [] })],
+  ['GET', /^\/api\/v1\/alert-receivers\/([^/]+)\/suppressions$/, (m) => ({ suppressions: alertSuppressions[m[1]] ?? [] })],
+  ['DELETE', /^\/api\/v1\/alert-receivers\/([^/]+)\/suppressions(?:\/([^/]+))?$/, (m) => {
+    const rows = alertSuppressions[m[1]] ?? []
+    const keep = m[2] ? rows.filter((s) => s.fingerprint !== m[2]) : []
+    alertSuppressions[m[1]] = keep
+    return { cleared: rows.length - keep.length }
   }],
   ['GET', /^\/api\/v1\/schedules$/, () => ({ schedules: [...schedules].sort((a, b) => a.name.localeCompare(b.name)) })],
   ['GET', /^\/api\/v1\/schedules\/([^/]+)$/, (m) => schedules.find((s) => s.id === m[1]) ?? 404],

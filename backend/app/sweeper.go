@@ -229,6 +229,16 @@ func (s *Service) RunReaper(ctx context.Context, interval time.Duration) {
 			if n > 0 {
 				s.log.Info("answered chat messages purged", "rows", n)
 			}
+			// Alert receivers: the delivery log after two weeks, and throttle
+			// rows a week after they stopped suppressing anything.
+			deliveries, fingerprints, err := s.PurgeAlerts(ctx)
+			if err != nil && !ctxDone(ctx) {
+				s.log.Error("purge failed", "error", err)
+				continue
+			}
+			if deliveries > 0 || fingerprints > 0 {
+				s.log.Info("alert history purged", "deliveries", deliveries, "fingerprints", fingerprints)
+			}
 		}
 	}
 }

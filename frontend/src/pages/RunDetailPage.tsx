@@ -211,6 +211,17 @@ function Summary({ run }: { run: Run }) {
               </dd>
             </>
           )}
+          {run.alert_receiver_id && (
+            <>
+              <dt>Alert receiver</dt>
+              <dd>
+                <Link className="mono small" to={`/alert-receivers/${run.alert_receiver_id}`}>
+                  {run.alert_receiver_id}
+                </Link>{' '}
+                <span className="faint">an Alertmanager notification</span>
+              </dd>
+            </>
+          )}
         </dl>
       </Card>
 

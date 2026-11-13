@@ -72,6 +72,14 @@ var (
 		"Disk taken by the run notes table: heap, TOAST and index of every partition.", nil, nil)
 	descNotes = prometheus.NewDesc("haliphron_notes",
 		"Run notes stored, expired ones included until their partition is dropped.", nil, nil)
+	descAlertReceivers = prometheus.NewDesc("haliphron_alert_receivers",
+		"Alertmanager receivers configured, by whether they are enabled.", []string{"enabled"}, nil)
+	descAlertSuppressions = prometheus.NewDesc("haliphron_alert_suppressions",
+		"Alerts currently suppressed because a run started for them within their receiver's throttle window.",
+		nil, nil)
+	descAlertDeliveries = prometheus.NewDesc("haliphron_alert_deliveries_24h",
+		"Alertmanager notifications received in the last 24 hours, by receiver and outcome.",
+		[]string{"receiver", "outcome"}, nil)
 	descUp = prometheus.NewDesc("haliphron_stats_up",
 		"1 if the run and cluster statistics were read from the database, 0 if not.", nil, nil)
 )
@@ -111,7 +119,8 @@ func NewCollector(service *app.Service, logger *slog.Logger) *Collector {
 func (c *Collector) Describe(ch chan<- *prometheus.Desc) {
 	for _, d := range []*prometheus.Desc{descRuns, descDuration, descQueueWait, descActive,
 		descCapacity, descFree, descHeartbeat, descClusterStatus,
-		descNotePartitions, descNoteBytes, descNotes, descUp} {
+		descNotePartitions, descNoteBytes, descNotes,
+		descAlertReceivers, descAlertSuppressions, descAlertDeliveries, descUp} {
 		ch <- d
 	}
 }
@@ -202,6 +211,19 @@ func (c *Collector) series(ctx context.Context) ([]prometheus.Metric, error) {
 		prometheus.MustNewConstMetric(descNotePartitions, prometheus.GaugeValue, float64(notes.Partitions)),
 		prometheus.MustNewConstMetric(descNoteBytes, prometheus.GaugeValue, float64(notes.Bytes)),
 		prometheus.MustNewConstMetric(descNotes, prometheus.GaugeValue, float64(notes.Notes)))
+
+	alerts, err := c.service.AlertUsage(ctx)
+	if err != nil {
+		return nil, err
+	}
+	out = append(out,
+		prometheus.MustNewConstMetric(descAlertReceivers, prometheus.GaugeValue, float64(alerts.ReceiversEnabled), "true"),
+		prometheus.MustNewConstMetric(descAlertReceivers, prometheus.GaugeValue, float64(alerts.ReceiversDisabled), "false"),
+		prometheus.MustNewConstMetric(descAlertSuppressions, prometheus.GaugeValue, float64(alerts.Suppressions)))
+	for _, d := range alerts.Deliveries {
+		out = append(out, prometheus.MustNewConstMetric(descAlertDeliveries, prometheus.GaugeValue,
+			float64(d.Count), d.Receiver, d.Outcome))
+	}
 	return out, nil
 }
 

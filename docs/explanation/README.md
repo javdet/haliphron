@@ -49,6 +49,12 @@ Almost every awkward mechanism in the system is downstream of one of these.
   the runs it starts, why notes only go down a lineage, why the table is
   partitioned by day, and why a note is data and never an instruction.
 
+## Runs that start on their own
+
+- [About alert throttling](alert-throttling.md) — why one alert starts one run
+  per window, why the window is fixed, and how that holds across replicas and
+  Alertmanager's HA peers with no leader.
+
 ## A note on `docs/architecture.md`
 
 The [design document](../architecture.md) at the root of `docs/` is the

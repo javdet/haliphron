@@ -119,6 +119,8 @@ type runResponse struct {
 	ParentRunID string `json:"parent_run_id,omitempty"`
 	Depth       int16  `json:"depth"`
 	ScheduleID  string `json:"schedule_id,omitempty"`
+	// AlertReceiverID is the alert receiver whose notification started the run.
+	AlertReceiverID string `json:"alert_receiver_id,omitempty"`
 
 	CreatedBy  string     `json:"created_by"`
 	CreatedVia string     `json:"created_via"`
@@ -136,37 +138,38 @@ func RunView(r store.Run) runResponse {
 		// ReportedStatus, not the stored one: a terminal run whose report has
 		// not been collected is CompletedWithoutResult, and hiding that behind
 		// Succeeded would show a cost of zero as if it were the truth.
-		Status:        r.ReportedStatus(),
-		Agent:         string(r.Agent),
-		Model:         r.Model,
-		Role:          r.Role,
-		Repo:          r.RepoURL,
-		BaseBranch:    r.BaseBranch,
-		TargetBranch:  r.TargetBranch,
-		ClusterID:     string(r.ClusterID),
-		Epoch:         r.Epoch,
-		Attempt:       r.Attempt,
-		Phase:         string(r.ObservedPhase),
-		FailureClass:  string(r.FailureClass),
-		StatusReason:  r.StatusReason,
-		StatusMessage: r.StatusMessage,
-		ExitCode:      r.ExitCode,
-		ResultSummary: r.ResultSummary,
-		PRURL:         r.PRURL,
-		PRNumber:      r.PRNumber,
-		CommitSHA:     r.CommitSHA,
-		CostUSD:       string(r.CostUSD),
-		InputTokens:   r.InputTokens,
-		OutputTokens:  r.OutputTokens,
-		NumTurns:      r.NumTurns,
-		ParentRunID:   string(r.ParentRunID),
-		Depth:         r.Depth,
-		ScheduleID:    string(r.ScheduleID),
-		CreatedBy:     r.CreatedBy,
-		CreatedVia:    r.CreatedVia,
-		CreatedAt:     r.CreatedAt,
-		StartedAt:     r.StartedAt,
-		FinishedAt:    r.FinishedAt,
+		Status:          r.ReportedStatus(),
+		Agent:           string(r.Agent),
+		Model:           r.Model,
+		Role:            r.Role,
+		Repo:            r.RepoURL,
+		BaseBranch:      r.BaseBranch,
+		TargetBranch:    r.TargetBranch,
+		ClusterID:       string(r.ClusterID),
+		Epoch:           r.Epoch,
+		Attempt:         r.Attempt,
+		Phase:           string(r.ObservedPhase),
+		FailureClass:    string(r.FailureClass),
+		StatusReason:    r.StatusReason,
+		StatusMessage:   r.StatusMessage,
+		ExitCode:        r.ExitCode,
+		ResultSummary:   r.ResultSummary,
+		PRURL:           r.PRURL,
+		PRNumber:        r.PRNumber,
+		CommitSHA:       r.CommitSHA,
+		CostUSD:         string(r.CostUSD),
+		InputTokens:     r.InputTokens,
+		OutputTokens:    r.OutputTokens,
+		NumTurns:        r.NumTurns,
+		ParentRunID:     string(r.ParentRunID),
+		Depth:           r.Depth,
+		ScheduleID:      string(r.ScheduleID),
+		AlertReceiverID: string(r.AlertReceiverID),
+		CreatedBy:       r.CreatedBy,
+		CreatedVia:      r.CreatedVia,
+		CreatedAt:       r.CreatedAt,
+		StartedAt:       r.StartedAt,
+		FinishedAt:      r.FinishedAt,
 	}
 }
 
@@ -245,14 +248,15 @@ func (s *Server) createRun(w http.ResponseWriter, r *http.Request, c caller) {
 func (s *Server) listRuns(w http.ResponseWriter, r *http.Request, _ caller) {
 	query := r.URL.Query()
 	filter := store.RunFilter{
-		Role:     query.Get("role"),
-		Agent:    runv1.AgentType(query.Get("agent")),
-		Cluster:  runv1.ULID(query.Get("cluster_id")),
-		Parent:   runv1.ULID(query.Get("parent_run_id")),
-		Schedule: runv1.ULID(query.Get("schedule_id")),
-		Query:    query.Get("q"),
-		Limit:    intParam(r, "limit", 50),
-		Before:   runv1.ULID(query.Get("before")),
+		Role:          query.Get("role"),
+		Agent:         runv1.AgentType(query.Get("agent")),
+		Cluster:       runv1.ULID(query.Get("cluster_id")),
+		Parent:        runv1.ULID(query.Get("parent_run_id")),
+		Schedule:      runv1.ULID(query.Get("schedule_id")),
+		AlertReceiver: runv1.ULID(query.Get("alert_receiver_id")),
+		Query:         query.Get("q"),
+		Limit:         intParam(r, "limit", 50),
+		Before:        runv1.ULID(query.Get("before")),
 	}
 	if statuses, ok := query["status"]; ok {
 		filter.Status = statuses

@@ -30,10 +30,12 @@ webhook — use `camelCase`. This API does not.
 
 ## Authentication and scopes
 
-Every request carries a bearer token, with one exception: the Mattermost
-outgoing-webhook endpoint, whose caller is a chat server that cannot hold one of
-these tokens. It authenticates with the webhook's own token instead; see
-[below](#post-apiv1integrationsmattermostwebhook). There are three scopes;
+Every request carries a bearer token, with two exceptions. The Mattermost
+outgoing-webhook endpoint's caller is a chat server that cannot hold one of
+these tokens; it authenticates with the webhook's own token instead (see
+[below](#post-apiv1integrationsmattermostwebhook)). Alertmanager delivers to an
+alert receiver with that receiver's own credential (see
+[below](#post-apiv1alert-receiversidalerts)). There are three scopes;
 `admin` implies the other two.
 
 | Scope | Value |
@@ -141,6 +143,7 @@ Scope: `runs:read`. Most recent first.
 | `cluster_id` | ULID | all | |
 | `parent_run_id` | ULID | all | |
 | `schedule_id` | ULID | all | the runs a schedule fired or was run now for |
+| `alert_receiver_id` | ULID | all | the runs an alert receiver's notifications started |
 | `q` | string | — | free text |
 | `limit` | integer | 50 | |
 | `before` | ULID | — | cursor |
@@ -275,8 +278,9 @@ when it is set.
 | `parent_run_id` | ULID | omitted when the run has no parent |
 | `depth` | integer | 0 for a run with no parent |
 | `schedule_id` | ULID | the schedule that fired the run or was run now; omitted otherwise, and cleared when the schedule is deleted |
-| `created_by` | string | the token subject, its name, `run:<id>`, `mattermost:<username>`, or `schedule:<id>` for a scheduled fire |
-| `created_via` | string | `api`, `mcp`, `agent`, `mattermost` or `schedule` |
+| `alert_receiver_id` | ULID | the alert receiver whose Alertmanager notification started the run; omitted otherwise, and cleared when the receiver is deleted |
+| `created_by` | string | the token subject, its name, `run:<id>`, `mattermost:<username>`, `schedule:<id>` for a scheduled fire, or `alert-receiver:<id>` for an Alertmanager notification |
+| `created_via` | string | `api`, `mcp`, `agent`, `mattermost`, `slack`, `schedule` or `alertmanager` |
 | `created_at`, `started_at`, `finished_at` | timestamp | the last two omitted until they exist |
 
 `status` is the reported status, not the stored one. A terminal run whose
@@ -385,6 +389,153 @@ alone. Accepts an `Idempotency-Key`; one key used on two schedules is a
 | `last_outcome` | string | `submitted`, `skipped` (the policy), `missed` (the deadline) or `refused` (admission) |
 | `last_error` | string | why the last fire admitted no run |
 | `last_run_id` | ULID | the run the last submitted fire admitted |
+| `created_by`, `created_at`, `updated_by`, `updated_at` | string, timestamp | |
+
+---
+
+## Alert receivers
+
+An alert receiver is a Prometheus Alertmanager `webhook_config` target. Each
+notification Alertmanager delivers to it starts one run from the receiver's
+template, carrying the notification's firing alerts. An alert, identified by
+Alertmanager's `fingerprint`, that started a run is suppressed for
+`throttle_seconds` from that moment: a later notification leaves it out, and a
+notification whose alerts are all suppressed starts nothing. This holds across
+replicas and Alertmanager's HA peers. See
+[Route Alertmanager alerts to agents](../how-to/route-alertmanager-alerts.md).
+
+Managing a receiver needs `admin`, because creating or rotating one mints a
+credential that starts runs. Reading needs `runs:read`, and a read never shows
+the credential. A `run-mcp` token is refused with `403 forbidden`.
+
+### `POST /api/v1/alert-receivers`
+
+Scope: `admin`. Returns `201` and an [alert receiver object](#the-alert-receiver-object)
+with one more field, `token`: the receiver's credential, `hla_…`. It is
+returned this once, with `Cache-Control: no-store`; only its digest is stored.
+
+| Field | Type | Required | Default | Notes |
+|---|---|---|---|---|
+| `name` | string | yes | — | `^[a-z0-9]([-a-z0-9_.]*[a-z0-9])?$`, unique; `409 name_taken` otherwise |
+| `description` | string | no | empty | at most 1024 bytes |
+| `enabled` | boolean | no | `true` | a disabled receiver answers deliveries `404` |
+| `throttle_seconds` | integer | no | `3600` | 0 to 604800 (a week). `0` suppresses nothing |
+| `run` | object | yes | — | the template: the fields of [`POST /api/v1/runs`](#post-apiv1runs) except `async` and `wait_seconds`. `role` is required. `prompt` is required, at most 64 KiB, and is the instruction the alerts are appended to |
+
+The template is checked by the same rules as `POST /api/v1/runs` when the
+receiver is saved; a refusal names the field with a `run.` prefix.
+
+### `GET /api/v1/alert-receivers`
+
+Scope: `runs:read`. Every receiver, by name; not paged.
+
+```json
+{"alert_receivers": [ /* alert receiver objects */ ]}
+```
+
+### `GET /api/v1/alert-receivers/{id}`
+
+Scope: `runs:read`. Returns an [alert receiver object](#the-alert-receiver-object).
+
+### `PATCH /api/v1/alert-receivers/{id}`
+
+Scope: `admin`. The fields of the create body, all optional; `run`, when
+present, replaces the whole template. A new `throttle_seconds` applies to the
+alerts claimed after it; live suppressions keep the window they were claimed
+with. Returns `200` and the receiver.
+
+### `DELETE /api/v1/alert-receivers/{id}`
+
+Scope: `admin`. Returns `204`. The credential stops working, the suppressions
+and the delivery log are deleted, and the runs it started are kept with
+`alert_receiver_id` cleared.
+
+### `POST /api/v1/alert-receivers/{id}/rotate-token`
+
+Scope: `admin`. No body. Replaces the credential and returns `200` and the
+receiver with the new `token`, once. The old credential stops working at once.
+
+### `GET /api/v1/alert-receivers/{id}/deliveries`
+
+Scope: `runs:read`. The notifications received in the last 14 days, newest
+first. `limit` (default 50, at most 200) and `before` (a delivery id) page it.
+
+```json
+{"deliveries": [{
+  "id": "01J...", "received_at": "2026-11-13T10:00:00Z",
+  "group_key": "{}:{alertname=\"HighLatency\"}", "status": "firing",
+  "firing": 2, "resolved": 0, "throttled": ["3f1c9a0b7e2d4c51"],
+  "outcome": "submitted", "run_id": "01J..."
+}]}
+```
+
+`outcome` is `submitted` (a run started), `throttled` (every firing alert was
+suppressed), `resolved` (the notification had no firing alert) or `refused`
+(admission refused the template; `error` says why). `throttled` lists the
+fingerprints left out because an earlier run still suppressed them.
+
+### `GET /api/v1/alert-receivers/{id}/suppressions`
+
+Scope: `runs:read`. The alerts the receiver suppresses now, latest expiry
+first.
+
+```json
+{"suppressions": [{
+  "fingerprint": "3f1c9a0b7e2d4c51", "alertname": "HighLatency",
+  "suppressed_until": "2026-11-13T11:00:00Z", "run_id": "01J...",
+  "first_run_at": "2026-11-12T09:00:00Z", "last_run_at": "2026-11-13T10:00:00Z",
+  "runs": 2, "suppressed": 14
+}]}
+```
+
+`runs` counts the runs the alert has started, and `suppressed` the deliveries
+of it that were left out.
+
+### `DELETE /api/v1/alert-receivers/{id}/suppressions`
+
+Scope: `admin`. Lifts every live suppression, and
+`DELETE /api/v1/alert-receivers/{id}/suppressions/{fingerprint}` lifts one
+(`404` when there is none). Returns `200` and `{"cleared": n}`. The next
+notification carrying a cleared alert starts a run.
+
+### `POST /api/v1/alert-receivers/{id}/alerts`
+
+**Alertmanager's endpoint.** Authenticated by the receiver's own credential as
+`Authorization: Bearer hla_…`, not by an API token. The body is Alertmanager's
+webhook payload, version 4, at most 1 MiB and 1000 alerts, each label and
+annotation at most 64 KiB.
+
+| Answer | When |
+|---|---|
+| `200 {"outcome": "submitted", "run_id": "01J…", "alerts": n, "throttled": k}` | a run started, carrying `n` alerts; `k` were suppressed |
+| `200 {"outcome": "throttled" \| "resolved" \| "refused", …}` | nothing started; `refused` carries `error`, which is also on the receiver |
+| `400 invalid_request` | the body is not a version 4 payload, or is over a bound |
+| `401 unauthenticated` | no credential, a wrong one, or an unknown receiver: the two are one answer |
+| `404 not_found` | the credential is right and the receiver is disabled |
+| `503 unavailable` | the store failed; Alertmanager retries, and a retry of a notification whose first attempt committed is throttled |
+
+A notification admission refuses is a `200`: retrying a configuration problem
+changes nothing. The run's prompt is the template's prompt, then a `## Alerts`
+section that says how many alerts it carries and which runs handle the
+suppressed ones, then the alerts as a JSON block between `<<<ALERTS-<random>`
+and `ALERTS-<random>>>>` markers, marked as data rather than instructions. The
+block is bounded at 256 KiB; alerts that do not fit are left out, said to be,
+and not suppressed, so the group's next notification carries them.
+
+### The alert receiver object
+
+| Field | Type | Notes |
+|---|---|---|
+| `id` | ULID | |
+| `name`, `description` | string | |
+| `enabled` | boolean | |
+| `run` | object | the template |
+| `throttle_seconds` | integer | |
+| `webhook_path` | string | where Alertmanager delivers, relative to the API's origin |
+| `last_received_at` | timestamp | the last notification, whatever it did |
+| `last_outcome` | string | `submitted`, `throttled`, `resolved` or `refused` |
+| `last_error` | string | why the last notification was refused |
+| `last_run_id` | ULID | the last run a notification started |
 | `created_by`, `created_at`, `updated_by`, `updated_at` | string, timestamp | |
 
 ---
@@ -1007,6 +1158,9 @@ with `max without(instance, pod)`, never `sum`. A scrape result is cached for
 | `haliphron_note_partitions` | gauge | | Day partitions of the run notes table. Steady at about the note retention in days plus four. |
 | `haliphron_note_bytes` | gauge | | Disk taken by the run notes table, counting heap, TOAST and index |
 | `haliphron_notes` | gauge | | Notes stored, including expired ones until their partition is dropped |
+| `haliphron_alert_receivers` | gauge | `enabled` | Alert receivers, by whether they are enabled |
+| `haliphron_alert_suppressions` | gauge | | Alerts suppressed now, across every receiver |
+| `haliphron_alert_deliveries_24h` | gauge | `receiver`, `outcome` | Alertmanager notifications received in the last 24 hours |
 | `haliphron_stats_up` | gauge | | `0` when the database could not be read. In that case the series above are absent from that scrape. |
 
 The Go runtime (`go_*`) and process (`process_*`) collectors are included.
@@ -1026,4 +1180,7 @@ time() - max without(instance, pod) (haliphron_cluster_last_heartbeat_timestamp_
 
 # expired note partitions are not being dropped (default retention of 7 days)
 max without(instance, pod) (haliphron_note_partitions) > 13
+
+# an alert receiver whose notifications admission keeps refusing
+max without(instance, pod) (haliphron_alert_deliveries_24h{outcome="refused"}) > 0
 ```

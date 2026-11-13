@@ -659,6 +659,71 @@ NULL` for the same reason in the other direction: run retention deletes runs.
 The partial index `runs_schedule` serves the Forbid and Replace policies and
 the UI's list of a schedule's runs.
 
+### Alert receivers
+
+**An alert receiver is a run template, a throttle window and the digest of a
+credential** (0019). Prometheus Alertmanager delivers its `webhook_config`
+notifications to the receiver with that credential as a bearer token, and each
+notification is one run, `created_via = 'alertmanager'`, carrying the
+notification's firing alerts that no earlier run is still handling. `run` is
+the same snake_case template a schedule stores, checked by admission's rules
+when the receiver is saved; its prompt is the operator's instruction, and the
+alerts are appended to it at admission. The credential (`hla_…`) is minted by
+the backend, returned once by create and by rotate-token, and only its sha256
+is stored (`alert_receivers_token_key` keeps two receivers from sharing one).
+
+**`alert_fingerprints.suppressed_until` is the throttle's fence, and it is
+advanced only inside `InsertRun`.** An alert's identity is Alertmanager's
+`fingerprint` (a hash of its full label set). App reads which of a
+notification's alerts are suppressed (`suppressed_until > now()`, no lock),
+admits a run for the rest, and in the run's own transaction, after the run row
+is written, `linkAlertFire` runs
+
+```sql
+INSERT INTO alert_fingerprints AS f (receiver_id, fingerprint, alertname, suppressed_until, run_id, …)
+SELECT $receiver, fp, an, now() + make_interval(secs => $window), $run, now(), now()
+FROM unnest($fingerprints, $alertnames) AS t(fp, an) ORDER BY fp
+ON CONFLICT (receiver_id, fingerprint) DO UPDATE SET suppressed_until = EXCLUDED.suppressed_until, …
+WHERE f.suppressed_until <= now()
+RETURNING f.fingerprint
+```
+
+Any fingerprint the statement does not return was claimed by another run since
+app read it, and the whole insert rolls back with `AlertSettledError` naming
+them; app drops them and admits again with the rest, at most ten times, each
+time with strictly fewer alerts. In READ COMMITTED the conflicting statement
+waits for the other transaction and re-evaluates the `WHERE` against what it
+committed, so N replicas and Alertmanager's HA peers delivering one group admit
+one run per alert per window without a leader. Rows are claimed in fingerprint
+order, so overlapping deliveries cannot deadlock. `now()` is the transaction's:
+the fence compares database times only. A window of 0 writes `suppressed_until
+= now()`, which suppresses nothing and keeps the bookkeeping. The same
+transaction writes the `alert_deliveries` row and the receiver's `last_*`
+columns, so a run never commits without its claim and its record.
+
+**Never write `suppressed_until` from another path.** Two paths delete rows:
+the operator's "clear suppression", which can only cause an extra run, and
+retention, which deletes rows that stopped suppressing more than seven days
+ago. The `suppressed` counter is bookkeeping for the UI, incremented outside
+the fence with the rows locked in the same fingerprint order.
+
+**`alert_deliveries` is what arrived and what was done about it**: one row per
+notification, with `outcome` `submitted`, `throttled` (every firing alert was
+suppressed), `resolved` (no firing alert) or `refused` (admission refused the
+template, with the reason). Only a submitted delivery carries a run, and a
+CHECK says so. Retention deletes rows older than fourteen days, in batches;
+the table's peak size is bounded by the delivery rate, which is why a plain
+`DELETE` is the right tool here and not the partition drop run notes need.
+
+**`runs.alert_receiver_id`** links a run to the receiver whose notification
+started it. Like `schedule_id` it is not frozen by `runs_guard`, so deleting a
+receiver keeps its runs and clears the link; deleting a receiver deletes its
+throttle rows and delivery log with it. Every `run_id` column that points at
+`runs` from these tables is `ON DELETE SET NULL` and indexed, because run
+retention deletes runs in batches. Deleting a run does not lift the
+suppression its alerts claimed: the window is a fact about time, not about the
+run.
+
 ### Resource locks and deferred runs
 
 **A lock is a registration, not a lock manager** (0015). `resource_locks` holds
@@ -928,6 +993,10 @@ real PostgreSQL — generated columns, domains, partial indexes,
 - [x] deleting a run deletes the chat trigger linked to it
 - [x] `created_via` accepts `mattermost`
 - [x] a Slack message is claimed under its own platform, and an unknown platform is refused
+- [x] `created_via` accepts `alertmanager`
+- [x] an alert receiver's window defaults to an hour and is bounded to a week; a name is taken once; a fingerprint is lower-case hex
+- [x] only a submitted alert delivery carries a run
+- [x] deleting an alert receiver keeps its runs, clears their `alert_receiver_id`, and takes its throttle rows and delivery log; deleting a run clears every alert reference to it and keeps the suppression it claimed
 - [x] a status that becomes terminal deletes the run's locks in the same statement, and a rollback keeps them
 - [x] a requested cancellation and `Unknown` keep the locks; a new attempt after a terminal one does not bring them back and can set them again
 - [x] deleting a run deletes its locks and its deferred runs
@@ -976,6 +1045,17 @@ The note statements are store and `app` together, so they are exercised in
 - [x] a drop blocked by a reader gives up after its lock timeout and succeeds on the next pass
 - [x] four replicas maintaining at once create each partition once
 - [x] a write that meets a missing partition creates it
+
+The alert receiver claim is store and `app` together, so it is exercised in
+[test/backend](../../test/backend) (`alerts_test.go`), through the public
+listener as Alertmanager would deliver:
+
+- [x] a firing notification starts one run under the receiver's role, with the alerts in a delimited block after the operator's instruction
+- [x] the same alert inside the window is throttled with no second run; a group that gains an alert runs again for the new alert only
+- [x] eight concurrent deliveries of one group start one run; twelve concurrent overlapping deliveries carry each alert in exactly one run, with no deadlock
+- [x] a zero window suppresses nothing; an expired window lets the next delivery run; clearing a suppression lets the next delivery run
+- [x] no, a wrong, another receiver's, a rotated-away or a platform credential, and an unknown receiver, are all 401; a disabled receiver is 404; an unreadable payload is 400; a notification admission refuses is recorded and answered 200
+- [x] receivers are managed with `admin`, read with `runs:read`, never show the credential when read, and are refused to a run's own token
 
 The Slack adapter is exercised end to end in the same suite
 (`slack_test.go`), against a fake workspace:

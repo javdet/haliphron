@@ -81,6 +81,13 @@ type NewRun struct {
 	// waiting, and the insert is rolled back with ErrDeferredSettled if the
 	// fence is lost.
 	DeferredID runv1.ULID
+
+	// AlertReceiverID is the alert receiver whose notification the run was
+	// admitted for, and AlertFire the alerts it claims: they are claimed in
+	// the same transaction, and the insert is rolled back with
+	// AlertSettledError if another run claimed any of them first.
+	AlertReceiverID runv1.ULID
+	AlertFire       *AlertFire
 }
 
 // ErrTooManyChildren is a child run refused because its parent has already
@@ -105,7 +112,8 @@ var ErrTooManyChildren = errors.New("store: the parent run has started its full 
 // A scheduled fire advances its schedule here too, and for the same reason
 // again: a fire whose run committed without the advance would be fired a
 // second time by the next replica to look. A deferred run's fire marks its row
-// submitted here, for that reason once more.
+// submitted here, for that reason once more, and a run admitted for an
+// Alertmanager notification claims its alerts' throttle windows here.
 //
 // The run's lineage — its ancestors, root first — is written here and nowhere
 // else, from the parent row in the insert statement itself. It is what run
@@ -123,11 +131,17 @@ func (s *Store) InsertRun(ctx context.Context, r NewRun) error {
 			}
 		}
 		if err := insertRun(ctx, tx, r); err != nil {
-			if r.ScheduleID != "" && isForeignKeyViolation(err) {
-				// "Run now" on a schedule deleted under it.
+			if (r.ScheduleID != "" || r.AlertReceiverID != "") && isForeignKeyViolation(err) {
+				// "Run now" on a schedule deleted under it, or a
+				// notification for a receiver deleted under it.
 				return ErrNotFound
 			}
 			return err
+		}
+		if r.AlertFire != nil {
+			if err := linkAlertFire(ctx, tx, r.AlertReceiverID, r.ID, *r.AlertFire); err != nil {
+				return err
+			}
 		}
 		if r.ScheduleFire != nil {
 			if err := recordScheduleRun(ctx, tx, r.ScheduleID, r.ID); err != nil {
@@ -182,16 +196,18 @@ func insertRun(ctx context.Context, tx *sql.Tx, r NewRun) error {
 		INSERT INTO runs (id, parent_run_id, depth, created_by, created_via, priority,
 		                  spec, prompt, prompt_sha256, agent, model, role_name,
 		                  repo_url, repo_provider, base_branch, target_branch,
-		                  timeout_seconds, max_cost_usd, cluster_id, schedule_id, status, lineage)
+		                  timeout_seconds, max_cost_usd, cluster_id, schedule_id, alert_receiver_id,
+		                  status, lineage)
 		VALUES ($1, $2, $3, $4, $5, $6, $7::jsonb, $8, $9, $10, $11, $12,
-		        $13, $14, $15, $16, $17, $18::numeric, $19, $20, 'Queued',
+		        $13, $14, $15, $16, $17, $18::numeric, $19, $20, $22, 'Queued',
 		        coalesce((SELECT (p.lineage::text[] || p.id::text)::ulid[]
 		                  FROM runs p WHERE p.id = $21), '{}'))`,
 		r.ID, nullString(string(r.ParentRunID)), r.Depth, r.CreatedBy, r.CreatedVia, r.Priority,
 		[]byte(r.Spec), r.Prompt, r.PromptSHA256, string(r.Agent), r.Model, nullString(r.Role),
 		nullString(r.RepoURL), string(provider), nullString(r.BaseBranch), nullString(r.TargetBranch),
 		r.TimeoutSeconds, nullString(string(r.MaxCostUSD)), nullString(string(r.ClusterID)),
-		nullString(string(r.ScheduleID)), nullString(string(r.ParentRunID)))
+		nullString(string(r.ScheduleID)), nullString(string(r.ParentRunID)),
+		nullString(string(r.AlertReceiverID)))
 	if err != nil {
 		return fmt.Errorf("store: insert run %s: %w", r.ID, err)
 	}
@@ -208,6 +224,8 @@ type Run struct {
 	CreatedVia string
 	Priority   int32
 	ScheduleID runv1.ULID
+	// AlertReceiverID is the alert receiver whose notification started the run.
+	AlertReceiverID runv1.ULID
 
 	Spec         json.RawMessage
 	PromptSHA256 []byte
@@ -278,7 +296,7 @@ func (r Run) ReportedStatus() string {
 
 const runColumns = `
 	SELECT id, parent_run_id, depth, created_by, created_via, priority, schedule_id,
-	       spec, prompt_sha256, agent, model, role_name,
+	       alert_receiver_id, spec, prompt_sha256, agent, model, role_name,
 	       repo_url, repo_provider, base_branch, target_branch,
 	       timeout_seconds, max_cost_usd,
 	       cluster_id, lease_epoch, attempt, ack_deadline, lease_deadline,
@@ -306,8 +324,10 @@ type RunFilter struct {
 	Cluster  runv1.ULID
 	Parent   runv1.ULID
 	Schedule runv1.ULID
-	Query    string
-	Limit    int
+	// AlertReceiver is the receiver whose notifications started the runs.
+	AlertReceiver runv1.ULID
+	Query         string
+	Limit         int
 	// Before pages backwards through identifiers. ULIDs sort by mint time, so
 	// a cursor is the last id of the previous page and needs no sort key of
 	// its own.
@@ -353,6 +373,9 @@ func (s *Store) ListRuns(ctx context.Context, f RunFilter) ([]Run, error) {
 	}
 	if f.Schedule != "" {
 		add("schedule_id = $%d", string(f.Schedule))
+	}
+	if f.AlertReceiver != "" {
+		add("alert_receiver_id = $%d", string(f.AlertReceiver))
 	}
 	if f.Before != "" {
 		add("id < $%d", string(f.Before))
@@ -767,6 +790,7 @@ func scanRun(row rowScanner) (Run, error) {
 		r          Run
 		parent     sql.NullString
 		schedule   sql.NullString
+		alertRecv  sql.NullString
 		role       sql.NullString
 		repoURL    sql.NullString
 		baseBranch sql.NullString
@@ -793,7 +817,7 @@ func scanRun(row rowScanner) (Run, error) {
 		finishedAt sql.NullTime
 	)
 	err := row.Scan(&r.ID, &parent, &r.Depth, &r.CreatedBy, &r.CreatedVia, &r.Priority, &schedule,
-		&r.Spec, &r.PromptSHA256, &r.Agent, &r.Model, &role,
+		&alertRecv, &r.Spec, &r.PromptSHA256, &r.Agent, &r.Model, &role,
 		&repoURL, &r.RepoProvider, &baseBranch, &target,
 		&r.TimeoutSeconds, &maxCost,
 		&cluster, &r.Epoch, &r.Attempt, &ackAt, &leaseAt,
@@ -811,6 +835,7 @@ func scanRun(row rowScanner) (Run, error) {
 
 	r.ParentRunID = runv1.ULID(parent.String)
 	r.ScheduleID = runv1.ULID(schedule.String)
+	r.AlertReceiverID = runv1.ULID(alertRecv.String)
 	r.Role = role.String
 	r.RepoURL = repoURL.String
 	r.BaseBranch = baseBranch.String

@@ -81,6 +81,8 @@ export interface Run {
   depth: number
   /** The schedule that fired it, or that an operator ran now. */
   schedule_id?: string
+  /** The alert receiver whose Alertmanager notification started it. */
+  alert_receiver_id?: string
 
   created_by: string
   created_via: string
@@ -165,6 +167,74 @@ export interface ScheduleRequest {
   /** On a PATCH, 0 clears the deadline. */
   starting_deadline_seconds?: number
   run: RunTemplate
+}
+
+/** What an Alertmanager notification did. */
+export type AlertOutcome = 'submitted' | 'throttled' | 'resolved' | 'refused'
+
+/** An Alertmanager webhook receiver: what a notification starts, and the throttle. */
+export interface AlertReceiver {
+  id: string
+  name: string
+  description: string
+  enabled: boolean
+
+  /** The template every notification submits; its prompt is the instruction the alerts are appended to. */
+  run: RunTemplate
+  /** How long an alert that started a run is suppressed. 0: never. */
+  throttle_seconds: number
+  /** Where Alertmanager delivers, relative to the API's origin. */
+  webhook_path: string
+
+  last_received_at?: string
+  last_outcome?: AlertOutcome
+  last_run_id?: string
+  last_error?: string
+
+  created_by: string
+  created_at: string
+  updated_by: string
+  updated_at: string
+}
+
+/** Create and rotate-token answer with the credential, once. */
+export interface AlertReceiverWithToken extends AlertReceiver {
+  token: string
+}
+
+export interface AlertReceiverRequest {
+  name: string
+  description?: string
+  enabled?: boolean
+  throttle_seconds?: number
+  run: RunTemplate
+}
+
+export interface AlertDelivery {
+  id: string
+  received_at: string
+  group_key: string
+  status: 'firing' | 'resolved'
+  firing: number
+  resolved: number
+  /** Fingerprints left out because an earlier run still suppressed them. */
+  throttled: string[]
+  outcome: AlertOutcome
+  run_id?: string
+  error?: string
+}
+
+export interface AlertSuppression {
+  fingerprint: string
+  alertname: string
+  suppressed_until: string
+  run_id?: string
+  first_run_at: string
+  last_run_at: string
+  /** Runs this alert has started. */
+  runs: number
+  /** Deliveries of it that were suppressed. */
+  suppressed: number
 }
 
 export interface Attempt {

@@ -7,6 +7,34 @@ of `VERSION`, and it is the tag of the published images.
 
 ### Added
 
+- **Alertmanager webhooks.** An alert receiver turns each Prometheus
+  Alertmanager notification into a run under a role the operator chose, with
+  the notification's firing alerts appended to the operator's instruction as
+  delimited data. The receiver is managed under **Alerts** in the UI or at
+  `/api/v1/alert-receivers` with an `admin` token. See
+  [Route Alertmanager alerts to agents](docs/how-to/route-alertmanager-alerts.md).
+  - **Throttling.** An alert that started a run is ignored for the receiver's
+    window, one hour by default, at most a week, `0` for never. The alert is
+    identified by its Alertmanager fingerprint. A group that gains an alert
+    runs again for the new alert only. The claim is made inside the run's
+    insert, so concurrent deliveries from several replicas and Alertmanager's
+    HA peers start one run per alert per window.
+  - **Credential.** Each receiver has its own `hla_…` credential, presented by
+    Alertmanager as a bearer token. It is shown once at create and rotate, and
+    only its digest is stored. It starts runs on that receiver's template and
+    nothing else.
+  - **Answers.** Every handled notification is a `200` with its outcome:
+    `submitted`, `throttled`, `resolved` or `refused`. A notification that
+    admission refuses is recorded on the receiver, not retried. A store
+    failure is a `503`, which Alertmanager retries.
+  - **History.** The receiver's page shows its deliveries of the last 14 days,
+    the alerts suppressed now (each can be cleared), and its runs. New metrics:
+    `haliphron_alert_receivers`, `haliphron_alert_suppressions` and
+    `haliphron_alert_deliveries_24h`.
+  - **Migration 0019** adds `alert_receivers`, `alert_fingerprints`,
+    `alert_deliveries` and `runs.alert_receiver_id`, and adds `alertmanager`
+    to `created_via`.
+
 - **Run notes.** A run can write down what it learned, and the runs it starts
   can read it instead of learning it again. There are four MCP tools for a
   run's own token: `put_note`, `get_note`, `list_notes` and `delete_note`.

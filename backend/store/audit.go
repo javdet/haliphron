@@ -49,6 +49,13 @@ const (
 	AuditScheduleDeleted   = "schedule.deleted"
 	AuditScheduleTriggered = "schedule.triggered"
 
+	AuditAlertReceiverCreated      = "alert_receiver.created"
+	AuditAlertReceiverUpdated      = "alert_receiver.updated"
+	AuditAlertReceiverDeleted      = "alert_receiver.deleted"
+	AuditAlertReceiverTokenRotated = "alert_receiver.token_rotated"
+	AuditAlertSuppressionCleared   = "alert_receiver.suppression_cleared"
+	AuditAlertReceiverFired        = "alert_receiver.fired"
+
 	AuditLockSet        = "lock.set"
 	AuditLockUnset      = "lock.unset"
 	AuditLockForceUnset = "lock.force_unset"

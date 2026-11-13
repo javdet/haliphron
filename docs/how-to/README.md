@@ -42,6 +42,9 @@ What callers do, whether that caller is a person, a script or another agent.
 - [Connect a Slack bot](connect-a-slack-bot.md) — mentions of a Slack app
   become runs routed by the classificator, with the whole thread as context,
   answered in the thread.
+- [Route Alertmanager alerts to agents](route-alertmanager-alerts.md) — each
+  Prometheus Alertmanager notification starts a run under one role, and the
+  same alert is throttled for a window.
 
 ## When something has gone wrong
 
