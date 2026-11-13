@@ -82,6 +82,52 @@ func (s *Store) ClaimChatTrigger(ctx context.Context, t ChatTrigger, orphanAfter
 	return n == 1, nil
 }
 
+// ReleaseChatTrigger deletes a claim its handler decided was not a request
+// after all: a message in a listening thread that turned out, on reading the
+// thread, to be a conversation between people. It touches only a row with no
+// answer yet, so it can never take back a run or a refusal. Without it the
+// reply loop would take the claim for an abandoned one and post "mention me
+// again" under a message that never asked for anything.
+func (s *Store) ReleaseChatTrigger(ctx context.Context, k ChatTriggerKey) error {
+	if _, err := s.db.ExecContext(ctx, `
+		DELETE FROM chat_triggers
+		 WHERE platform = $1 AND message_id = $2
+		   AND run_id IS NULL AND refusal IS NULL
+		   AND replied_at IS NULL AND abandoned_at IS NULL`,
+		k.Platform, k.MessageID); err != nil {
+		return fmt.Errorf("store: release chat message %s: %w", k.MessageID, err)
+	}
+	return nil
+}
+
+// ChatThreadListening reports whether a thread may be talked to without a
+// mention by the given user: the bot acted on a message in it, or answered
+// one, within the window, and every message it acted on there was that user's.
+//
+// It is the cheap first half of the rule, read before anything is claimed.
+// This table holds only the messages that were requests, so a second person
+// who never addressed the bot is invisible here; the caller reads the thread
+// itself for that.
+func (s *Store) ChatThreadListening(ctx context.Context, platform, threadID, userID string,
+	window time.Duration) (bool, error) {
+
+	if window <= 0 || threadID == "" {
+		return false, nil
+	}
+	var listening bool
+	err := s.db.QueryRowContext(ctx, `
+		SELECT coalesce(bool_and(user_id = $3), false)
+		       AND coalesce(max(greatest(claimed_at, replied_at)), '-infinity')
+		           > now() - make_interval(secs => $4)
+		  FROM chat_triggers
+		 WHERE platform = $1 AND thread_id = $2`,
+		platform, threadID, userID, window.Seconds()).Scan(&listening)
+	if err != nil {
+		return false, fmt.Errorf("store: read chat thread %s: %w", threadID, err)
+	}
+	return listening, nil
+}
+
 // linkChatTrigger attaches a run to its message inside the run's own insert.
 func linkChatTrigger(ctx context.Context, tx *sql.Tx, k ChatTriggerKey, id runv1.ULID) error {
 	res, err := tx.ExecContext(ctx, `

@@ -530,6 +530,8 @@ export interface ChatIntegration {
   base_branch: string
   max_post_runes: number
   max_thread_bytes: number
+  /** How long a thread keeps listening without a mention while one person talks to the bot. 0 is never. */
+  thread_window_minutes: number
   bot_token_configured: boolean
   webhook_token_configured: boolean
   /** Slack's app-level token, which opens its Socket Mode connection. */
@@ -552,6 +554,8 @@ export interface ChatIntegrationRequest {
   base_branch: string
   max_post_runes: number
   max_thread_bytes: number
+  /** Absent is the default, 240. */
+  thread_window_minutes?: number
   /** Absent keeps the stored token. */
   bot_token?: string
   /** One per line. Absent keeps the stored tokens. */

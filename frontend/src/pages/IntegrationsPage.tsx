@@ -36,6 +36,7 @@ interface FormState {
   baseBranch: string
   maxPostRunes: string
   maxThreadBytes: string
+  threadWindowMinutes: string
   botToken: string
   webhookTokens: string
   appToken: string
@@ -53,6 +54,7 @@ function fromIntegration(c: ChatIntegration): FormState {
     baseBranch: c.base_branch,
     maxPostRunes: String(c.max_post_runes || DEFAULT_POST_RUNES[c.platform]),
     maxThreadBytes: String(c.max_thread_bytes ?? 65536),
+    threadWindowMinutes: String(c.thread_window_minutes ?? 240),
     botToken: '',
     webhookTokens: '',
     appToken: '',
@@ -70,6 +72,8 @@ function toRequest(form: FormState, platform: ChatPlatform) {
     base_branch: form.baseBranch.trim(),
     max_post_runes: Number(form.maxPostRunes) || DEFAULT_POST_RUNES[platform],
     max_thread_bytes: Number(form.maxThreadBytes) || 0,
+    // Empty is the server's default; 0 is a choice, never.
+    ...(form.threadWindowMinutes.trim() ? { thread_window_minutes: Number(form.threadWindowMinutes) } : {}),
     ...(form.botToken.trim() ? { bot_token: form.botToken.trim() } : {}),
     ...(form.webhookTokens.trim() ? { webhook_tokens: form.webhookTokens.trim() } : {}),
     ...(form.appToken.trim() ? { app_token: form.appToken.trim() } : {}),
@@ -363,6 +367,19 @@ function AdvancedSection({ form, set, postRunesHint }: { form: FormState; set: S
             value={form.maxThreadBytes}
             inputMode="numeric"
             onChange={(e) => set({ maxThreadBytes: e.target.value.replace(/[^0-9]/g, '') })}
+          />
+        </Field>
+      </div>
+      <div className="grid-2">
+        <Field
+          label="Thread listening (minutes)"
+          hint="After the bot is asked in a thread, the person talking to it can go on without a mention for this long after the last exchange, until someone else posts in the thread. 0 always needs a mention."
+        >
+          <input
+            value={form.threadWindowMinutes}
+            inputMode="numeric"
+            placeholder="240"
+            onChange={(e) => set({ threadWindowMinutes: e.target.value.replace(/[^0-9]/g, '') })}
           />
         </Field>
       </div>

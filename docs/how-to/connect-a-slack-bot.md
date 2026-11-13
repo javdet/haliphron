@@ -82,9 +82,19 @@ works. It needs egress to `slack.com` and `wss-*.slack.com`.
        bot_events:
          - app_mention
          - message.im
+         - message.channels
+         - message.groups
+         - message.mpim
      socket_mode_enabled: true
      token_rotation_enabled: false
    ```
+
+   The `message.channels`, `message.groups` and `message.mpim` events send
+   the app every message in its channels, which is what lets a person go on
+   talking to it in a thread without a mention (see
+   [a thread keeps listening](#a-thread-keeps-listening)). Leave them out and
+   the app sees mentions and direct messages only. The backend acts on nothing
+   else they carry.
 
    The `*:history` scopes let the bot read a thread before it acts. The
    `*:read` and `users:read` scopes let it name the channel and the sender in
@@ -104,6 +114,19 @@ works. It needs egress to `slack.com` and `wss-*.slack.com`.
 
 Direct messages to the app need no invitation and no mention. Every message
 in the app's Messages tab is a request.
+
+### A thread keeps listening
+
+Once the app has been asked in a thread, the person talking to it can go on
+there without mentioning it, for **Thread listening** minutes (240 by default)
+after the last message the app acted on or answered. Each such message extends
+the window, and when it passes in silence the app needs a mention again. It
+lasts only while that person is the thread's only human: from the moment anyone
+else posts in the thread, root included, every message needs a mention, and so
+does a message that names someone else (`@bob`, `@here`, a user group). Posts by
+apps and incoming webhooks do not count as a second person. Every message the
+app takes is a run of its own, and a second may start while the first is still
+working. `0` switches it off.
 
 ## Configure it in the UI
 

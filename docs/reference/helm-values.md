@@ -210,6 +210,7 @@ timeout below it.
 | `mattermost.existingSecretKey` | `token` | |
 | `mattermost.maxPostRunes` | `16383` | |
 | `mattermost.maxThreadBytes` | `65536` | |
+| `mattermost.threadWindowMinutes` | `240` | how long a thread keeps listening without a mention; `0` is never |
 | `mattermost.transport` | `websocket` | `websocket`, `webhook` or `both` |
 | `mattermost.webhookToken` | `""` | the outgoing webhooks' tokens, one per line; written to the credentials Secret |
 | `mattermost.existingSecretWebhookKey` | `webhookToken` | the key of `mattermost.existingSecret` holding the webhook tokens |
@@ -247,6 +248,7 @@ traffic admitted by `networkPolicy.ingressFrom` for the webhook.
 | `slack.existingSecretAppTokenKey` | `appToken` | |
 | `slack.maxPostRunes` | `4000` | |
 | `slack.maxThreadBytes` | `65536` | |
+| `slack.threadWindowMinutes` | `240` | how long a thread keeps listening without a mention; `0` is never |
 
 As with Mattermost, the UI (Integrations → Slack) is the other way to configure
 the bot, and is read-only while `slack.enabled` is on. Either

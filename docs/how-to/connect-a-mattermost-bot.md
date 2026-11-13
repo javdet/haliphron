@@ -368,8 +368,23 @@ and in `GET /api/v1/runs` with `created_via` `mattermost` and `created_by`
   the run's page.
 - **What is not a request.** The bot ignores its own posts, other bots,
   webhooks, system messages and edits. Over the WebSocket, in a channel, it
-  also ignores any message that does not mention it. A webhook delivery is
-  addressed to the bot by construction.
+  also ignores any message that does not mention it, except in a listening
+  thread (below). A webhook delivery is addressed to the bot by construction.
+- **A thread keeps listening.** Once the bot has been asked in a thread, the
+  person talking to it can go on there without mentioning it, for
+  `thread_window_minutes` (240 by default) after the last message the bot
+  acted on or answered. Each such message extends the window; when it passes
+  in silence, the bot needs a mention again. It lasts only while that person
+  is the thread's only human: from the moment anyone else posts in the thread,
+  root included, every message needs a mention, and so does a message that
+  names someone else (`@bob`, `@here`). Posts by bots and incoming webhooks do
+  not count as a second person, so a thread under an alert listens. Every
+  message the bot takes is a run of its own, and a second one may start while
+  the first is still working. Nothing is subscribed or stored for this: the
+  bot works it out from the messages it has already acted on and from the
+  thread. It needs the WebSocket transport. An outgoing webhook fires only on
+  its trigger word, so a reply without one never reaches the backend. `0`
+  switches it off.
 - **Mentions in the result.** `@channel`, `@here` and every other `@` in the
   agent's text are defused before posting. The agent read a repository that
   may have been written to manipulate it, and its answer must not be able to

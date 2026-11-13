@@ -133,3 +133,24 @@ func TestOnlyALeadingMentionIsRemovedAndALongerNameIsNotTheBot(t *testing.T) {
 		}
 	}
 }
+
+func TestAMessageNamingAnyoneButTheBotNamesOthers(t *testing.T) {
+	for text, want := range map[string]bool{
+		"restart the ingress":              false,
+		"@devops_duty restart the ingress": false,
+		"@Devops_Duty, and staging?":       false,
+		"thanks @devops_duty.":             false,
+		"@bob can you check?":              true,
+		"@devops_duty and @bob, look":      true,
+		"@here deploy is stuck":            true,
+		"@channel heads up":                true,
+		"@sre-team please look":            true,
+		"mail ops@example.com about it":    false,
+		"@devops_duty_backup is another":   true,
+		"a lone @ sign":                    false,
+	} {
+		if got := namesOthers(text, "devops_duty"); got != want {
+			t.Errorf("namesOthers(%q) = %v, want %v", text, got, want)
+		}
+	}
+}

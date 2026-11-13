@@ -111,6 +111,9 @@ type SlackConfig struct {
 
 	MaxPostRunes   int
 	MaxThreadBytes int
+	// ThreadWindowMinutes is how long a thread keeps listening without a
+	// mention; 0 is never.
+	ThreadWindowMinutes int
 }
 
 // Enabled reports whether the bot is configured.
@@ -145,6 +148,9 @@ type MattermostConfig struct {
 
 	MaxPostRunes   int
 	MaxThreadBytes int
+	// ThreadWindowMinutes is how long a thread keeps listening without a
+	// mention; 0 is never.
+	ThreadWindowMinutes int
 
 	// Transport is websocket, webhook or both. WebhookTokens are the outgoing
 	// webhooks' tokens, read from a file like the bot's own.
@@ -324,7 +330,9 @@ func Load() (Config, error) {
 			BaseBranch:     os.Getenv("HALIPHRON_MATTERMOST_BASE_BRANCH"),
 			MaxPostRunes:   intEnv("HALIPHRON_MATTERMOST_MAX_POST_RUNES", app.DefaultChatPostRunes),
 			MaxThreadBytes: intEnv("HALIPHRON_MATTERMOST_MAX_THREAD_BYTES", app.DefaultChatThreadBytes),
-			Transport:      env("HALIPHRON_MATTERMOST_TRANSPORT", store.ChatTransportWebSocket),
+			ThreadWindowMinutes: intEnv("HALIPHRON_MATTERMOST_THREAD_WINDOW_MINUTES",
+				app.DefaultChatThreadWindowMinutes),
+			Transport: env("HALIPHRON_MATTERMOST_TRANSPORT", store.ChatTransportWebSocket),
 		},
 
 		Slack: SlackConfig{
@@ -335,6 +343,8 @@ func Load() (Config, error) {
 			BaseBranch:     os.Getenv("HALIPHRON_SLACK_BASE_BRANCH"),
 			MaxPostRunes:   intEnv("HALIPHRON_SLACK_MAX_POST_RUNES", app.DefaultSlackPostRunes),
 			MaxThreadBytes: intEnv("HALIPHRON_SLACK_MAX_THREAD_BYTES", app.DefaultChatThreadBytes),
+			ThreadWindowMinutes: intEnv("HALIPHRON_SLACK_THREAD_WINDOW_MINUTES",
+				app.DefaultChatThreadWindowMinutes),
 		},
 	}
 
@@ -569,6 +579,10 @@ func (m MattermostConfig) validate() error {
 	if m.MaxThreadBytes < 0 {
 		return fmt.Errorf("config: HALIPHRON_MATTERMOST_MAX_THREAD_BYTES cannot be negative")
 	}
+	if m.ThreadWindowMinutes < 0 || m.ThreadWindowMinutes > app.MaxChatThreadWindowMinutes {
+		return fmt.Errorf("config: HALIPHRON_MATTERMOST_THREAD_WINDOW_MINUTES is %d; it is between 0 and %d",
+			m.ThreadWindowMinutes, app.MaxChatThreadWindowMinutes)
+	}
 	return nil
 }
 
@@ -601,6 +615,10 @@ func (s SlackConfig) validate() error {
 	}
 	if s.MaxThreadBytes < 0 {
 		return fmt.Errorf("config: HALIPHRON_SLACK_MAX_THREAD_BYTES cannot be negative")
+	}
+	if s.ThreadWindowMinutes < 0 || s.ThreadWindowMinutes > app.MaxChatThreadWindowMinutes {
+		return fmt.Errorf("config: HALIPHRON_SLACK_THREAD_WINDOW_MINUTES is %d; it is between 0 and %d",
+			s.ThreadWindowMinutes, app.MaxChatThreadWindowMinutes)
 	}
 	return nil
 }

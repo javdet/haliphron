@@ -285,6 +285,7 @@ func (c *Client) Thread(ctx context.Context, rootID string) ([]app.ChatThreadPos
 		fromSelf := isSelf(m, self)
 		p := app.ChatThreadPost{
 			ID:        postID(ch, m.TS),
+			UserID:    m.User,
 			Text:      unescape(m.Text),
 			CreatedAt: parseTS(m.TS),
 			FromSelf:  fromSelf,

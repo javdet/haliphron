@@ -30,6 +30,13 @@ import (
 // which role it runs as, what the reply says — is made here, so a second
 // platform answers by the same rules as the first.
 //
+// A thread keeps listening for a while. Once the bot has acted on a message
+// in a thread, further messages there need no mention for as long as one
+// person is talking to it: within ChatConfig.ThreadWindow of the last message
+// it acted on or answered, and while no other human has posted in the thread.
+// A second person in the thread, or a message naming someone else, means the
+// conversation is between people, and the bot waits to be named again.
+//
 // Two properties shape the code.
 //
 // Every replica sees every message. Each holds its own connection as the bot,
@@ -82,6 +89,9 @@ type ChatMessage struct {
 	Direct bool
 	// MentionsBot is the bot named in the message.
 	MentionsBot bool
+	// MentionsOthers is someone other than the bot named in the message: a
+	// person, a group, or the whole channel.
+	MentionsOthers bool
 	// FromSelf is the bot's own post, echoed back by the server.
 	FromSelf bool
 	// FromBot and FromWebhook are posts by other automation.
@@ -93,13 +103,17 @@ type ChatMessage struct {
 
 // ChatThreadPost is one post of a thread, as context for a prompt.
 type ChatThreadPost struct {
-	ID        string
+	ID string
+	// UserID is the author's account, which is what tells two people apart
+	// when a name could not be read.
+	UserID    string
 	Username  string
 	Text      string
 	CreatedAt time.Time
 	FromSelf  bool
-	// FromBot is a post by any bot account. Kind is the kind this process gave
-	// its own post, empty for every other.
+	// FromBot is a post by any bot account or other automation, an incoming
+	// webhook included. Kind is the kind this process gave its own post, empty
+	// for every other.
 	FromBot bool
 	Kind    string
 	System  bool
@@ -131,6 +145,10 @@ type ChatConfig struct {
 	BaseBranch string
 	// MaxThreadBytes bounds the thread history quoted into a prompt.
 	MaxThreadBytes int
+	// ThreadWindow is how long a thread keeps listening without a mention
+	// after the bot last acted on a message in it or answered one. Zero is
+	// never: every message needs a mention.
+	ThreadWindow time.Duration
 }
 
 // ChatOutcome is what Handle did with a message.
@@ -217,6 +235,15 @@ func (s *Service) NewChat(p ChatPlatform, cfg ChatConfig) *Chat {
 // installation does not say.
 const DefaultChatThreadBytes = 64 << 10
 
+const (
+	// DefaultChatThreadWindowMinutes is how long a thread keeps listening
+	// without a mention when the installation does not say: an afternoon's
+	// conversation, not a standing subscription.
+	DefaultChatThreadWindowMinutes = 4 * 60
+	// MaxChatThreadWindowMinutes is a week, the column's own bound.
+	MaxChatThreadWindowMinutes = 7 * 24 * 60
+)
+
 // CheckRole reports whether the configured role exists. A missing role is not
 // fatal — it can be created after the bot is enabled — but every mention until
 // then is refused, and an operator should hear that at startup rather than
@@ -231,11 +258,26 @@ func (c *Chat) CheckRole(ctx context.Context) error {
 
 // Handle acts on one message.
 func (c *Chat) Handle(ctx context.Context, m ChatMessage) (ChatOutcome, error) {
-	if !addressedToBot(m) {
+	addressed := addressedToBot(m)
+	if !addressed && !c.mayContinue(m) {
 		return ChatIgnored, nil
 	}
 	ctx, cancel := context.WithTimeout(ctx, chatHandleTimeout)
 	defer cancel()
+
+	if !addressed {
+		// Read on every replica, before the claim: it is one indexed query,
+		// and it keeps the claims — and the thread reads behind them — to the
+		// threads that can be listening at all.
+		listening, err := c.svc.store.ChatThreadListening(ctx, c.platform.Name(), m.RootID,
+			m.UserID, c.cfg.ThreadWindow)
+		if err != nil {
+			return 0, err
+		}
+		if !listening {
+			return ChatIgnored, nil
+		}
+	}
 
 	thread := m.RootID
 	if thread == "" {
@@ -260,7 +302,15 @@ func (c *Chat) Handle(ctx context.Context, m ChatMessage) (ChatOutcome, error) {
 
 	var history []ChatThreadPost
 	if m.RootID != "" {
-		if history, err = c.platform.Thread(ctx, m.RootID); err != nil {
+		if history, err = c.platform.Thread(ctx, m.RootID); err != nil && !addressed {
+			// The message did not name the bot, and without the thread there
+			// is no telling whether it was meant for it. Silence is the safe
+			// reading: a person who wanted the bot can name it.
+			c.log.Warn("could not read the thread of a message that did not name the bot",
+				"message", m.ID, "thread", m.RootID, "error", err)
+			return c.release(ctx, key)
+		}
+		if err != nil {
 			// Running without the thread would run a different request from
 			// the one asked: "now do the same for staging" means nothing on
 			// its own. The person is asked to try again instead.
@@ -268,6 +318,12 @@ func (c *Chat) Handle(ctx context.Context, m ChatMessage) (ChatOutcome, error) {
 				"message", m.ID, "thread", m.RootID, "error", err)
 			return c.refuse(ctx, key, "I could not read this thread, so I did not start a run. Mention me again to retry.")
 		}
+	}
+
+	// A message with no words of its own — a file, a sticker — is not taken as
+	// a request unless it names the bot.
+	if !addressed && (strings.TrimSpace(m.Text) == "" || !soleParticipant(history, m)) {
+		return c.release(ctx, key)
 	}
 
 	if strings.TrimSpace(m.Text) == "" && len(contextPosts(history, m)) == 0 {
@@ -306,6 +362,16 @@ func (c *Chat) Handle(ctx context.Context, m ChatMessage) (ChatOutcome, error) {
 		c.log.Warn("could not react to a chat message", "message", m.ID, "error", err)
 	}
 	return ChatStarted, nil
+}
+
+// release gives up the claim of a message that turned out not to be a request.
+func (c *Chat) release(ctx context.Context, key store.ChatTriggerKey) (ChatOutcome, error) {
+	ctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 10*time.Second)
+	defer cancel()
+	if err := c.svc.store.ReleaseChatTrigger(ctx, key); err != nil {
+		return 0, err
+	}
+	return ChatIgnored, nil
 }
 
 // refuse records a refusal and wakes the reply loop to post it. It is recorded
@@ -454,6 +520,35 @@ func addressedToBot(m ChatMessage) bool {
 		return false
 	}
 	return m.MentionsBot || m.Direct
+}
+
+// mayContinue is the part of the listening-thread rule that needs nothing but
+// the message: a person's reply inside a thread, naming nobody else, with the
+// behaviour switched on. Whether the thread is listening is the store's to say
+// and the thread's to confirm.
+func (c *Chat) mayContinue(m ChatMessage) bool {
+	if c.cfg.ThreadWindow <= 0 || m.RootID == "" || m.MentionsOthers {
+		return false
+	}
+	return !(m.FromSelf || m.FromBot || m.FromWebhook || m.System)
+}
+
+// soleParticipant reports whether the sender is the only person in the thread
+// up to their message: every post before it by a human, root included, is
+// theirs. Posts by the bot, by other automation and by the server do not
+// count. A post made after the message does not either: whether it was a
+// conversation with the bot is settled when it was sent, not by who replied a
+// second later.
+func soleParticipant(thread []ChatThreadPost, m ChatMessage) bool {
+	for _, p := range thread {
+		if p.ID == m.ID || p.CreatedAt.After(m.CreatedAt) || p.FromSelf || p.FromBot || p.System {
+			continue
+		}
+		if p.UserID == "" || p.UserID != m.UserID {
+			return false
+		}
+	}
+	return true
 }
 
 func chatActor(platform string, m ChatMessage) string {

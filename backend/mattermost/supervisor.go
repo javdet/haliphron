@@ -143,6 +143,7 @@ func (s *Supervisor) start(ctx context.Context, cfg app.ResolvedChatIntegration)
 		RepoURL:        cfg.RepoURL,
 		BaseBranch:     cfg.BaseBranch,
 		MaxThreadBytes: cfg.MaxThreadBytes,
+		ThreadWindow:   time.Duration(cfg.ThreadWindowMinutes) * time.Minute,
 	})
 	if err := chat.CheckRole(ctx); errors.Is(err, store.ErrNotFound) {
 		s.log.Warn("the Mattermost bot's role does not exist; every request is refused until it is created",

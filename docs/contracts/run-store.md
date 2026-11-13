@@ -577,6 +577,27 @@ existing 64-character bound. Slack's credentials are the managed secrets
 which only opens the Socket Mode connection). The down migration deletes Slack's
 rows before narrowing the constraints back.
 
+**A thread keeps listening for a while** (0016). In a channel, a message that
+does not name the bot is still a request when it is a person's reply in a
+thread that is listening. A thread is listening for a sender while two things
+hold. First, some row of `chat_triggers` with its `thread_id` was claimed, or
+replied to, within `chat_integrations.thread_window_minutes` (default 240, `0`
+never), measured from the later of `claimed_at` and `replied_at`. Second, every
+row in the thread carries the sender's `user_id`. That is one read over the
+`chat_triggers_thread` index (`ChatThreadListening`), done on every replica
+before the claim. It is only the first filter. The table holds only the
+messages that were requests, so a second person who never named the bot cannot
+be seen in it. After winning the claim, the handler reads the thread from the
+chat server, and the message stands only if no human but the sender posted in
+it, root included, up to the message. Posts by bots, incoming webhooks and the
+server do not count. A message naming anyone else is never taken this way.
+When the thread says no, or cannot be read, the handler deletes its own claim
+(`ReleaseChatTrigger`), which is conditional on the row having no answer, run or
+refusal. That is the one statement that removes an unanswered claim. Without
+it, the reply loop would take the claim for an orphan and post "mention me
+again" under a message that asked for nothing. Nothing is subscribed or
+expired: whether a thread listens is computed from rows that exist anyway.
+
 **A default role is seeded once.** The `classificator` role is inserted at
 startup by `INSERT … WHERE NOT EXISTS` over any row of that name, deleted ones
 included. A default an operator edits keeps the edits, one an operator deletes

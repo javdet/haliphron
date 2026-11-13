@@ -172,7 +172,7 @@ let modelCredential = { secret_name: 'llm-api-key', configured: false }
 let mattermost = {
   platform: 'mattermost', source: 'none', enabled: false, transport: 'websocket', url: '',
   role: 'classificator', repo: '', base_branch: '',
-  max_post_runes: 16383, max_thread_bytes: 65536, bot_token_configured: false,
+  max_post_runes: 16383, max_thread_bytes: 65536, thread_window_minutes: 240, bot_token_configured: false,
   webhook_token_configured: false, webhook_path: '/api/v1/integrations/mattermost/webhook',
   bot_token_secret: 'mattermost-bot-token', webhook_token_secret: 'mattermost-webhook-token',
   app_token_configured: false, app_token_secret: '',
@@ -180,7 +180,7 @@ let mattermost = {
 let slack = {
   platform: 'slack', source: 'none', enabled: false, transport: 'websocket', url: '',
   role: 'classificator', repo: '', base_branch: '',
-  max_post_runes: 4000, max_thread_bytes: 65536, bot_token_configured: false,
+  max_post_runes: 4000, max_thread_bytes: 65536, thread_window_minutes: 240, bot_token_configured: false,
   webhook_token_configured: false, app_token_configured: false, webhook_path: '',
   bot_token_secret: 'slack-bot-token', webhook_token_secret: '', app_token_secret: 'slack-app-token',
 }

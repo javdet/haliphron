@@ -218,6 +218,8 @@ encryption key is not even that: it is a file, because a variable is visible in
   value: {{ .Values.mattermost.maxPostRunes | quote }}
 - name: HALIPHRON_MATTERMOST_MAX_THREAD_BYTES
   value: {{ .Values.mattermost.maxThreadBytes | quote }}
+- name: HALIPHRON_MATTERMOST_THREAD_WINDOW_MINUTES
+  value: {{ .Values.mattermost.threadWindowMinutes | quote }}
 - name: HALIPHRON_MATTERMOST_TRANSPORT
   value: {{ .Values.mattermost.transport | quote }}
 {{- if (include "haliphron.mattermostWebhook" .) }}
@@ -254,6 +256,8 @@ encryption key is not even that: it is a file, because a variable is visible in
   value: {{ .Values.slack.maxPostRunes | quote }}
 - name: HALIPHRON_SLACK_MAX_THREAD_BYTES
   value: {{ .Values.slack.maxThreadBytes | quote }}
+- name: HALIPHRON_SLACK_THREAD_WINDOW_MINUTES
+  value: {{ .Values.slack.threadWindowMinutes | quote }}
 {{- end }}
 
 - name: HALIPHRON_SWEEP_INTERVAL

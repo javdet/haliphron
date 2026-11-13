@@ -187,13 +187,17 @@ func (c *Client) Thread(ctx context.Context, rootID string) ([]app.ChatThreadPos
 		kind, _ := p.Props["haliphron_kind"].(string)
 		out = append(out, app.ChatThreadPost{
 			ID:        p.ID,
+			UserID:    p.UserID,
 			Username:  names[p.UserID],
 			Text:      p.Message,
 			CreatedAt: time.UnixMilli(p.CreateAt),
 			FromSelf:  self.ID != "" && p.UserID == self.ID,
-			FromBot:   fromBot(p),
-			Kind:      kind,
-			System:    p.Type != "",
+			// An incoming webhook posts under the account of whoever created
+			// it; the post is still an alert or a pipeline talking, not that
+			// person.
+			FromBot: fromBot(p) || truthy(p.Props["from_webhook"]),
+			Kind:    kind,
+			System:  p.Type != "",
 		})
 	}
 	return out, nil

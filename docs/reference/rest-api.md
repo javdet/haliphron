@@ -834,6 +834,7 @@ Scope: `admin`. The configuration in force, without its tokens.
 | `base_branch` | string | |
 | `max_post_runes` | integer | the server's post length limit |
 | `max_thread_bytes` | integer | how much of a thread is quoted into a prompt |
+| `thread_window_minutes` | integer | how long a thread keeps listening without a mention while one person talks to the bot; `0` is never |
 | `bot_token_configured` | boolean | whether the bot's token is stored |
 | `webhook_token_configured` | boolean | whether at least one webhook token is stored |
 | `webhook_path` | string | `/api/v1/integrations/mattermost/webhook`, the callback path to give Mattermost |
@@ -849,8 +850,8 @@ The tokens are never returned.
 Scope: `admin`. Saves the configuration, and every API replica restarts the bot
 within 15 seconds.
 
-The body takes every field of the `GET` from `enabled` to `max_thread_bytes`,
-plus two write-only ones:
+The body takes every field of the `GET` from `enabled` to
+`thread_window_minutes`, plus two write-only ones:
 
 | Field | Type | Meaning |
 |---|---|---|
@@ -858,8 +859,10 @@ plus two write-only ones:
 | `webhook_tokens` | string | the outgoing webhooks' tokens, one per line (commas also separate); absent keeps the stored ones, a non-empty value replaces them all |
 
 Defaults: `transport` `websocket`, `role` `classificator`, `max_post_runes`
-`16383`. `url` must be an `http` or `https` address, `base_branch` needs `repo`,
-and `max_post_runes` is between 1000 and 65535. The `reply_policy` and `run_url`
+`16383`, `thread_window_minutes` `240` (absent is the default; `0` is a value).
+`url` must be an `http` or `https` address, `base_branch` needs `repo`,
+`max_post_runes` is between 1000 and 65535, and `thread_window_minutes` between
+0 and 10080. The `reply_policy` and `run_url`
 fields earlier versions took are gone; a body that still carries them is
 accepted and they are ignored. A switched-off configuration is
 held to those shape rules only, so it may be saved half finished. An enabled one

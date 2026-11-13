@@ -27,6 +27,9 @@ type chatIntegrationRequest struct {
 	BaseBranch     string `json:"base_branch"`
 	MaxPostRunes   int    `json:"max_post_runes"`
 	MaxThreadBytes int    `json:"max_thread_bytes"`
+	// Absent is the default, so a client written before the setting existed
+	// does not switch it off.
+	ThreadWindowMinutes *int `json:"thread_window_minutes,omitempty"`
 	// Write-only. Absent keeps what is stored.
 	BotToken      *string `json:"bot_token,omitempty"`
 	WebhookTokens *string `json:"webhook_tokens,omitempty"`
@@ -44,6 +47,7 @@ type chatIntegrationBody struct {
 	BaseBranch             string     `json:"base_branch"`
 	MaxPostRunes           int        `json:"max_post_runes"`
 	MaxThreadBytes         int        `json:"max_thread_bytes"`
+	ThreadWindowMinutes    int        `json:"thread_window_minutes"`
 	BotTokenConfigured     bool       `json:"bot_token_configured"`
 	WebhookTokenConfigured bool       `json:"webhook_token_configured"`
 	AppTokenConfigured     bool       `json:"app_token_configured"`
@@ -86,17 +90,18 @@ func (s *Server) putChatIntegration(w http.ResponseWriter, r *http.Request, c ca
 		return
 	}
 	saved, err := s.app.PutChatIntegration(r.Context(), platform, app.ChatIntegrationRequest{
-		Enabled:        req.Enabled,
-		Transport:      req.Transport,
-		URL:            req.URL,
-		Role:           req.Role,
-		RepoURL:        req.Repo,
-		BaseBranch:     req.BaseBranch,
-		MaxPostRunes:   req.MaxPostRunes,
-		MaxThreadBytes: req.MaxThreadBytes,
-		BotToken:       req.BotToken,
-		WebhookTokens:  req.WebhookTokens,
-		AppToken:       req.AppToken,
+		Enabled:             req.Enabled,
+		Transport:           req.Transport,
+		URL:                 req.URL,
+		Role:                req.Role,
+		RepoURL:             req.Repo,
+		BaseBranch:          req.BaseBranch,
+		MaxPostRunes:        req.MaxPostRunes,
+		MaxThreadBytes:      req.MaxThreadBytes,
+		ThreadWindowMinutes: req.ThreadWindowMinutes,
+		BotToken:            req.BotToken,
+		WebhookTokens:       req.WebhookTokens,
+		AppToken:            req.AppToken,
 	}, c.Name())
 	if err != nil {
 		s.failFor(w, r, err)
@@ -118,6 +123,7 @@ func chatIntegrationResponse(platform string, c app.ChatIntegration) chatIntegra
 		BaseBranch:             c.BaseBranch,
 		MaxPostRunes:           c.MaxPostRunes,
 		MaxThreadBytes:         c.MaxThreadBytes,
+		ThreadWindowMinutes:    c.ThreadWindowMinutes,
 		BotTokenConfigured:     c.BotTokenConfigured,
 		WebhookTokenConfigured: c.WebhookTokenConfigured,
 		AppTokenConfigured:     c.AppTokenConfigured,

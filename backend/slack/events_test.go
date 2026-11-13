@@ -117,3 +117,37 @@ func TestAMentionLaterInTheTextIsLeftWhereItIs(t *testing.T) {
 		}
 	}
 }
+
+func TestAMessageNamingAnyoneButTheBotNamesOthers(t *testing.T) {
+	for text, want := range map[string]bool{
+		"restart the ingress":                   false,
+		"<@UBOT> restart the ingress":           false,
+		"<@UBOT|devops_duty> restart it":        false,
+		"<@U0BOB> can you check?":               true,
+		"<@UBOT> and <@U0BOB|bob>, look":        true,
+		"<!here> deploy is stuck":               true,
+		"<!channel|channel> heads up":           true,
+		"<!everyone> heads up":                  true,
+		"<!subteam^S0SRE|@sre> please look":     true,
+		"see <https://example.com|the runbook>": false,
+		"<#C0OPS00001|ops> is the channel":      false,
+		"a < b and c > d":                       false,
+	} {
+		if got := namesOthers(text, bot.UserID); got != want {
+			t.Errorf("namesOthers(%q) = %v, want %v", text, got, want)
+		}
+	}
+}
+
+func TestAPersonsReplyInAChannelThreadIsDecodedWithoutAMention(t *testing.T) {
+	m, ok, err := decodeEvent(callback(t, map[string]any{
+		"type": "message", "channel_type": "channel", "channel": "C1", "user": "U0ALICE",
+		"ts": "1700000000.000300", "thread_ts": "1700000000.000100", "text": "and on staging?",
+	}), bot)
+	if err != nil || !ok {
+		t.Fatalf("decode: ok=%v err=%v", ok, err)
+	}
+	if m.MentionsBot || m.MentionsOthers || m.Direct || m.RootID != "C1:1700000000.000100" || m.ChannelType != "O" {
+		t.Errorf("message = %+v", m)
+	}
+}

@@ -206,6 +206,7 @@ leaves it off.
 | `HALIPHRON_MATTERMOST_BASE_BRANCH` | — | needs `HALIPHRON_MATTERMOST_REPO` |
 | `HALIPHRON_MATTERMOST_MAX_POST_RUNES` | `16383` | the server's post length limit; between 1000 and 65535 |
 | `HALIPHRON_MATTERMOST_MAX_THREAD_BYTES` | `65536` | how much thread history is quoted into a prompt |
+| `HALIPHRON_MATTERMOST_THREAD_WINDOW_MINUTES` | `240` | how long a thread keeps listening without a mention while one person talks to the bot; between 0 (never) and 10080 |
 | `HALIPHRON_MATTERMOST_TRANSPORT` | `websocket` | `websocket` (the backend dials the server), `webhook` (the server calls `POST /api/v1/integrations/mattermost/webhook`) or `both` |
 | `HALIPHRON_MATTERMOST_WEBHOOK_TOKEN_FILE` | — | path to the outgoing webhooks' tokens, one per line; checked first |
 | `HALIPHRON_MATTERMOST_WEBHOOK_TOKEN` | — | the tokens themselves, separated by newlines or commas |
@@ -242,6 +243,7 @@ Mode, a connection the backend opens, so nothing has to reach the backend.
 | `HALIPHRON_SLACK_BASE_BRANCH` | — | needs `HALIPHRON_SLACK_REPO` |
 | `HALIPHRON_SLACK_MAX_POST_RUNES` | `4000` | the longest reply; between 1000 and 65535 |
 | `HALIPHRON_SLACK_MAX_THREAD_BYTES` | `65536` | how much thread history is quoted into a prompt |
+| `HALIPHRON_SLACK_THREAD_WINDOW_MINUTES` | `240` | how long a thread keeps listening without a mention while one person talks to the bot; between 0 (never) and 10080. Needs the channel message events in the app's manifest |
 
 The process refuses to start when the bot is enabled and either token or the
 role is missing, or when a value is not one of its values. See [connect a Slack

@@ -129,9 +129,12 @@ type ChatIntegrationRequest struct {
 	BaseBranch     string
 	MaxPostRunes   int
 	MaxThreadBytes int
-	BotToken       *string
-	WebhookTokens  *string
-	AppToken       *string
+	// ThreadWindowMinutes is nil for the default: a request written before the
+	// setting existed must not switch it off.
+	ThreadWindowMinutes *int
+	BotToken            *string
+	WebhookTokens       *string
+	AppToken            *string
 }
 
 // chatEnvironment is the integration the deployment's environment configures,
@@ -214,11 +217,12 @@ func (s *Service) chatCredentials(ctx context.Context, platform string) (ChatCre
 
 func defaultChatIntegration(platform string) store.ChatIntegration {
 	c := store.ChatIntegration{
-		Platform:       platform,
-		Transport:      store.ChatTransportWebSocket,
-		Role:           DefaultChatRole,
-		MaxPostRunes:   DefaultChatPostRunes,
-		MaxThreadBytes: DefaultChatThreadBytes,
+		Platform:            platform,
+		Transport:           store.ChatTransportWebSocket,
+		Role:                DefaultChatRole,
+		MaxPostRunes:        DefaultChatPostRunes,
+		MaxThreadBytes:      DefaultChatThreadBytes,
+		ThreadWindowMinutes: DefaultChatThreadWindowMinutes,
 	}
 	if platform == ChatPlatformSlack {
 		c.MaxPostRunes = DefaultSlackPostRunes
@@ -239,16 +243,20 @@ func (s *Service) PutChatIntegration(ctx context.Context, platform string, req C
 	}
 
 	c := store.ChatIntegration{
-		Platform:       platform,
-		Enabled:        req.Enabled,
-		Transport:      strings.TrimSpace(req.Transport),
-		URL:            strings.TrimRight(strings.TrimSpace(req.URL), "/"),
-		Role:           strings.TrimSpace(req.Role),
-		RepoURL:        strings.TrimSpace(req.RepoURL),
-		BaseBranch:     strings.TrimSpace(req.BaseBranch),
-		MaxPostRunes:   req.MaxPostRunes,
-		MaxThreadBytes: req.MaxThreadBytes,
-		UpdatedBy:      by,
+		Platform:            platform,
+		Enabled:             req.Enabled,
+		Transport:           strings.TrimSpace(req.Transport),
+		URL:                 strings.TrimRight(strings.TrimSpace(req.URL), "/"),
+		Role:                strings.TrimSpace(req.Role),
+		RepoURL:             strings.TrimSpace(req.RepoURL),
+		BaseBranch:          strings.TrimSpace(req.BaseBranch),
+		MaxPostRunes:        req.MaxPostRunes,
+		MaxThreadBytes:      req.MaxThreadBytes,
+		ThreadWindowMinutes: DefaultChatThreadWindowMinutes,
+		UpdatedBy:           by,
+	}
+	if req.ThreadWindowMinutes != nil {
+		c.ThreadWindowMinutes = *req.ThreadWindowMinutes
 	}
 	if c.Transport == "" {
 		c.Transport = store.ChatTransportWebSocket
@@ -316,7 +324,8 @@ func (s *Service) PutChatIntegration(ctx context.Context, platform string, req C
 		SubjectKind: "chat_integration", SubjectID: platform,
 		Payload: map[string]any{
 			"enabled": c.Enabled, "transport": c.Transport, "url": c.URL, "role": c.Role,
-			"bot_token_replaced": req.BotToken != nil, "webhook_tokens_replaced": len(webhookTokens) > 0,
+			"thread_window_minutes": c.ThreadWindowMinutes,
+			"bot_token_replaced":    req.BotToken != nil, "webhook_tokens_replaced": len(webhookTokens) > 0,
 			"app_token_replaced": appToken != "",
 		},
 	}); err != nil {
@@ -442,6 +451,10 @@ func ValidateChatIntegration(c store.ChatIntegration, have ChatCredentials) erro
 	}
 	if c.MaxThreadBytes < 0 {
 		return invalid("max_thread_bytes", "cannot be negative")
+	}
+	if c.ThreadWindowMinutes < 0 || c.ThreadWindowMinutes > MaxChatThreadWindowMinutes {
+		return invalid("thread_window_minutes", "%d is not between 0 and %d",
+			c.ThreadWindowMinutes, MaxChatThreadWindowMinutes)
 	}
 	if !c.Enabled {
 		return nil

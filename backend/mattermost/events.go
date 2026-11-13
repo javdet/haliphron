@@ -67,6 +67,7 @@ func decodePosted(data json.RawMessage, self User) (m app.ChatMessage, ok bool, 
 		CreatedAt:          time.UnixMilli(p.CreateAt),
 		Direct:             d.ChannelType == "D",
 		MentionsBot:        named || (self.ID != "" && slices.Contains(mentions, self.ID)),
+		MentionsOthers:     namesOthers(p.Message, self.Username),
 		FromSelf:           self.ID != "" && p.UserID == self.ID,
 		FromBot:            fromBot(p),
 		FromWebhook:        truthy(p.Props["from_webhook"]),
@@ -124,6 +125,34 @@ func stripMention(text, username string) (string, bool) {
 		trimmed = strings.TrimLeft(trimmed[n:], " \t\r\n,:;")
 	}
 	return strings.TrimSpace(trimmed), named
+}
+
+// namesOthers reports whether a message names anyone but the bot: a person, a
+// group, or the channel (@here, @channel, @all).
+//
+// It reads the text rather than the event's mentions list. The server puts in
+// that list everyone a post notifies, which includes people whose own mention
+// keywords happen to occur in it, so "deploy staging" would read as addressed
+// to whoever made "deploy" a keyword. What a person typed is what they meant.
+func namesOthers(text, self string) bool {
+	self = strings.ToLower(self)
+	lower := strings.ToLower(text)
+	for i := 0; i < len(lower); i++ {
+		if lower[i] != '@' || (i > 0 && (usernameChar(lower[i-1]) || lower[i-1] == '.' || lower[i-1] == '@')) {
+			continue
+		}
+		j := i + 1
+		for j < len(lower) && (usernameChar(lower[j]) || lower[j] == '.') {
+			j++
+		}
+		// A trailing dot ends the sentence, not the name.
+		name := strings.TrimRight(lower[i+1:j], ".")
+		if name != "" && name != self {
+			return true
+		}
+		i = j - 1
+	}
+	return false
 }
 
 func lowerASCII(b byte) byte {

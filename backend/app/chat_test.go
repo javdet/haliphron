@@ -223,6 +223,62 @@ func TestEveryDirectMessageIsAMention(t *testing.T) {
 	}
 }
 
+func TestOnlyAPersonsReplyInAThreadNamingNobodyElseMayContinueAConversation(t *testing.T) {
+	c := &Chat{cfg: ChatConfig{ThreadWindow: 4 * time.Hour}}
+	reply := ChatMessage{ID: "m", RootID: "root", UserID: "alice"}
+	if !c.mayContinue(reply) {
+		t.Fatal("a person's reply in a thread cannot continue a conversation")
+	}
+	for name, m := range map[string]ChatMessage{
+		"a top-level message": {ID: "m", UserID: "alice"},
+		"naming someone else": {ID: "m", RootID: "root", UserID: "alice", MentionsOthers: true},
+		"another bot":         {ID: "m", RootID: "root", UserID: "alice", FromBot: true},
+		"a webhook":           {ID: "m", RootID: "root", UserID: "alice", FromWebhook: true},
+		"the bot's own post":  {ID: "m", RootID: "root", UserID: "alice", FromSelf: true},
+		"a system post":       {ID: "m", RootID: "root", UserID: "alice", System: true},
+	} {
+		if c.mayContinue(m) {
+			t.Errorf("%s may continue a conversation", name)
+		}
+	}
+	off := &Chat{cfg: ChatConfig{}}
+	if off.mayContinue(reply) {
+		t.Error("a reply continued a conversation with the window switched off")
+	}
+}
+
+func TestAThreadIsOnePersonsUntilAnotherHumanPostsBeforeTheMessage(t *testing.T) {
+	by := func(id, user string, minute int) ChatThreadPost {
+		p := post(id, user, "text", minute)
+		p.UserID = user
+		return p
+	}
+	m := ChatMessage{ID: "m", RootID: "root", UserID: "alice", CreatedAt: t0.Add(10 * time.Minute)}
+	self := by("answer", "devops_duty", 2)
+	self.FromSelf = true
+	alert := by("alert", "hook-owner", 0)
+	alert.FromBot = true
+	sys := by("join", "carol", 3)
+	sys.System = true
+
+	for name, c := range map[string]struct {
+		thread []ChatThreadPost
+		want   bool
+	}{
+		"alice and the bot": {[]ChatThreadPost{by("root", "alice", 0), self, by("m", "alice", 10)}, true},
+		"under an alert":    {[]ChatThreadPost{alert, by("ask", "alice", 1), self}, true},
+		"a system post":     {[]ChatThreadPost{by("root", "alice", 0), sys}, true},
+		"bob started it":    {[]ChatThreadPost{by("root", "bob", 0), by("ask", "alice", 1), self}, false},
+		"bob joined":        {[]ChatThreadPost{by("root", "alice", 0), self, by("b", "bob", 5)}, false},
+		"bob came after":    {[]ChatThreadPost{by("root", "alice", 0), self, by("b", "bob", 11)}, true},
+		"an unknown author": {[]ChatThreadPost{by("root", "alice", 0), by("x", "", 4)}, false},
+	} {
+		if got := soleParticipant(c.thread, m); got != c.want {
+			t.Errorf("%s: soleParticipant = %v, want %v", name, got, c.want)
+		}
+	}
+}
+
 func finished(status string) store.Run {
 	finishedAt := t0
 	received := t0

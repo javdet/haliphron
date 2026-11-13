@@ -443,6 +443,11 @@ mattermost:
   maxPostRunes: 16383
   # How much of a thread is quoted into the prompt as context.
   maxThreadBytes: 65536
+  # Once the bot has been asked in a thread, the person talking to it can go
+  # on without a mention for this many minutes after the last exchange, until
+  # someone else posts in the thread. 0 always needs a mention. Needs the
+  # websocket transport: an outgoing webhook fires only on its trigger word.
+  threadWindowMinutes: 240
 
   # How messages arrive: websocket (the backend dials the server), webhook
   # (the server calls POST /api/v1/integrations/mattermost/webhook through an
@@ -509,6 +514,12 @@ slack:
   maxPostRunes: 4000
   # How much of a thread is quoted into the prompt as context.
   maxThreadBytes: 65536
+  # Once the bot has been asked in a thread, the person talking to it can go
+  # on without a mention for this many minutes after the last exchange, until
+  # someone else posts in the thread. 0 always needs a mention. Needs the
+  # message.channels / message.groups / message.mpim events in the app's
+  # manifest; without them Slack sends mentions only.
+  threadWindowMinutes: 240
 
 # -----------------------------------------------------------------------------
 # The UI

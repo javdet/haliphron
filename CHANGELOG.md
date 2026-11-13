@@ -5,6 +5,23 @@ of `VERSION`, and it is the tag of the published images.
 
 ## Unreleased
 
+### Added
+
+- **A chat thread keeps listening for a while.** Once the bot has been asked
+  in a thread, in Mattermost or Slack, the person talking to it can go on
+  there without mentioning it, for 240 minutes after the last message the bot
+  acted on or answered. Each message extends the window, and when it passes in
+  silence the bot needs a mention again. This works only while that person is
+  the thread's only human. Once anyone else posts in the thread, every message
+  needs a mention, and so does a message that names someone else. Every such
+  message is a run of its own. The window is `thread_window_minutes` on the
+  integration (UI, REST, `HALIPHRON_*_THREAD_WINDOW_MINUTES`,
+  `*.threadWindowMinutes` in the chart), and `0` switches the behaviour off.
+  Mattermost needs the WebSocket transport. Slack needs the
+  `message.channels`, `message.groups` and `message.mpim` events added to the
+  app's manifest; without them it keeps answering mentions only. Migration
+  0016 adds the column and an index on `chat_triggers`.
+
 ## 0.6.2 — 2026-11-10
 
 ### Added

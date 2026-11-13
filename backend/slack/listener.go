@@ -266,8 +266,15 @@ func (l *Listener) dispatch(ctx context.Context, m app.ChatMessage) {
 // what the channel is called — for a message that may be a request. It is
 // best effort: a header without a name is still a header, and a lookup that
 // fails is no reason to ignore the person.
+//
+// A person's reply in a thread may be a request without naming the bot, in a
+// thread that is listening, so it is described too. Both lookups are cached,
+// and a top-level message that names nobody is not looked at.
 func (l *Listener) describe(ctx context.Context, m *app.ChatMessage) {
-	if m.FromSelf || m.FromBot || m.System || !(m.MentionsBot || m.Direct) {
+	if m.FromSelf || m.FromBot || m.System {
+		return
+	}
+	if !(m.MentionsBot || m.Direct) && (m.RootID == "" || m.MentionsOthers) {
 		return
 	}
 	ctx, cancel := context.WithTimeout(ctx, requestTimeout)
