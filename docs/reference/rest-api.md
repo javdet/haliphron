@@ -1004,6 +1004,9 @@ with `max without(instance, pod)`, never `sum`. A scrape result is cached for
 | `haliphron_cluster_free_slots` | gauge | `cluster` | As last reported by the cluster |
 | `haliphron_cluster_last_heartbeat_timestamp_seconds` | gauge | `cluster` | Unix time of the last heartbeat |
 | `haliphron_cluster_status` | gauge | `cluster`, `status` | `1` for the cluster's status, `0` for the other three |
+| `haliphron_note_partitions` | gauge | | Day partitions of the run notes table. Steady at about the note retention in days plus four. |
+| `haliphron_note_bytes` | gauge | | Disk taken by the run notes table, counting heap, TOAST and index |
+| `haliphron_notes` | gauge | | Notes stored, including expired ones until their partition is dropped |
 | `haliphron_stats_up` | gauge | | `0` when the database could not be read. In that case the series above are absent from that scrape. |
 
 The Go runtime (`go_*`) and process (`process_*`) collectors are included.
@@ -1020,4 +1023,7 @@ histogram_quantile(0.95, sum by (cluster, le) (delta(max without(instance, pod) 
 
 # a cluster that has not heartbeated for five minutes
 time() - max without(instance, pod) (haliphron_cluster_last_heartbeat_timestamp_seconds) > 300
+
+# expired note partitions are not being dropped (default retention of 7 days)
+max without(instance, pod) (haliphron_note_partitions) > 13
 ```

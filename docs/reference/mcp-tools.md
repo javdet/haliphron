@@ -385,6 +385,107 @@ and defer again.
 The calling run usually ends `Succeeded`, which means only that it exited with
 code 0. The run's page in the UI shows that it deferred work.
 
+## Run notes
+
+Four tools let a run write down what it learned, so that the runs it starts can
+read it instead of learning it again. Typical notes are how the repository is
+built and tested, where things are, and what is done and what is left. See
+[Run notes](../explanation/run-notes.md) for the reasoning.
+
+All four need a per-run token, and an operator's token is not offered them. The
+token decides whose notes are written and read; a `run_id` argument is ignored.
+
+**Scope.**
+
+- A run writes only its own notes.
+- A run reads its own notes and those of its ancestors: its parent, the
+  parent's parent, and so on up to the root. A child started by `run_agent` or
+  `schedule_agent` has the caller as its parent.
+- On a key present at several levels, the nearest one wins.
+- A parent never sees its children's notes, and sibling runs never see each
+  other's.
+- Reads are live: a child sees what a still-running ancestor writes after the
+  child started.
+
+**Lifetime.** Notes are visible while the run that wrote them is younger than
+the note retention (`HALIPHRON_NOTE_RETENTION`, seven days by default), counted
+from its admission. All of one run's notes expire together, and deleting a run
+deletes them. There is no TTL per note.
+
+**Trust.** A note is written by a model that may have read a prompt-injected
+repository, and it is passed down to every run below its writer. Notes are
+data, never instructions:
+
+- the platform never puts a note into a prompt;
+- `get_note` returns the value inside a
+  `<<< BEGIN NOTE <boundary> … >>>` / `<<< END NOTE <boundary> >>>` block that
+  names the writing run. The boundary is random for each answer, so a value
+  cannot close the block itself;
+- a value is never logged.
+
+Do not write secrets into notes.
+
+| Limit | Value |
+|---|---|
+| Key | `^[A-Za-z0-9][A-Za-z0-9._:/-]{0,127}$`. Refused, never cleaned |
+| Value | 1 byte to 16 KiB of UTF-8. Line breaks and tabs are allowed; other control characters and bidirectional overrides are refused |
+| Notes per run | 64 |
+| Bytes per run (keys plus values) | 256 KiB. An overwrite counts its new size only |
+| `list_notes` answer | 200 keys |
+
+A refusal is a tool result with `isError` set. Its text starts with
+`invalid_argument:`, `quota_exceeded:` or `expired:`, followed by what to do.
+
+### `put_note`
+
+| Argument | Type | Required | Notes |
+|---|---|---|---|
+| `key` | string | yes | |
+| `value` | string | yes | Plain text |
+
+Writes the calling run's note under `key`, or replaces it. A key an ancestor
+also wrote is shadowed for this run and the runs below it; the ancestor's note
+is not changed. Writing the value the note already holds changes nothing.
+The answer is `{"key": "…", "bytes": 120, "changed": true}`.
+
+### `get_note`
+
+| Argument | Type | Required |
+|---|---|---|
+| `key` | string | yes |
+
+```json
+{"found": true, "key": "build/command", "value": "make backend-build",
+ "bytes": 18, "written_by_run": "01JB…", "levels_up": 1, "updated_at": "…"}
+```
+
+`levels_up` is `0` for the caller's own note, `1` for its parent's, and so on.
+A key that nothing in scope wrote answers `{"found": false, "key": "…"}`
+without `isError`.
+
+### `list_notes`
+
+| Argument | Type | Required | Notes |
+|---|---|---|---|
+| `prefix` | string | no | Only keys that start with it |
+
+The visible keys, in key order, each with `bytes`, `written_by_run`,
+`levels_up` and `updated_at`, and without values:
+`{"notes": [...], "truncated": false}`. `truncated` is `true` when there were
+more than 200.
+
+### `delete_note`
+
+| Argument | Type | Required |
+|---|---|---|
+| `key` | string | yes |
+
+Deletes the calling run's own note: `{"key": "…", "deleted": true}`. An
+ancestor's note cannot be deleted. For a key the caller does not own, the answer
+is `deleted: false`, worded exactly as for a key nobody wrote, so it never
+reveals whether an ancestor has one. To correct an ancestor's note for the runs
+below you, write your own under the same key.
+
 ---
 
 ## Tasks
@@ -500,7 +601,8 @@ The maximum depth is 8.
 
 Such a caller does not see `list_clusters` or any of the
 [role configuration](#role-configuration) tools, and does see the four lock
-tools: `set_lock`, `unset_lock`, `list_locks` and `schedule_agent`. An
-operator's token sees `list_locks` and `get_role` (with `runs:read`),
-`put_role`, `delete_role` and `inspect_marketplace` (with `admin`), and
-`list_clusters`, but cannot hold a lock or defer work.
+tools (`set_lock`, `unset_lock`, `list_locks` and `schedule_agent`) and the
+four [note](#run-notes) tools (`put_note`, `get_note`, `list_notes` and
+`delete_note`). An operator's token sees `list_locks` and `get_role` (with
+`runs:read`), `put_role`, `delete_role` and `inspect_marketplace` (with
+`admin`), and `list_clusters`. It cannot hold a lock, defer work or have notes.

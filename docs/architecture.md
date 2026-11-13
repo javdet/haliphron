@@ -1135,6 +1135,8 @@ Errors are RFC 9457 with two extensions: a stable `code` and an **`action` instr
 
 `run_agent`, `run_workflow`, `run_job`, `get_run_result`, `get_workflow_result`, `cancel_run`, `list_roles`, `list_workflows`, plus configuration tools for the "without a UI" scenario.
 
+A per-run token also gets the coordination tools: `set_lock`, `unset_lock`, `list_locks` and `schedule_agent` ([cooperative locks](explanation/cooperative-locks.md)), and `put_note`, `get_note`, `list_notes` and `delete_note`. Notes are what a run has learned, written down for the runs it starts. A run reads its own notes and its ancestors', and never its parent's or a sibling's. Notes are stored in day partitions that are dropped whole ([run notes](explanation/run-notes.md)). The full list is in the [MCP reference](reference/mcp-tools.md).
+
 **A detail missing from the specification.** The MCP token must not be global. When an agent inside a pod calls `run_agent`, the platform is obliged to know **who exactly** is calling, in order to bind the child run to its parent, check the depth and charge the cost to the parent's budget. The pod is issued a **per-run MCP token** carrying the `run_id` and living for the duration of the run. A global token gives unbounded recursion and unaccounted spend.
 
 ### 13.4 CRD `AgentRun`

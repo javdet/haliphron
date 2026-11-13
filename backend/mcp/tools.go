@@ -120,10 +120,11 @@ func toolDefinitions(c Caller, tasks bool) []tool {
 	}
 
 	if c.Parent != nil {
-		// An agent sees what it may do to its own children and its own locks,
-		// and nothing about the platform's configuration. list_clusters
-		// exists for an operator without a UI, not for a pod.
-		return append(tools, lockToolDefinitions(c)...)
+		// An agent sees what it may do to its own children, its own locks and
+		// its own notes, and nothing about the platform's configuration.
+		// list_clusters exists for an operator without a UI, not for a pod.
+		tools = append(tools, lockToolDefinitions(c)...)
+		return append(tools, noteToolDefinitions(c)...)
 	}
 	if c.Token.Allows(store.ScopeRunsRead) {
 		// An operator may look at the locks; holding one takes a run.
@@ -214,6 +215,14 @@ func (s *Server) call(r *http.Request, c Caller, raw json.RawMessage) (any, *rpc
 		return s.listLocks(r, c)
 	case "schedule_agent":
 		return s.scheduleAgent(r, c, args)
+	case "put_note":
+		return s.putNote(r, c, args)
+	case "get_note":
+		return s.getNote(r, c, args)
+	case "list_notes":
+		return s.listNotes(r, c, args)
+	case "delete_note":
+		return s.deleteNote(r, c, args)
 	case "list_clusters":
 		if c.Parent != nil {
 			return failed("an agent's token does not carry the platform's configuration"), nil

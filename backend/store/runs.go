@@ -106,6 +106,10 @@ var ErrTooManyChildren = errors.New("store: the parent run has started its full 
 // again: a fire whose run committed without the advance would be fired a
 // second time by the next replica to look. A deferred run's fire marks its row
 // submitted here, for that reason once more.
+//
+// The run's lineage — its ancestors, root first — is written here and nowhere
+// else, from the parent row in the insert statement itself. It is what run
+// notes are read along, and it is immutable once written (0018).
 func (s *Store) InsertRun(ctx context.Context, r NewRun) error {
 	return s.inTx(ctx, func(tx *sql.Tx) error {
 		if r.ParentRunID != "" && r.MaxChildren > 0 {
@@ -178,14 +182,16 @@ func insertRun(ctx context.Context, tx *sql.Tx, r NewRun) error {
 		INSERT INTO runs (id, parent_run_id, depth, created_by, created_via, priority,
 		                  spec, prompt, prompt_sha256, agent, model, role_name,
 		                  repo_url, repo_provider, base_branch, target_branch,
-		                  timeout_seconds, max_cost_usd, cluster_id, schedule_id, status)
+		                  timeout_seconds, max_cost_usd, cluster_id, schedule_id, status, lineage)
 		VALUES ($1, $2, $3, $4, $5, $6, $7::jsonb, $8, $9, $10, $11, $12,
-		        $13, $14, $15, $16, $17, $18::numeric, $19, $20, 'Queued')`,
+		        $13, $14, $15, $16, $17, $18::numeric, $19, $20, 'Queued',
+		        coalesce((SELECT (p.lineage::text[] || p.id::text)::ulid[]
+		                  FROM runs p WHERE p.id = $21), '{}'))`,
 		r.ID, nullString(string(r.ParentRunID)), r.Depth, r.CreatedBy, r.CreatedVia, r.Priority,
 		[]byte(r.Spec), r.Prompt, r.PromptSHA256, string(r.Agent), r.Model, nullString(r.Role),
 		nullString(r.RepoURL), string(provider), nullString(r.BaseBranch), nullString(r.TargetBranch),
 		r.TimeoutSeconds, nullString(string(r.MaxCostUSD)), nullString(string(r.ClusterID)),
-		nullString(string(r.ScheduleID)))
+		nullString(string(r.ScheduleID)), nullString(string(r.ParentRunID)))
 	if err != nil {
 		return fmt.Errorf("store: insert run %s: %w", r.ID, err)
 	}

@@ -65,6 +65,13 @@ var (
 		"When the cluster's controller last heartbeated, as a Unix time.", []string{"cluster"}, nil)
 	descClusterStatus = prometheus.NewDesc("haliphron_cluster_status",
 		"1 for the status the cluster is in, 0 for the others.", []string{"cluster", "status"}, nil)
+	descNotePartitions = prometheus.NewDesc("haliphron_note_partitions",
+		"Day partitions of the run notes table. Steady at about the note retention in days plus four; "+
+			"more means expired partitions are not being dropped.", nil, nil)
+	descNoteBytes = prometheus.NewDesc("haliphron_note_bytes",
+		"Disk taken by the run notes table: heap, TOAST and index of every partition.", nil, nil)
+	descNotes = prometheus.NewDesc("haliphron_notes",
+		"Run notes stored, expired ones included until their partition is dropped.", nil, nil)
 	descUp = prometheus.NewDesc("haliphron_stats_up",
 		"1 if the run and cluster statistics were read from the database, 0 if not.", nil, nil)
 )
@@ -103,7 +110,8 @@ func NewCollector(service *app.Service, logger *slog.Logger) *Collector {
 // Describe implements prometheus.Collector.
 func (c *Collector) Describe(ch chan<- *prometheus.Desc) {
 	for _, d := range []*prometheus.Desc{descRuns, descDuration, descQueueWait, descActive,
-		descCapacity, descFree, descHeartbeat, descClusterStatus, descUp} {
+		descCapacity, descFree, descHeartbeat, descClusterStatus,
+		descNotePartitions, descNoteBytes, descNotes, descUp} {
 		ch <- d
 	}
 }
@@ -185,6 +193,15 @@ func (c *Collector) series(ctx context.Context) ([]prometheus.Metric, error) {
 			out = append(out, prometheus.MustNewConstMetric(descClusterStatus, prometheus.GaugeValue, v, name, status))
 		}
 	}
+
+	notes, err := c.service.NoteUsage(ctx)
+	if err != nil {
+		return nil, err
+	}
+	out = append(out,
+		prometheus.MustNewConstMetric(descNotePartitions, prometheus.GaugeValue, float64(notes.Partitions)),
+		prometheus.MustNewConstMetric(descNoteBytes, prometheus.GaugeValue, float64(notes.Bytes)),
+		prometheus.MustNewConstMetric(descNotes, prometheus.GaugeValue, float64(notes.Notes)))
 	return out, nil
 }
 

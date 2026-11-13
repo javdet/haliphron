@@ -313,6 +313,9 @@ func Load() (Config, error) {
 			// not because a value was left unset. Failed runs have a shorter
 			// age of their own, set from the UI.
 			RunRetention: durationEnv("HALIPHRON_RUN_RETENTION", 0),
+			// How long a run's notes stay readable by the runs below it,
+			// counted from the run's admission. Bounded in validate.
+			NoteRetention: durationEnv("HALIPHRON_NOTE_RETENTION", app.DefaultNoteRetention),
 		},
 
 		SweepInterval:    durationEnv("HALIPHRON_SWEEP_INTERVAL", 5*time.Second),
@@ -468,6 +471,13 @@ func (c Config) validate() error {
 	case ModeAll, ModeAPI, ModeMCP, ModeCluster:
 	default:
 		return fmt.Errorf("config: unknown mode %q", c.Mode)
+	}
+	if r := c.Limits.NoteRetention; r < app.MinNoteRetention || r > app.MaxNoteRetention {
+		// Below the minimum a run could see its own notes expire while it
+		// is still running; above the maximum the notes table holds a month
+		// of every run's notes for a feature meant to hand work on.
+		return fmt.Errorf("config: HALIPHRON_NOTE_RETENTION is %s; it is between %s and %s",
+			r, app.MinNoteRetention, app.MaxNoteRetention)
 	}
 	if c.Database.DSN == "" {
 		return fmt.Errorf("config: HALIPHRON_DSN is required")

@@ -262,6 +262,10 @@ func run() error {
 		}
 	}
 	if cfg.Mode.Serves(config.ModeMCP) {
+		// The note partitions this listener's put_note will write into, made
+		// before it serves. A failure is logged and not fatal: a write that
+		// meets a missing partition creates it.
+		service.PrepareNotes(ctx)
 		serve("mcp", cfg.MCPAddr, mcp.New(service, log).Handler())
 	}
 	if cfg.Mode.Serves(config.ModeCluster) {
@@ -281,7 +285,7 @@ func run() error {
 	// schedule's next_run_at inside the transaction that inserts its run, so
 	// the replica that loses has its run rolled back.
 	if cfg.Mode.Serves(config.ModeCluster) {
-		wg.Add(5)
+		wg.Add(6)
 		go func() { defer wg.Done(); service.RunSweeper(ctx, cfg.SweepInterval) }()
 		go func() { defer wg.Done(); service.RunScheduler(ctx, cfg.ScheduleInterval) }()
 		go func() { defer wg.Done(); service.RunReaper(ctx, cfg.ReapInterval) }()
@@ -289,6 +293,10 @@ func run() error {
 		// days unless changed, and every run after HALIPHRON_RUN_RETENTION;
 		// then ended per-run tokens, two weeks unless changed in the UI.
 		go func() { defer wg.Done(); service.ReapRuns(ctx, cfg.ReapInterval) }()
+		// Run notes: create the day partitions ahead of need and drop the
+		// expired ones whole, which is what gives their space back. Every
+		// replica may run it; each create and drop is serialised in the store.
+		go func() { defer wg.Done(); service.RunNoteMaintenance(ctx, cfg.ReapInterval) }()
 		// Retention for the artifact volume. A no-op in object-store mode,
 		// where the chart generated lifecycle rules and the store applies them
 		// itself.

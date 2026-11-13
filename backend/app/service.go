@@ -88,6 +88,12 @@ type Limits struct {
 	// zero keeps them for ever. The shorter age for failed runs is not here:
 	// it is set from the UI and read from the store on every pass.
 	RunRetention time.Duration
+
+	// NoteRetention is how long a run's notes stay visible, counted from the
+	// run's admission, and so how long their partition is kept. Zero is
+	// DefaultNoteRetention; config bounds it to MinNoteRetention ...
+	// MaxNoteRetention.
+	NoteRetention time.Duration
 }
 
 // Options assembles a Service.
@@ -132,6 +138,9 @@ func New(opts Options) *Service {
 	}
 	if limits.MaxAckExpiries <= 0 {
 		limits.MaxAckExpiries = clusterv1.DefaultMaxAckExpiries
+	}
+	if limits.NoteRetention <= 0 {
+		limits.NoteRetention = DefaultNoteRetention
 	}
 	logger := opts.Logger
 	if logger == nil {

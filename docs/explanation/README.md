@@ -45,6 +45,9 @@ Almost every awkward mechanism in the system is downstream of one of these.
 - [About cooperative locks](cooperative-locks.md) — how agents tell each other
   what shared infrastructure they are changing, why the backend never decides
   what conflicts, and what the locks do not protect against.
+- [About run notes](run-notes.md) — how a run writes down what it learned for
+  the runs it starts, why notes only go down a lineage, why the table is
+  partitioned by day, and why a note is data and never an instruction.
 
 ## A note on `docs/architecture.md`
 

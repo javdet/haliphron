@@ -77,6 +77,12 @@ backend:
   # rather than here; a failed run goes at whichever comes first.
   runRetention: ""
 
+  # How long a run's notes (put_note over MCP) stay readable by the runs it
+  # started, counted from the run's admission. A Go duration between 48h and
+  # 720h; empty is 168h, seven days. Notes are kept in one partition per day,
+  # and a partition is dropped whole once all of it is older than this.
+  noteRetention: ""
+
   terminationGracePeriodSeconds: 60
 
   extraEnv: []

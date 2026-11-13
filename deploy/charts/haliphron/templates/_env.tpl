@@ -270,6 +270,10 @@ encryption key is not even that: it is a file, because a variable is visible in
 - name: HALIPHRON_RUN_RETENTION
   value: {{ . | quote }}
 {{- end }}
+{{- with .Values.backend.noteRetention }}
+- name: HALIPHRON_NOTE_RETENTION
+  value: {{ . | quote }}
+{{- end }}
 - name: HALIPHRON_LOG_LEVEL
   value: {{ .Values.backend.logLevel | quote }}
 - name: HALIPHRON_LOG_FORMAT

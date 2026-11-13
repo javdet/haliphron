@@ -736,6 +736,102 @@ another path. Saving a row counts it against the parent's fan-out with the
 children already started, under the parent's row lock. `InsertRun` counts again
 at fire time, against the children alone.
 
+### Run notes
+
+**A note is written by a run and read down its lineage** (0018). `run_notes`
+holds a key and a value written by a run through MCP. That run reads its own
+notes and its ancestors', and on a key present at several levels the nearest
+wins. Siblings never see each other's notes, a parent never sees its children's,
+and reads are live: a child sees what an ancestor writes after the child was
+admitted. Only `put_note` writes a note, under the identity of the per-run token.
+No REST, UI or admission path writes one.
+
+**`runs.lineage` is the run's ancestors, root first, written once by
+`InsertRun`.** The insert statement itself computes it from the parent row as
+`parent.lineage || parent.id`. The trigger `runs_lineage_guard` refuses any
+later change, and `runs_lineage_depth` checks `cardinality(lineage) <= depth`.
+It is `<=` and not `=` because the column was added without a backfill:
+updating every row of `runs` would create the bloat this design avoids. A run
+admitted before 0018 has `'{}'`, so its descendants do not see the notes of
+ancestors admitted before the migration. A read walks `lineage`, not
+`parent_run_id`, because deleting a run sets its children's `parent_run_id` to
+NULL, which would cut the chain at that run. With `lineage`, only the deleted
+run's own notes go.
+
+**The table is bounded physically, so expired notes are never deleted row by
+row.** A `DELETE` leaves dead tuples, and vacuum makes their space reusable
+inside the same file without returning it. TOAST and the index bloat the same
+way. `VACUUM FULL` returns the space but holds `ACCESS EXCLUSIVE`, and
+`pg_repack` is an extension (section 2). Instead, `run_notes` is
+`PARTITION BY RANGE (owner_created_at)`, where `owner_created_at` is the owner
+run's `created_at`. There is one partition per UTC day, named
+`run_notes_YYYYMMDD`. All notes of one run live in one partition, and they
+expire together at a time fixed at admission: a note is visible while
+`owner_created_at > now() - retention`. Once its whole day is past retention, a
+partition is dropped with `DROP TABLE`, which removes the heap, its TOAST table
+and its index at once and returns the space to the operating system.
+
+- **The primary key is `(run_id, owner_created_at, key)`.** It has to include
+  the partition key, and since `owner_created_at` is a function of `run_id`, it
+  is exactly as unique as `(run_id, key)`. There is no other index, because
+  every read is by owner run. Partitions are created with `fillfactor = 90`, so
+  overwriting a value is a HOT update with no new index entry.
+- **An unchanged write changes nothing.** The write is
+  `INSERT … ON CONFLICT … DO UPDATE … WHERE run_notes.value IS DISTINCT FROM
+  EXCLUDED.value`, so rewriting the same value creates no row version.
+- **The migration creates no partitions.** The backend's maintenance
+  (`MaintainNotes`) creates the days from `now() - retention` to `now() + 3
+  days`, and drops every partition whose upper bound is `<= now() - retention`.
+  It runs every `HALIPHRON_REAP_INTERVAL` where the Cluster API runs, and once
+  before the MCP listener serves.
+- **Each create and each drop is one transaction.** Every such transaction
+  takes `pg_advisory_xact_lock(7318604251938406157)`, rechecks `pg_inherits`,
+  and sets `lock_timeout = '2s'`. So every replica can run the maintenance
+  without a leader, and each partition is still created once.
+- **A partition is created standalone and then attached.** It is first a
+  `CREATE TABLE … (LIKE run_notes INCLUDING DEFAULTS INCLUDING CONSTRAINTS,
+  PRIMARY KEY …)` and then attached with `ATTACH PARTITION`. `CREATE TABLE …
+  PARTITION OF` would take `ACCESS EXCLUSIVE` on `run_notes`, while `ATTACH`
+  takes `SHARE UPDATE EXCLUSIVE`, which blocks neither reads nor writes.
+- **A blocked drop gives up and is retried.** A drop holds `ACCESS EXCLUSIVE`
+  on `run_notes` for milliseconds. One that cannot get the lock within 2 s
+  gives up and is retried on the next pass, so it never queues every note read
+  behind one slow statement.
+- **Only real partitions are dropped.** A drop touches only tables that
+  `pg_inherits` lists as partitions of `run_notes` and whose names parse as a
+  day.
+- **An insert that finds no partition repairs it.** The insert fails with
+  SQLSTATE `23514` and no constraint name. `put_note` then runs the
+  create step once and tries again.
+
+**There is no foreign key to `runs`, on purpose.** A foreign key from a
+partition ties the partition's DDL to the referenced table. Dropping a
+partition would then lock `runs`, the busiest table in the schema. Notes go with
+their run through the trigger `runs_delete_notes` (`AFTER DELETE ON runs`). It
+deletes `WHERE run_id = OLD.id AND owner_created_at = OLD.created_at`, which
+prunes the delete to one partition, and it covers every path that deletes runs.
+`PutNote` reads the run `FOR KEY SHARE`, so a concurrent delete waits for the
+write and its trigger then sees the new note. `FOR KEY SHARE` does not conflict
+with a heartbeat's update.
+
+**A run's quota is counted under a per-run advisory lock.** `PutNote` takes
+`pg_advisory_xact_lock(0x4e54, hashtext(run_id))`. It then reads the run and
+checks the expiry against `clock_timestamp()`, so a partition dropped while the
+write waited is reported as expired, not as missing. Next it counts the run's
+other keys and bytes, and only then upserts. Parallel tool calls from one agent
+therefore cannot overshoot 64 notes or 256 KiB. An overwrite is charged its new
+size only.
+
+**A note is removed in exactly three ways:**
+
+- its owner's `delete_note` (`WHERE run_id = $caller`, so an ancestor's note
+  cannot match);
+- the trigger, when the run is deleted;
+- a partition drop.
+
+The footprint is at most the runs admitted within `retention + 1 day`, times
+256 KiB.
+
 ---
 
 ## 12. There is no table of downward commands
@@ -858,6 +954,28 @@ The lock statements are store and `app` together, so they are exercised in
 - [x] `UnsetLocks` with another run's id or name removes nothing
 - [x] two concurrent fires of one deferred row admit one run; a deferred row fires only after its lock goes, as a child with the parent, depth, cost ceiling and chat follow-up row; one past `give_up_at` expires
 - [x] deferred rows count against the parent's child limit
+
+The schema half of run notes is checked here (`notes_test.go`):
+
+- [x] deleting a run deletes its notes and no other run's
+- [x] a key outside 1 to 128 bytes, an empty value and a value over 16 KiB are refused by the schema
+- [x] a note for a day with no partition is refused, not stored elsewhere
+- [x] creating, attaching and dropping a note partition does not wait for a lock on `runs`
+- [x] `lineage` cannot change after admission, a root run has no ancestors, and a lineage shorter than the depth is allowed
+
+The note statements are store and `app` together, so they are exercised in
+[test/backend](../../test/backend) (`notes_test.go`):
+
+- [x] a run sees its own and its ancestors' notes, nearest first, with `levels_up`; siblings, children and unrelated runs see nothing of each other's
+- [x] a child sees what an ancestor writes and overwrites after the child was admitted
+- [x] `lineage` is recorded at admission, and deleting a middle ancestor keeps the notes of those above it visible
+- [x] concurrent writes from one run never exceed 64 notes or 256 KiB, and an overwrite at the limit is allowed
+- [x] rewriting the same value leaves the row version (`xmin`, `ctid`) unchanged
+- [x] the notes of a run older than the retention are invisible, and it cannot write more
+- [x] maintenance creates the days from `now() - retention` to `now() + 3 days`, drops exactly the expired ones, never drops a table that is not a partition of `run_notes`, and a second pass does no DDL
+- [x] a drop blocked by a reader gives up after its lock timeout and succeeds on the next pass
+- [x] four replicas maintaining at once create each partition once
+- [x] a write that meets a missing partition creates it
 
 The Slack adapter is exercised end to end in the same suite
 (`slack_test.go`), against a fake workspace:

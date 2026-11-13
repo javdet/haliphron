@@ -170,6 +170,7 @@ in, which is capped at 1 MiB across all its keys together.
 | `HALIPHRON_REAP_INTERVAL` | `1h` | artifact retention scan (relay mode) and run retention scan |
 | `HALIPHRON_SCHEDULE_INTERVAL` | `10s` | how often due schedules are fired; the most a fire can be late |
 | `HALIPHRON_RUN_RETENTION` | `0` (keep forever) | delete a run this long after it finished, e.g. `720h` for 30 days |
+| `HALIPHRON_NOTE_RETENTION` | `168h` | how long a run's [notes](mcp-tools.md#run-notes) stay readable, counted from the run's admission; `48h` to `720h`, anything else refuses to start |
 | `HALIPHRON_LOG_LEVEL` | `info` | |
 | `HALIPHRON_LOG_FORMAT` | `json` | |
 
@@ -184,6 +185,14 @@ have not ended are never deleted. The scan runs where the Cluster API runs
 `run.deleted` audit record for every run it removes. The artifact retentions
 above still apply on their own terms. A run can outlive its logs, but no
 object outlives its run.
+
+`HALIPHRON_NOTE_RETENTION` counts from a run's admission, not from its end. All
+notes of one run expire together, and deleting a run deletes its notes at once.
+Notes are stored in one partition per UTC day. A partition is dropped whole once
+every run in it is older than the retention, which gives its disk space back to
+the operating system. The partitions are created ahead of need and dropped every
+`HALIPHRON_REAP_INTERVAL` where the Cluster API runs, and once at startup where
+MCP is served.
 
 ### Mattermost bot
 

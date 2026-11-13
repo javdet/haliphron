@@ -221,6 +221,18 @@ and never revive an expired lock's `seq`.
 Every replica's scheduler loop fires due rows, with no leader. Never write `state = 'submitted'`
 from another path.
 
+**Run notes are never deleted row by row to bound their size, and `runs.lineage` has one writer.**
+`run_notes` is partitioned by the owner run's `created_at`, one UTC day each, and space is reclaimed
+only by dropping a whole partition (`DropExpiredNotePartitions` in `backend/store/notes.go`); a
+`DELETE` of expired rows would leave the file at its peak size. Partitions are created standalone and
+`ATTACH`ed, never `CREATE … PARTITION OF` (that locks `run_notes` exclusively), and every create or
+drop takes `notePartitionKey` and sets `lock_timeout`. Never add a foreign key from `run_notes` to
+`runs`: partition DDL would then lock `runs`. A note goes only three ways: its owner's
+`delete_note` (`WHERE run_id = caller`), the `runs_delete_notes` trigger when the run is deleted, and
+a partition drop. `lineage` is written only by `InsertRun`, from the parent row in the insert
+statement, and a trigger refuses any change to it. A note's value is never logged at any level,
+and never put into a prompt by the platform.
+
 **In the image, `persist` runs before the git phases** — what has been paid for is made durable
 before anything allowed to fail, so a retry never pays for the model twice.
 `TestAFailedPushLeavesTheResultAlreadyInStorage` is what keeps that true.

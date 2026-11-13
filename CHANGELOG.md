@@ -3,6 +3,33 @@
 All notable changes to Haliphron are recorded here. The version is the content
 of `VERSION`, and it is the tag of the published images.
 
+## Unreleased
+
+### Added
+
+- **Run notes.** A run can write down what it learned, and the runs it starts
+  can read it instead of learning it again. There are four MCP tools for a
+  run's own token: `put_note`, `get_note`, `list_notes` and `delete_note`.
+  - **Scope.** A run reads its own notes and its ancestors', and the nearest
+    level wins a key. It never reads its children's notes or a sibling's.
+    Reads are live.
+  - **Trust.** Every value comes back with the run that wrote it, inside a
+    block that labels it as unverified data, and it is never logged.
+  - **Limits.** A note is at most 16 KiB, and a run holds at most 64 notes and
+    256 KiB.
+  - **Retention.** Notes stay visible for `HALIPHRON_NOTE_RETENTION`
+    (`backend.noteRetention` in the chart; 7 days by default, 2 to 30) from
+    their run's admission, and are deleted with their run.
+  - **Storage.** Notes are kept in one partition per day. A partition is
+    dropped whole once all of its notes have expired, which returns the disk
+    space. Expired rows are not deleted one by one, so the table does not
+    stay at its peak size. New metrics: `haliphron_note_partitions`,
+    `haliphron_note_bytes` and `haliphron_notes`.
+  - **Migration 0018** adds `run_notes` and `runs.lineage`. `lineage` records a
+    run's ancestors at admission and is not backfilled: a child of a run
+    admitted before the upgrade sees its parent's notes but not those of runs
+    further up.
+
 ## 0.7.0 — 2026-11-13
 
 ### Added
