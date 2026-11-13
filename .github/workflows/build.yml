@@ -61,6 +61,19 @@ jobs:
       - name: Test
         run: make image-test
 
+  # The Docker host controller against an in-memory Docker and fake/backend.
+  # No daemon: the real-daemon suite (make dockerhost-e2e) needs root and the
+  # host's iptables, and is run by hand on a Linux host.
+  dockerhost-test:
+    name: Test Docker host controller
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+
+      - name: Test
+        run: make dockerhost-test
+
   # There is no separate lint for the UI: tsc with noUnused* on is the lint.
   frontend-check:
     name: Check frontend
@@ -99,7 +112,7 @@ jobs:
   push-images:
     name: Push ${{ matrix.name }}
     runs-on: ubuntu-24.04
-    needs: [verify, fake-test, image-test, frontend-check, chart-lint]
+    needs: [verify, fake-test, image-test, dockerhost-test, frontend-check, chart-lint]
     if: github.event_name != 'pull_request'
     strategy:
       fail-fast: false
@@ -117,6 +130,11 @@ jobs:
             image: haliphron-controller
             context: .
             file: controller/Dockerfile
+            platforms: linux/amd64,linux/arm64
+          - name: dockerhost
+            image: haliphron-dockerhost
+            context: .
+            file: dockerhost/Dockerfile
             platforms: linux/amd64,linux/arm64
           - name: frontend
             image: haliphron-frontend
