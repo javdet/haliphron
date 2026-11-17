@@ -3,6 +3,7 @@ package clusterapi
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -14,7 +15,7 @@ import (
 	runv1 "github.com/automagicops/haliphron/api/run/v1"
 )
 
-// The eight endpoints. Each returns either a decoded response or an error that
+// The nine endpoints. Each returns either a decoded response or an error that
 // carries an Action; no method interprets a status code on the caller's behalf,
 // with the single exception of the 204 on /leases, which is not a failure at
 // all and is reported as a nil response.
@@ -262,4 +263,84 @@ func (c *Client) IngestArtifact(ctx context.Context, req clusterv1.ArtifactInges
 	c.log.Info("artifact forwarded",
 		"runID", req.RunID, "key", req.Key, "bytes", req.SizeBytes, "duplicate", out.Duplicate)
 	return &out, nil
+}
+
+// InputBody is one input file as the backend streams it. The caller reads it
+// to the end, checks it against the lease's InputRef — never against these
+// headers, which say only what the backend believes — and closes it.
+type InputBody struct {
+	io.ReadCloser
+	// SizeBytes is the stated Content-Length, or -1 when none was stated.
+	SizeBytes int64
+	// SHA256 is the digest the backend's manifest records, from the
+	// X-Haliphron-SHA256 header. Informational: the lease's own copy is the
+	// one the controller verifies against.
+	SHA256 string
+}
+
+// LeaseInput opens one input file of a leased run, the call the controller
+// makes for every entry of Lease.Inputs before it acknowledges.
+//
+// file is the entry's key without its inputs/ prefix, already checked by the
+// caller with runv1.InputKey. The request carries the lease's epoch, and the
+// answers that matter come back as Problems like every other call: a stale
+// epoch is abandon, an input the run does not have is fatal, and the rest is
+// retry. This function interprets none of them.
+//
+// It streams, for IngestArtifact's reason: the body is the object. And it logs
+// nothing on success — not the name, not the size — because an input is what a
+// person sent, and its name is their words.
+func (c *Client) LeaseInput(ctx context.Context, runID runv1.ULID, epoch int64, file string) (*InputBody, error) {
+	auth, err := c.authed()
+	if err != nil {
+		return nil, err
+	}
+	q := url.Values{clusterv1.QueryEpoch: {strconv.FormatInt(epoch, 10)}}
+	target := c.base + clusterv1.BasePath + "/leases/" + url.PathEscape(string(runID)) +
+		"/inputs/" + url.PathEscape(file) + "?" + q.Encode()
+
+	httpReq, err := http.NewRequestWithContext(ctx, http.MethodGet, target, nil)
+	if err != nil {
+		return nil, fmt.Errorf("cluster-api leases/inputs: %w", err)
+	}
+	httpReq.Header.Set("Accept", "application/octet-stream, application/problem+json")
+	httpReq.Header.Set(clusterv1.HeaderControllerVersion, c.version)
+	httpReq.Header.Set("Authorization", "Bearer "+auth)
+
+	resp, err := c.streamer().Do(httpReq)
+	if err != nil {
+		// The URL comes off: a *url.Error quotes it, and the URL ends in the
+		// file's name.
+		var urlErr *url.Error
+		if errors.As(err, &urlErr) {
+			err = urlErr.Err
+		}
+		return nil, &TransportError{Op: "leases/inputs", Err: err}
+	}
+	if resp.StatusCode >= 400 {
+		defer func() {
+			_, _ = io.Copy(io.Discard, io.LimitReader(resp.Body, 1<<16))
+			_ = resp.Body.Close()
+		}()
+		payload, err := io.ReadAll(io.LimitReader(resp.Body, clusterv1.MaxRequestBytes))
+		if err != nil {
+			return nil, &TransportError{Op: "leases/inputs", Err: err}
+		}
+		return nil, problemFrom("leases/inputs", resp.StatusCode, payload)
+	}
+	if resp.StatusCode != http.StatusOK {
+		// A 204 or a redirect that was not followed: nothing here is an input,
+		// and the backend has no business answering this way. Retry rather
+		// than fatal — a proxy in the middle is the likelier author.
+		_ = resp.Body.Close()
+		return nil, &clusterv1.Problem{
+			Title:  fmt.Sprintf("leases/inputs: status %d is not an input", resp.StatusCode),
+			Status: int32(resp.StatusCode), Code: clusterv1.CodeInternal, Action: clusterv1.ActionRetry,
+		}
+	}
+	return &InputBody{
+		ReadCloser: resp.Body,
+		SizeBytes:  resp.ContentLength,
+		SHA256:     resp.Header.Get(clusterv1.HeaderArtifactSHA256),
+	}, nil
 }

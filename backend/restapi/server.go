@@ -84,6 +84,8 @@ func (s *Server) Handler() http.Handler {
 	// only place the bytes are.
 	mux.HandleFunc("GET "+BasePath+"/runs/{id}/logs/{chunk}", s.scoped(store.ScopeRunsRead, s.runLogChunk))
 	mux.HandleFunc("GET "+BasePath+"/runs/{id}/attempts", s.scoped(store.ScopeRunsRead, s.runAttempts))
+	mux.HandleFunc("GET "+BasePath+"/runs/{id}/inputs", s.scoped(store.ScopeRunsRead, s.runInputs))
+	mux.HandleFunc("GET "+BasePath+"/runs/{id}/inputs/{file}", s.scoped(store.ScopeRunsRead, s.runInput))
 	mux.HandleFunc("POST "+BasePath+"/runs/{id}/cancel", s.scoped(store.ScopeRunsWrite, s.cancelRun))
 	mux.HandleFunc("POST "+BasePath+"/runs/{id}/retry", s.scoped(store.ScopeRunsWrite, s.retryRun))
 	// admin, not runs:write. Every agent pod holds a per-run token carrying

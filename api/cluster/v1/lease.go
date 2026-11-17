@@ -82,6 +82,23 @@ type Lease struct {
 	// caught at materialisation rather than by a pod that refuses to start.
 	PromptSHA256 string `json:"promptSHA256"`
 
+	// Inputs are the files that arrived with the request — a screenshot
+	// attached to a chat message — as the backend stored them under the run's
+	// prefix. Empty for almost every run.
+	//
+	// Beside the prompt rather than inside the spec for the prompt's reason:
+	// the names are customer context and must stay out of the CR. The bytes
+	// are not here at all. The controller fetches each one with
+	// GET /leases/{runID}/inputs/{file} before it acknowledges, checks it
+	// against SHA256, and writes this list into the per-run Secret under
+	// runv1.SecretKeyInputs, where the pod reads it. A controller that cannot
+	// fetch them does not acknowledge; one told an input is gone refuses the
+	// lease.
+	//
+	// Bounded by MaxInputsPerLease and MaxInputBytesPerLease.
+	// +optional
+	Inputs []runv1.InputRef `json:"inputs,omitempty"`
+
 	// Secrets become a single per-run Secret with an ownerReference to the CR,
 	// so that deleting the CR collects them and no long-lived secret is left in
 	// the agent namespace. Known keys are the SecretKey* constants in run/v1;

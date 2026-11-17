@@ -499,7 +499,18 @@ func sandboxFor(mode string) []string {
 }
 
 func (codex) Launch(r *Run) Command {
-	args := []string{"exec", "--json"}
+	args := []string{"exec"}
+	// Images the request arrived with are attached to the prompt rather than
+	// left for the model to find: codex's shell can list them, but only an
+	// attachment is something the model sees. One --image per file, and right
+	// after exec on purpose: the option takes one or more values, so a
+	// positional after it — the "-" below — would be read as one more image.
+	// The next argument starting with a dash is what ends its list. PDFs and
+	// text are files the agent reads with its shell, and need nothing here.
+	for _, path := range r.imageInputs() {
+		args = append(args, "--image", path)
+	}
+	args = append(args, "--json")
 	args = append(args, sandboxFor(r.cfg.PermissionMode)...)
 	args = append(args, codexGatewayArgs(r.gateway())...)
 	if model := r.modelID(); model != "" {

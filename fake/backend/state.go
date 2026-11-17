@@ -173,6 +173,7 @@ func (b *Backend) issue(c *cluster, limit int, runtimes []runv1.AgentType) []clu
 			Secrets:       copyMap(r.secrets),
 			RoleConfig:    copyMap(r.role),
 			Artifacts:     b.mintBundle(r),
+			Inputs:        append([]runv1.InputRef(nil), r.inputs...),
 		})
 	}
 	b.queue = remaining

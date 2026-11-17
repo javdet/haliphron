@@ -43,7 +43,7 @@ container started by the Docker host controller (`haliphron-dockerhost`,
 [docker-host.md](docker-host.md)) as to a pod started by a Job. Wherever this
 document says "pod", read "the agent container" there: the image gets the same
 variables, the same files under the same paths, the same four writable
-directories over a read-only root, the same uid, and reports to the same three
+directories over a read-only root, the same uid, and talks to the same four
 callback paths. The only difference the image can observe is that
 `HALIPHRON_PROMPT` is a literal value in the container's configuration rather
 than a `secretKeyRef` — the image reads a variable either way.
@@ -139,8 +139,10 @@ independent reasons, either of which would have sufficed.
 
 **Mechanical.** The Secret's keys are fixed by contract 1: `prompt`,
 `git-token`, `llm-api-key`, `llm-base-url` when the key belongs to a gateway,
-`mcp.json`, `callback-token`, `presigned.json` in object-store mode, and
-`agent-env.json` when the role adds variables to the agent's environment. All but the first are invalid environment variable names.
+`mcp.json`, `callback-token`, `presigned.json` in object-store mode,
+`agent-env.json` when the role adds variables to the agent's environment, and
+`inputs.json` when files were sent with the request (section 2.4). All but the
+first are invalid environment variable names.
 `envFrom` silently skips such keys, leaving an Event in the namespace — which
 means the pod starts with no git token, no MCP configuration and no credentials
 at all, and the first intelligible message about it is a clone that failed to
@@ -230,7 +232,7 @@ exchange for a system that starts a run without an object store.
 /workspace/.haliphron/               exchange with the agent
 /workspace/.haliphron/output.json      ← written by the agent: the payload only
 /workspace/.haliphron/artifacts/       ← written by the agent: files that must be kept
-/workspace/.haliphron/inputs/          → phase 3: artifacts from previous steps
+/workspace/.haliphron/inputs/          → written by the inputs phase: files sent with the request, 0444
 /haliphron/role/                     the role ConfigMap, read-only
 /haliphron/secrets/                  the run Secret, read-only, 0400
 /haliphron/run/                      the entrypoint's private state
@@ -260,6 +262,72 @@ wish, under one condition: every CLI cache is redirected into `$HOME` through
 verified by running the image under `docker run --read-only` with three tmpfs
 mounts, not by argument — see the checklist in section 19.
 
+### 2.4 Input files
+
+A person who attaches a screenshot, a log or a PDF to a chat message addressed
+to the bot gets an agent that can see it. The file reaches the pod by a path
+with three hops, and every hop is fixed by a rule stated elsewhere:
+
+1. **The backend downloads it, never the pod.** The backend already holds the
+   bot's credential; the pod is untrusted, and a chat token in it would be a
+   chat token handed to a prompt injection. The backend sniffs the type from the
+   bytes, applies the caps, stores the file under `runs/{id}/inputs/` and writes
+   the manifest with the run.
+2. **The controller fetches it before it acknowledges the lease**
+   ([cluster-api.md](cluster-api.md) §4), onto its own volume, and checks the
+   digest. Nothing starts before the acknowledgement, and a run the controller
+   holds still starts while the backend is down.
+3. **The pod reads it from the controller**, over the callback Service it already
+   reaches with the callback token: `GET {HALIPHRON_CALLBACK_URL}/inputs?runID=…&key=…`.
+   No new credential, no new egress rule, and the same on the Docker host.
+
+**The manifest.** The controller writes the lease's `inputs` into the per-run
+Secret under `inputs.json`: `{"inputs":[{"key","name","mediaType","sizeBytes","sha256"}]}`.
+Absent when the run has none — the normal case, and not a failure. `key` is
+relative to the run's prefix, `inputs/<n>-<name>`, and passes `InputKey` in
+[api/run/v1/inputs.go](../../api/run/v1/inputs.go) — one allow-list, applied by
+the backend, the controller and the pod alike, refusing rather than repairing.
+`name` is what the person called the file and is display only. `mediaType` is
+what the bytes sniffed as at admission. The names are customer context, which
+is why the manifest is in the Secret and not the CR.
+
+**The inputs phase** (section 3) reads the manifest, fetches each entry, checks
+its size and `sha256`, and writes it with mode `0444` as
+`/workspace/.haliphron/inputs/<n>-<name>` — the key without its prefix. A file
+already there from an earlier attempt in the same emptyDir is replaced. The
+directory is inside `.haliphron/`, which `.git/info/exclude` already keeps out
+of every commit. Neither the names nor the bytes are logged: they are what a
+person sent, and the run log is uploaded.
+
+Each fetch is tried up to four times; transport errors, a cut body and any 5xx
+are retried, while 400, 401, 404, 409 and a size or digest mismatch are final.
+A digest header that disagrees with the manifest is refused. A resumed attempt
+that skips `run` skips `inputs` too: the model will not see the files again.
+
+A failure is exit 21, class `infra`, retried: the controller held the file when
+it acknowledged, so a transfer that failed is a transfer that can succeed. The
+reasons are `InputDigestMismatch`, `InputUnavailable`, `InputRefused` and
+`InputUnwritable`. A manifest that does not parse — bad JSON, a key `InputKey`
+refuses, a duplicate key, a digest that is not 64 lowercase hex, a negative
+size — is exit 30, `MalformedSecret`, at secret load, like the other files in
+the mount.
+
+**The callback route** answers only for keys in the requesting run's own
+manifest: `400` for a key outside the allow-list, `401` for a token that does not
+match the run, `404` for a key the manifest does not name, `409` for a run this
+cluster does not hold, `503` when the controller cannot read its copy right now
+(the pod retries that one). `200` streams the bytes with `X-Haliphron-SHA256`.
+
+**What the agent is told.** The prompt carries an "attached files" block after
+the request: each delivered file's path, its name, type, size and who posted
+it, and one line telling the agent to open images and PDFs with its
+file-reading tool. A file that could not be delivered — over a cap, a type the
+agent cannot read, a download that failed — is still named, as *not
+available* with the reason, so the agent says it cannot see it instead of
+guessing what it showed. claude-code opens images and PDFs with its `Read`
+tool, and the block says so when the role denies it; codex is given each image
+with `--image` at start, and reads PDFs and text as files.
+
 ---
 
 ## 3. Phases
@@ -276,19 +344,24 @@ not logging.
 | 4 | `checkpoint` | Read `HALIPHRON_COMPLETED_PHASES`; absent is a normal answer | — |
 | 5 | `auth` | Model credentials, git credential helper, `gh`/`glab` | 30 |
 | 6 | `clone` | Clone, checkout base, create the target branch | 20 / 30 |
-| 7 | `role` | The resolution chain, intersected with the policy ceiling | 30 |
-| 8 | `plugins` | Register the role's marketplaces and install its plugins; best effort | — |
-| 9 | `mcp-prepare` | Render the MCP configuration for the runtime, secrets by reference | 30 |
-| 10 | `mcp-verify` | Check that the servers came up | 30 |
-| 11 | `run` | The agent CLI under a timeout, tee'd to the log and chunked upstream | 10 / 11 |
-| 12 | `parse` | Normalize the runtime's output into `result.md` and `usage` | 10 |
-| 13 | `output` | Wrap the agent's output in the envelope, validate against the node schema | 12 |
-| 14 | `persist` | Upload `result.md`, `output.json` and the log so far | 21 |
-| 15 | `commit` | Commit any leftover changes | 20 |
-| 16 | `push` | `push --force-with-lease` to the deterministic branch | 20 |
-| 17 | `pr` | create-or-update the PR/MR | 20 |
-| 18 | `finalize` | Upload the final log and `completion.json` | 21 |
-| 19 | `notify` | POST the report to the controller | — |
+| 7 | `inputs` | Fetch the files sent with the request from the controller into `.haliphron/inputs/`; absent manifest, or a resumed attempt that will not run the model, is a skip | 21 / 30 |
+| 8 | `role` | The resolution chain, intersected with the policy ceiling | 30 |
+| 9 | `plugins` | Register the role's marketplaces and install its plugins; best effort | — |
+| 10 | `mcp-prepare` | Render the MCP configuration for the runtime, secrets by reference | 30 |
+| 11 | `mcp-verify` | Check that the servers came up | 30 |
+| 12 | `run` | The agent CLI under a timeout, tee'd to the log and chunked upstream | 10 / 11 |
+| 13 | `parse` | Normalize the runtime's output into `result.md` and `usage` | 10 |
+| 14 | `output` | Wrap the agent's output in the envelope, validate against the node schema | 12 |
+| 15 | `persist` | Upload `result.md`, `output.json` and the log so far | 21 |
+| 16 | `commit` | Commit any leftover changes | 20 |
+| 17 | `push` | `push --force-with-lease` to the deterministic branch | 20 |
+| 18 | `pr` | create-or-update the PR/MR | 20 |
+| 19 | `finalize` | Upload the final log and `completion.json` | 21 |
+| 20 | `notify` | POST the report to the controller | — |
+
+`inputs` comes after `clone` because the clone owns the whole workspace and
+cannot clone into a directory that already holds files, and before `role` and
+the agent because the agent is told the files are there (section 2.4).
 
 ### Why `persist` comes before git rather than after
 
@@ -330,7 +403,8 @@ digest mismatch is still 30, and an absent checkpoint is a skip.
 ### Skips are a normal outcome
 
 `skipped` is a full-fledged `outcome`, not a synonym for failure. A run without
-a repository skips `clone`, `commit`, `push` and `pr`. A resumed attempt skips
+a repository skips `clone`, `commit`, `push` and `pr`, and a run without input
+files skips `inputs`. A resumed attempt skips
 everything up to and including `run`. A run with no declared node schema passes
 `output` in a single step. A phase missing from `phaseTimings` and a phase
 marked `skipped` are two different messages, and the second is more useful.
@@ -349,7 +423,7 @@ status even if the pod never managed to say anything.
 | 11 | `agent` | The `run` phase timed out | No |
 | 12 | `agent` | `output.json` is missing or does not pass the node schema | No |
 | 20 | `git` | Clone, push or PR failed for a surmountable reason | Yes |
-| 21 | `infra` | An artifact upload failed: a relay POST, or a presigned PUT | Yes |
+| 21 | `infra` | A transfer with the artifact port failed: a relay POST, a presigned PUT, or reading an input file from the controller | Yes |
 | 30 | `config` | Incomplete configuration, an insurmountable access failure, MCP servers did not come up | No |
 | >128 | `infra` | A signal: OOMKilled, eviction, drain, cancellation | Yes |
 
@@ -1129,10 +1203,15 @@ commit and push; splitting it across containers forces the setup to be
 duplicated and synchronized through an emptyDir. There is no gain, and three
 points of divergence.
 
-An init container is justified in one case — **downloading the input
-artifacts** of previous workflow steps into `/workspace/.haliphron/inputs/`: a
-separate responsibility with separate credentials. It is introduced in phase 3,
-together with workflows.
+~~An init container is justified in one case — downloading the input artifacts
+of previous workflow steps into `/workspace/.haliphron/inputs/`: a separate
+responsibility with separate credentials.~~ Struck when input files arrived
+(delta R17). The init container was justified by separate credentials, and there
+are none: the pod reads its inputs from the controller with the callback token
+it already holds (section 2.4). What is left is a phase, `inputs`, after the
+clone — which owns the whole workspace and would refuse a directory an init
+container had already filled. Phase 3's workflow inputs are inputs whose source
+is a previous step's artifacts, delivered by the same path.
 
 ---
 
@@ -1159,6 +1238,7 @@ say what they say, and what to look at during review.
 | R14 | Redacting secrets from what is uploaded | not considered | a filter on every byte leaving the pod | this document, §11 |
 | R15 | The agent child process's environment | inherits everything | reduced to the model key and the MCP headers | this document, §2.2 |
 | R16 | The name of the runtime switch | `AGENT_TYPE` (from nib) | `HALIPHRON_AGENT` | `runtime.go` |
+| R17 | Input files | an init container in phase 3, with credentials of its own | the `inputs` phase after `clone`, reading from the controller with the callback token; the manifest in the Secret as `inputs.json` | this document §2.4, §3, §17; `runtime.go`, `inputs.go`, `progress.go` |
 
 ---
 
@@ -1280,6 +1360,15 @@ needs a kubelet.
 - [ ] the variables in `agent-env.json` reach the agent's environment, and none of their values reaches a log chunk
 - [ ] `agent-env.json` naming a reserved variable → 30, `MalformedSecret`, before the model is started
 
+**Input files:**
+
+- [ ] `inputs.json` with one PNG → the file is in `/workspace/.haliphron/inputs/` with mode 0444 and the right bytes before `run` starts, and `inputs` is `ok`
+- [ ] no `inputs.json` → `inputs` is `skipped`, and nothing else changes
+- [ ] the controller serves bytes that do not match the digest → 21, class `infra`, the agent never runs
+- [ ] the callback refuses a key outside the run's manifest, and a token of another run
+- [ ] codex is started with `--image` for each image input
+- [ ] no input name or byte reaches a log chunk
+
 **Runtime equivalence:**
 
 - [ ] for every role in the fixture, the effective set of operations on claude-code and on codex is the same
@@ -1295,5 +1384,5 @@ needs a kubelet.
 | 2 | A repository cache | Not doing it. Cloning a monorepo on every run costs minutes and traffic | When clone time becomes a noticeable share of the duration. The solution: a PVC with a bare mirror and `--reference` |
 | 3 | Live log viewing through `kubectl logs -f` | Not doing it. Chunks work identically for a local cluster and for a cluster behind NAT, and they outlive the pod | If the upload-interval latency becomes a complaint — shorten the interval, it is a parameter |
 | 4 | Verifying cost inside the pod | Not doing it: the pod is an interested party and its arithmetic is untrustworthy by construction | Once there is a proxy in front of the LLM; accounting moves there and becomes unforgeable |
-| 5 | Input artifacts of workflow steps | An init container, separate credentials, `/workspace/.haliphron/inputs/` | Phase 3, together with the workflow engine |
+| 5 | Input artifacts of workflow steps | The `inputs` phase and the controller's callback route (section 2.4), with the previous step's artifacts as the source; no init container (R17) | Phase 3, together with the workflow engine |
 | 6 | Signing the report with a per-pod key | Not doing it: `callback-token` gives the same origin guarantee inside the cluster, and per-pod key management is a separate operational burden | If a non-repudiation requirement for reports appears |

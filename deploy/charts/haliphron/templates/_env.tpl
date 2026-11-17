@@ -144,6 +144,20 @@ encryption key is not even that: it is a file, because a variable is visible in
 - name: HALIPHRON_MAX_PROMPT_BYTES
   value: {{ .Values.agent.maxPromptBytes | quote }}
 {{- end }}
+{{- with .Values.agent.inputs }}
+{{- if gt (int .maxFiles) 0 }}
+- name: HALIPHRON_INPUT_MAX_FILES
+  value: {{ .maxFiles | quote }}
+{{- end }}
+{{- if gt (int64 .maxFileBytes) 0 }}
+- name: HALIPHRON_INPUT_MAX_FILE_BYTES
+  value: {{ .maxFileBytes | int64 | quote }}
+{{- end }}
+{{- if gt (int64 .maxBytesPerRun) 0 }}
+- name: HALIPHRON_INPUT_MAX_BYTES_PER_RUN
+  value: {{ .maxBytesPerRun | int64 | quote }}
+{{- end }}
+{{- end }}
 {{- with .Values.agent.otlpEndpoint }}
 - name: HALIPHRON_OTLP_ENDPOINT
   value: {{ . | quote }}

@@ -74,6 +74,7 @@ func decodeEvent(payload json.RawMessage, self Identity) (m app.ChatMessage, ok 
 		FromSelf:       isSelf(e, self),
 		FromBot:        isBot(e),
 		System:         isSystem(e.Subtype),
+		Files:          e.files(),
 	}
 	// A thread's root carries its own ts as thread_ts once it has replies; it
 	// is not inside a thread, it is the thread.

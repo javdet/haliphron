@@ -30,6 +30,13 @@ type faults struct {
 	callbackStatus    int
 	callbackRemaining int
 	callbackAttempts  int
+
+	// inputStatus is the answer GET /inputs gives while inputRemaining is
+	// non-zero; inputCorrupt is how many more reads are served with one byte
+	// flipped under the manifest's digest. Both count down, -1 is forever.
+	inputStatus    int
+	inputRemaining int
+	inputCorrupt   int
 }
 
 type storageFaultRule struct {

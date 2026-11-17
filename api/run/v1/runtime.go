@@ -134,8 +134,10 @@ const (
 	// FileOutput is the agent's structured output — the payload only. The
 	// envelope around it is assembled by the entrypoint; see OutputEnvelope.
 	FileOutput = "/workspace/.haliphron/output.json"
-	// DirInputs holds artifacts of previous workflow steps. Empty in v1; the
-	// init container that fills it arrives with the workflow engine.
+	// DirInputs holds the run's input files — today the files a person
+	// attached to a chat request — written by RuntimePhaseInputs, read-only,
+	// one file per InputRef under InputFileName(key). Empty when the run has
+	// none.
 	DirInputs = "/workspace/.haliphron/inputs"
 	// DirArtifacts is where the agent puts files it wants kept. The entrypoint
 	// uploads the tree under runs/{id}/artifacts/ through the POST policy.
@@ -221,7 +223,7 @@ const MaxRoleSystemPromptBytes = 32 << 10
 // logging: they key the checkpoint, they are the phase field of PhaseTiming,
 // and the UI groups a run's timeline by them.
 //
-// +kubebuilder:validation:Enum=init;validate;fetch;checkpoint;auth;clone;role;plugins;mcp-prepare;mcp-verify;run;parse;output;persist;commit;push;pr;finalize;notify
+// +kubebuilder:validation:Enum=init;validate;fetch;checkpoint;auth;clone;inputs;role;plugins;mcp-prepare;mcp-verify;run;parse;output;persist;commit;push;pr;finalize;notify
 type RuntimePhase string
 
 const (
@@ -246,6 +248,16 @@ const (
 	// helper. The token is never written into .git/config.
 	RuntimePhaseAuth  RuntimePhase = "auth"
 	RuntimePhaseClone RuntimePhase = "clone"
+	// RuntimePhaseInputs fetches the run's input files from the controller
+	// into DirInputs, verifying each against its digest. A run without
+	// SecretKeyInputs skips it.
+	//
+	// After the clone, because the clone owns the whole workspace; before
+	// the role and the agent, because the agent is told the files are there.
+	// A failure is ExitStorage, infra and retriable: the controller held the
+	// file when it acknowledged, so a transfer that failed is a transfer that
+	// can succeed.
+	RuntimePhaseInputs RuntimePhase = "inputs"
 	// RuntimePhaseRole resolves the role config chain and intersects it with
 	// the policy ceiling.
 	RuntimePhaseRole RuntimePhase = "role"
@@ -309,7 +321,7 @@ const (
 // done", which is only meaningful against a fixed sequence.
 var RuntimePhases = []RuntimePhase{
 	RuntimePhaseInit, RuntimePhaseValidate, RuntimePhaseFetch, RuntimePhaseCheckpoint,
-	RuntimePhaseAuth, RuntimePhaseClone, RuntimePhaseRole, RuntimePhasePlugins,
+	RuntimePhaseAuth, RuntimePhaseClone, RuntimePhaseInputs, RuntimePhaseRole, RuntimePhasePlugins,
 	RuntimePhaseMCPPrepare, RuntimePhaseMCPVerify,
 	RuntimePhaseRun, RuntimePhaseParse, RuntimePhaseOutput, RuntimePhasePersist,
 	RuntimePhaseCommit, RuntimePhasePush, RuntimePhasePR,

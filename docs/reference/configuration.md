@@ -139,6 +139,9 @@ Filled in at admission when the request does not state them.
 | Variable | Default | Meaning |
 |---|---|---|
 | `HALIPHRON_MAX_PROMPT_BYTES` | `524288` (512 KiB) | over this, admission answers 413 |
+| `HALIPHRON_INPUT_MAX_FILES` | `10` | files attached to a chat request that are delivered to the agent, at most 32 |
+| `HALIPHRON_INPUT_MAX_FILE_BYTES` | `10485760` (10 MiB) | one attached file; a larger one is named in the prompt as not available |
+| `HALIPHRON_INPUT_MAX_BYTES_PER_RUN` | `26214400` (25 MiB) | all attached files of one run together, at most 100 MiB |
 | `HALIPHRON_MAX_RUN_DEPTH` | `8` | how deep agent-started runs may nest |
 | `HALIPHRON_MAX_RUN_CHILDREN` | `10` | children one run may start |
 | `HALIPHRON_IDEMPOTENCY_TTL` | `24h` | how long an `Idempotency-Key` is remembered |

@@ -37,6 +37,7 @@ import (
 	"github.com/automagicops/haliphron/controller/clusterapi"
 	ctrlconfig "github.com/automagicops/haliphron/controller/config"
 	ctrlidentity "github.com/automagicops/haliphron/controller/identity"
+	"github.com/automagicops/haliphron/controller/inputs"
 	"github.com/automagicops/haliphron/controller/spool"
 
 	"github.com/automagicops/haliphron/dockerhost/callback"
@@ -262,7 +263,8 @@ func serve(ctx context.Context) error {
 		ClusterID: id.ClusterID(), Capacity: cfg.CapacitySlots, Version: version.Version, Log: log,
 	}
 	reconciler := &reconcile.Reconciler{
-		Store: store, Engine: engine, Notifier: reporter, Artifacts: reporter, Bundles: api, Auths: auths,
+		Store: store, Engine: engine, Notifier: reporter, Artifacts: reporter, Inputs: artifactSpool,
+		Bundles: api, Auths: auths,
 		Host: launcher.Host{
 			ClusterID: id.ClusterID(), CallbackURL: cfg.CallbackURL, Network: cfg.Network, DNS: dns,
 			GraceSeconds: cfg.GraceSeconds, DeadlineSlackSeconds: cfg.DeadlineSlack,
@@ -282,6 +284,7 @@ func serve(ctx context.Context) error {
 
 	loop := &lease.Loop{
 		API: api, Store: store, Timings: timings, Kicker: driver, Slots: host,
+		Inputs: &inputs.Fetcher{API: api, Spool: artifactSpool, Log: log},
 		Materializer: &materialize.Materializer{
 			Store: store, Capacity: capChecker, Network: checker, RawSpecs: tap,
 			Runtimes: cfg.Runtimes, CallbackURL: cfg.CallbackURL, Log: log,
@@ -289,7 +292,7 @@ func serve(ctx context.Context) error {
 		Network: cfg.Network, ClusterID: id.ClusterID(), Capacity: cfg.CapacitySlots, Runtimes: cfg.Runtimes, Log: log,
 	}
 	cb := &callback.Server{
-		Store: store, Sink: reporter, Addr: cfg.CallbackAddr, Base: callback.BaseOf(cfg.CallbackURL),
+		Store: store, Sink: reporter, Inputs: artifactSpool, Addr: cfg.CallbackAddr, Base: callback.BaseOf(cfg.CallbackURL),
 		MaxBytesPerRun: cfg.MaxArtifactBytesPerRun, Spent: reporter.Spent, Log: log,
 	}
 	collector := &gc.Collector{Engine: engine, Store: store, Keep: cfg.ImageKeep, Log: log}

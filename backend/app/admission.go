@@ -198,6 +198,16 @@ func (s *Service) submit(ctx context.Context, req run.SubmitRequest, links submi
 		return Submitted{}, err
 	}
 
+	// The files go into the store before the row, because the row's
+	// transaction must not be held open across an upload; the manifest goes in
+	// with the row, so a run never commits without it. What a refused insert
+	// leaves behind is deleted here, and what a crash leaves behind the
+	// sweeper finds through the ledger storeInputs opened.
+	inputs, err := s.storeInputs(ctx, id, req.Inputs)
+	if err != nil {
+		return Submitted{}, err
+	}
+
 	if err := s.store.InsertRun(ctx, store.NewRun{
 		ID:             id,
 		ParentRunID:    req.ParentRunID,
@@ -226,7 +236,12 @@ func (s *Service) submit(ctx context.Context, req run.SubmitRequest, links submi
 
 		AlertReceiverID: links.alertReceiver,
 		AlertFire:       links.alert,
+
+		Inputs: inputs,
 	}); err != nil {
+		if len(inputs) > 0 {
+			s.discardInputs(ctx, id, inputs)
+		}
 		if errors.Is(err, store.ErrTooManyChildren) {
 			// Worth a line of its own: a run that hits this is either a
 			// workflow that wants a bigger ceiling or an agent that has been
@@ -247,7 +262,7 @@ func (s *Service) submit(ctx context.Context, req run.SubmitRequest, links submi
 			"agent": spec.Agent, "model": spec.Model, "role": req.Role,
 			"repo": spec.Repo.URL, "via": req.CreatedVia, "parent": string(req.ParentRunID),
 			"schedule": string(links.schedule), "deferred": string(links.deferred),
-			"alert_receiver": string(links.alertReceiver),
+			"alert_receiver": string(links.alertReceiver), "inputs": len(inputs),
 		},
 	}); err != nil {
 		return Submitted{}, err

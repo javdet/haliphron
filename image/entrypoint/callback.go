@@ -183,6 +183,32 @@ func (c *Callback) Artifact(ctx context.Context, key string, attempt int32,
 	return &ack.Ref, nil
 }
 
+// Input opens one of the run's input files on the controller, the one GET this
+// client makes. The caller owns the response and reads the body; the status is
+// the caller's to interpret, because what a refusal means — final, or worth
+// another try — is the inputs phase's decision and not the transport's.
+//
+// The streaming client, for the reason Artifact gives: a whole-request
+// deadline on a body of megabytes would cut a transfer that was arriving. The
+// caller bounds each try with its context instead.
+func (c *Callback) Input(ctx context.Context, key string) (*http.Response, error) {
+	q := url.Values{
+		runv1.QueryRunID: {string(c.runID)},
+		runv1.QueryKey:   {key},
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet,
+		c.base+runv1.CallbackPathInputs+"?"+q.Encode(), nil)
+	if err != nil {
+		return nil, err
+	}
+	c.authorise(req, "")
+	resp, err := c.stream.Do(req)
+	if err != nil {
+		return nil, errorf("%s", c.redactor.String(err.Error()))
+	}
+	return resp, nil
+}
+
 // authorise sets the two headers every callback carries.
 //
 // The bearer token is the controller's rather than the backend's: the callback

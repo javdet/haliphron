@@ -51,6 +51,8 @@ type mmPost struct {
 	CreateAt  int64          `json:"create_at"`
 	Type      string         `json:"type,omitempty"`
 	Props     map[string]any `json:"props,omitempty"`
+	FileIDs   []string       `json:"file_ids,omitempty"`
+	Metadata  map[string]any `json:"metadata,omitempty"`
 }
 
 type mmReaction struct {
@@ -73,6 +75,10 @@ type fakeMattermost struct {
 	// failPosts makes the next posts by the bot fail with this status.
 	failPosts int
 	failCount int
+	// files are the attachments the server holds, and downloads counts the
+	// times each was fetched.
+	files     map[string][]byte
+	downloads map[string]int
 }
 
 func newFakeMattermost(t *testing.T) *fakeMattermost {
@@ -81,8 +87,21 @@ func newFakeMattermost(t *testing.T) *fakeMattermost {
 		t:     t,
 		users: map[string]string{mmBotID: mmBotName, "user-alice": "alice", "user-bob": "bob"},
 		posts: map[string]mmPost{},
+		files: map[string][]byte{}, downloads: map[string]int{},
 	}
 	mux := http.NewServeMux()
+	mux.HandleFunc("GET /api/v4/files/{id}", f.authorised(func(w http.ResponseWriter, r *http.Request) {
+		f.mu.Lock()
+		body, ok := f.files[r.PathValue("id")]
+		f.downloads[r.PathValue("id")]++
+		f.mu.Unlock()
+		if !ok {
+			writeMM(w, http.StatusNotFound, map[string]string{"id": "app.file.get.app_error"})
+			return
+		}
+		w.Header().Set("Content-Type", "application/octet-stream")
+		_, _ = w.Write(body)
+	}))
 	mux.HandleFunc("GET /api/v4/users/me", f.authorised(func(w http.ResponseWriter, r *http.Request) {
 		writeMM(w, http.StatusOK, map[string]string{"id": mmBotID, "username": mmBotName})
 	}))
@@ -169,6 +188,22 @@ func newFakeMattermost(t *testing.T) *fakeMattermost {
 	f.Server = httptest.NewServer(mux)
 	t.Cleanup(f.Close)
 	return f
+}
+
+// File stores an attachment and returns what a post's metadata says about it.
+// declared is the size the server claims, which a test may make a lie.
+func (f *fakeMattermost) File(id, name string, body []byte, declared int64) map[string]any {
+	f.mu.Lock()
+	f.files[id] = body
+	f.mu.Unlock()
+	return map[string]any{"id": id, "name": name, "size": declared, "mime_type": "image/png"}
+}
+
+// Downloads is how many times the bot fetched a file.
+func (f *fakeMattermost) Downloads(id string) int {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.downloads[id]
 }
 
 func (f *fakeMattermost) authorised(next http.HandlerFunc) http.HandlerFunc {

@@ -147,6 +147,51 @@ anything transient, and at the default timings it gives up after about five
 minutes. Every expiry revokes the per-run token its lease carried: nothing
 started before the ack, so no pod ever held it.
 
+### Inputs are fetched inside the ack window
+
+A lease may carry `inputs`: files a person sent with the request — a screenshot
+attached to a chat message — that the backend stored under the run's prefix at
+admission. The bytes are not in the lease. The controller fetches each one with
+`GET /leases/{runID}/inputs/{file}?epoch=N` (`file` is the entry's key without its
+`inputs/` prefix) **before it acknowledges**, writes it to its own volume, checks
+its size and `sha256`, and writes the list into the per-run Secret under
+`inputs.json`, where the pod reads it ([agent-runtime.md](agent-runtime.md)
+§2.4). The pod later reads each file from the controller, never from here.
+
+That ordering keeps both invariants this section rests on. Nothing starts before
+the acknowledgement, so a fetch that fails — transport, a 5xx, a backend
+restarting — is simply no ack: the ack deadline expires and the backend
+reassigns, which is safe because nothing started. And a run the controller has
+acknowledged has everything it needs on the controller's volume, so it still
+starts and finishes while the backend is down.
+
+The endpoint requires the run's current epoch, like `/ack`; a stale one is
+`EpochMismatch`, `abandon`. An entry the run's manifest does not name, or whose
+object is gone from the store, is `404 InputNotFound`, `fatal`: no repeat brings
+an object back, and the controller **refuses the lease** with a negative ack
+rather than start a run whose agent will be told it has a file it does not. A
+body that does not hash to the entry's digest is refused the same way. A lease
+whose `inputs` break the limits of section 10, or carry a key outside
+`runv1.InputKey`, is refused with `InvalidSpec`.
+
+The limits in section 10 keep the fetch far inside `ackDeadline`: at the
+defaults, 25 MiB over an in-datacentre link is seconds, not the minute the ack
+allows. The controller gives the whole fetch two thirds of `ackTimeoutSeconds`
+and each request 60 s. A stated `Content-Length` that differs from the entry's
+size is refused before the transfer, as a mismatch. Rejection messages name
+inputs by position, never by name.
+
+Inputs already on the controller's volume and intact are reused — after a
+restart, and across epochs of the same run. A controller that restarts between
+materialising and acknowledging reads the manifest back from the per-run Secret
+(or the Docker host's row) and fetches whatever its volume lost before it
+repeats the ack. An acknowledged run's inputs live only on the controller's
+volume: an `emptyDir` spool loses them on a restart, and the pod's read then
+fails as infra. The spool's `PersistentVolumeClaim` is the answer, as it is for
+relayed artifacts, and more than one replica needs it `ReadWriteMany`, because
+the pod's read reaches any replica through the Service. Inputs are deleted when
+the `AgentRun` is finalised, and orphans with no `AgentRun` after an hour.
+
 ### The expiry of `leaseDeadline` does not oblige the controller to stop
 
 A deliberate asymmetry. `leaseDeadline` is authoritative **for the backend** (a
@@ -256,7 +301,7 @@ grounds to give up.
 | `abandon` | cancel the Job, delete the CR (the Secret, ConfigMap and Pod go with it by ownerReference), **report nothing further** about this run |
 | `resync` | the next heartbeat with `reportComplete: true` |
 | `reregister` | the credential is unusable: stop polling, raise an event for the operator |
-| `fatal` | stop the operation, record an event, the `reconcile_errors_total` metric. A repeat will not help |
+| `fatal` | stop the operation, record an event, the `reconcile_errors_total` metric. A repeat will not help. On `GET /leases/{runID}/inputs/{file}` (`InputNotFound`) the operation is the lease: the controller refuses it with a negative ack |
 
 Additionally, regardless of `action`:
 
@@ -335,8 +380,8 @@ network in the clear. The backend cannot create a Secret in the cluster
 
 Requirements, mandatory to check in code review on both sides:
 
-1. `Cache-Control: no-store` on the `/leases` and `/leases/{id}/artifacts`
-   responses.
+1. `Cache-Control: no-store` on the `/leases`, `/leases/{id}/artifacts` and
+   `/leases/{id}/inputs/{file}` responses.
 2. The bodies of those responses are **not logged** at any logging level. Only
    `runID`, `epoch` and the number of leases are logged.
 3. Tracing does not write the body into span attributes.
@@ -360,6 +405,10 @@ Requirements, mandatory to check in code review on both sides:
    spec and out of `kubectl describe pod`; what it buys over `envFrom` is that
    it names one key rather than spraying a Secret whose other keys are
    credentials.
+
+8. **Input files are customer data**, like the prompt: their names and bytes are
+   never logged at any level, never a metric label, never a span attribute, and
+   the names stay out of the CR — the manifest goes into the per-run Secret.
 
 The git token is hour-long and scoped to one repository (section 14 of the
 architecture). It is the main compensating control in the absence of egress
@@ -387,6 +436,8 @@ outside the bounds of v1.
 | `/ingest/artifacts` body | 256 MiB | the one endpoint whose body is an object rather than a message |
 | artifact bytes per run | 1 GiB, configurable | enforced by the controller, so an over-large upload is refused one hop from the pod rather than after crossing the network |
 | `prompt` | 512 KiB | it has to fit in the per-run Secret beside three credentials, and a Secret is capped at 1 MiB across all its keys |
+| `inputs[]` | 32 entries, 100 MiB in all | the ceiling a controller agrees to fetch before it acknowledges; a lease past it is refused with `InvalidSpec`. The backend's admission defaults are lower — 10 files, 10 MiB each, 25 MiB per run (`HALIPHRON_INPUT_MAX_*`) — and may be raised up to it |
+| input types | `image/png`, `image/jpeg`, `image/gif`, `image/webp`, `application/pdf`, `text/*` | what both CLIs can read, decided by sniffing the bytes at admission; a file of any other type is named in the prompt as not available and never stored |
 | `reports[]` | 100 | the ingest batch |
 | `runs[]` in the heartbeat | 500 | the cluster capacity ceiling with room to spare |
 | `capacitySlots` | 256 | declared at registration and in the heartbeat; a larger value is a 400 `fatal`. Below the heartbeat's `runs[]` limit, so a full cluster fits in one heartbeat |
@@ -485,6 +536,7 @@ it says, and what to look at during review.
 | D18 | Artifact storage | one path, through S3 | a port with two modes; `/ingest/artifacts` is the relay's half | requiring MinIO to run one agent is a tax on every evaluation and every on-prem install. The mode rides in `ArtifactBundle.mode`, and an absent value reads as relay so a newer controller defaults to the path that needs no configuration |
 | D19 | The retry checkpoint | `state.json`, read by the pod | `RunObservation.completedPhases` up, `Lease.completedPhases` down | the checkpoint is a fact about the run's progress, and the progress already lives in the control plane. Unioned on write, because reports arrive reordered and a stale heartbeat must not shorten what the fast path grew |
 | D20 | `ObjectRef` | carried a `bucket` | key, digest and `uploaded` | which store holds an object is the installation's business; a pod that never learns a bucket name cannot leak one, and `uploaded` is what the backend checks before believing a ref |
+| D21 | Input files | an init container in phase 3 with credentials of its own | `Lease.inputs` (a manifest) + `GET /leases/{runID}/inputs/{file}`, fetched by the controller before the ack | the backend already holds the chat credential and the pod must not; fetching before the ack keeps "nothing starts before the ack" and "a held run finishes without the backend" both true. The bytes are in the store, not the Secret, which is capped at 1 MiB beside the prompt |
 
 ---
 
@@ -524,6 +576,8 @@ side.
 - [x] `ack {accepted: false}` → epoch +1, `Queued`, this cluster excluded from selection for this run
 - [x] `ack {accepted: false}` with only one cluster → `Failed`, class `config`, the reason visible in the UI
 - [x] a terminal status without a completion but with `completion.json` in storage → the cost and `prURL` are lifted from it
+- [x] a lease of a run admitted with files carries their manifest, and `GET /leases/{runID}/inputs/{file}` streams each with its digest and `no-store`
+- [x] `GET /leases/{runID}/inputs/{file}` under a stale epoch → 409 `abandon`; for a file the manifest does not name → 404 `InputNotFound`, `fatal`
 
 Row 4 is the one that changed while it was being implemented. It read "the work
 goes to another cluster"; `expire_ack.sql` keeps the assignment instead, and
@@ -540,6 +594,8 @@ means. The test asserts the assignment is kept.
 - [x] 409 `abandon` → the Job cancelled, the CR deleted, no further reports
 - [x] an unavailable backend → the work taken is played out, reports accumulate and are sent later
 - [x] 204 → immediate re-poll without backoff
+- [x] a lease with `inputs` is not acknowledged until every input is on the controller's volume and matches its digest; `inputs.json` is in the Secret and nothing of it in the CR
+- [x] `InputNotFound` or a digest mismatch on an input → a negative ack, not a launch
 - [x] a dropped long poll → a repeat no more than once per second
 - [x] an unknown `Command.type` → a no-op, not a panic
 - [x] an unknown field in `Lease` → ignored

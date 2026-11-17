@@ -165,6 +165,17 @@ func (r *Reconciler) finalize(ctx context.Context, cr *agentrunv1alpha1.AgentRun
 			"agentRun", cr.Name, "runID", cr.Spec.RunID)
 	}
 
+	// The pods are gone, so nothing will ask for the run's inputs again. Before
+	// the finalizer is released rather than after: once it is, the object can
+	// vanish and nothing would be left to say whose inputs these were. A new
+	// epoch of the same run is materialised only after this object is gone,
+	// and its lease confirms its own inputs before it is acknowledged.
+	if r.Inputs != nil {
+		if err := r.Inputs.ForgetInputs(cr.Spec.RunID); err != nil {
+			r.log.Error("discarding a run's inputs", "runID", cr.Spec.RunID, "error", err)
+		}
+	}
+
 	patch := client.MergeFrom(cr.DeepCopy())
 	controllerutil.RemoveFinalizer(cr, agentrunv1alpha1.FinalizerTerminateJob)
 	if err := r.Patch(ctx, cr, patch); err != nil && !apierrors.IsNotFound(err) {

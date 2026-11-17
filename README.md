@@ -67,7 +67,7 @@ Eleven Go modules in a `go.work`.
 | [`api/`](api/) | the four wire contracts as Go types, plus OpenAPI and JSON Schema |
 | [`backend/`](backend/) | the control plane: REST, MCP and Cluster API listeners over use cases over pgx |
 | [`controller/`](controller/) | the in-cluster controller: lease, materialize, reconcile, launch |
-| [`image/`](image/) | the agent image entrypoint: nineteen phases |
+| [`image/`](image/) | the agent image entrypoint: twenty phases |
 | [`db/`](db/) | migrations and the contract queries |
 | [`fake/`](fake/) | one faithful implementation of each contract side — a deliverable, not test utilities |
 | [`frontend/`](frontend/) | the web UI: React behind an nginx that proxies `/api` |

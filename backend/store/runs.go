@@ -88,6 +88,12 @@ type NewRun struct {
 	// AlertSettledError if another run claimed any of them first.
 	AlertReceiverID runv1.ULID
 	AlertFire       *AlertFire
+
+	// Inputs is the run's manifest: the files stored under its prefix at
+	// admission. Written in the same transaction as the run, which also closes
+	// the upload ledger row BeginInputUpload opened, so a run never commits
+	// without its manifest and stored objects are never orphaned by a commit.
+	Inputs []RunInput
 }
 
 // ErrTooManyChildren is a child run refused because its parent has already
@@ -115,6 +121,9 @@ var ErrTooManyChildren = errors.New("store: the parent run has started its full 
 // submitted here, for that reason once more, and a run admitted for an
 // Alertmanager notification claims its alerts' throttle windows here.
 //
+// A run admitted with input files writes its manifest here, for the same
+// reason a chat-started run links its message here.
+//
 // The run's lineage — its ancestors, root first — is written here and nowhere
 // else, from the parent row in the insert statement itself. It is what run
 // notes are read along, and it is immutable once written (0018).
@@ -137,6 +146,11 @@ func (s *Store) InsertRun(ctx context.Context, r NewRun) error {
 				return ErrNotFound
 			}
 			return err
+		}
+		if len(r.Inputs) > 0 {
+			if err := insertRunInputs(ctx, tx, r.ID, r.Inputs); err != nil {
+				return err
+			}
 		}
 		if r.AlertFire != nil {
 			if err := linkAlertFire(ctx, tx, r.AlertReceiverID, r.ID, *r.AlertFire); err != nil {

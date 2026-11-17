@@ -18,19 +18,21 @@ reports that queue during an outage) is what it costs.
 |---|---|
 | `clusterapi/` | contract 1 as a client: transport, token, and the action a failure carries |
 | `identity/` | the Ed25519 pair, its Secret, and the one-time registration |
-| `lease/` | the long poll, and making a lease durable before acknowledging it |
+| `lease/` | the long poll, and making a lease durable — its input files fetched first — before acknowledging it |
+| `inputs/` | fetching a lease's input files into the spool and verifying them, shared with `dockerhost/` |
 | `materialize/` | lease → Secret, ConfigMap, AgentRun, and the pruning read-back |
 | `agentrun/` | the reconciler: the phase table, retries, cancellation, the finalizer, the TTL |
 | `launcher/` | section 11 of the CRD contract, executable: the Job |
 | `report/` | the outbound queue, the ingest path and the heartbeat |
-| `callback/` | the endpoint the agent pod posts its report to |
+| `callback/` | the endpoint the agent pod posts its report to, and reads its input files from (`GET /inputs`) |
+| `spool/` | what a pod handed this controller until the backend has it, and, apart, the inputs fetched for a run until its pod has read them |
 | `config/` | what the chart sets, and what the control plane overrides at runtime |
 
 The contract tests live in [test/controller](../test/controller); this module
 does not depend on `fake`, so what ships to a customer cannot carry a test
 double.
 
-## The four rules
+## The rules
 
 **Nothing starts before the acknowledgement.** The backend reassigns an
 unacknowledged lease on the grounds that the work cannot have started. The Job
@@ -49,6 +51,18 @@ so nobody would ever find out.
 independently written sides always diverge on what a 409 means. `Problem.action`
 is what removes the question, and [`clusterapi`](clusterapi/client.go) is the
 only place that reads it.
+
+**A lease with input files is acknowledged only once every one is spooled.**
+The controller fetches each file from the backend, checks it against the size
+and SHA-256 in the lease, and only then materialises and acks; the pod later
+reads them from this controller over the callback, never from the backend. That
+is what keeps the first rule and the outage rule both true for a run that has
+attachments. A file the backend says is gone (`InputNotFound`, action fatal), or
+bytes that do not match, refuse the lease with `MaterializationFailed`; a
+backend that cannot be reached means no ack at all. The manifest goes into the
+per-run Secret as `inputs.json` and nothing about inputs goes into the CR. Input
+names and bytes are customer data: never logged, never in a rejection message,
+never a metric label — an input is named by its position.
 
 **The lease body is never logged.** It is the one message in the system carrying
 secret material in the clear: an hour-long git token, a model key and bearer

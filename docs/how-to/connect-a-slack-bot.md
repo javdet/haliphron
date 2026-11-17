@@ -77,6 +77,7 @@ works. It needs egress to `slack.com` and `wss-*.slack.com`.
          - im:read
          - mpim:read
          - users:read
+         - files:read
    settings:
      event_subscriptions:
        bot_events:
@@ -98,7 +99,9 @@ works. It needs egress to `slack.com` and `wss-*.slack.com`.
 
    The `*:history` scopes let the bot read a thread before it acts. The
    `*:read` and `users:read` scopes let it name the channel and the sender in
-   the prompt.
+   the prompt. `files:read` lets it download a screenshot or a log attached to
+   a message, so the agent can open it; without it the run still starts, and
+   the prompt names each attached file as not available for that reason.
 
 2. **Basic Information → App-Level Tokens → Generate Token and Scopes**. Add
    the scope `connections:write` and copy the `xapp-…` token. This token only
@@ -189,6 +192,13 @@ bounded by **Thread context**, and then the request. Every new message in the
 thread is a new run that reads the whole thread again, so the agent needs no
 memory of its own. A child run that the classificator starts gets the same
 block, and its answer is posted in the same thread.
+
+Files attached to the message, and to the earlier posts the prompt quotes,
+follow the request in an "attached files" block. Each one that arrived is in
+`/workspace/.haliphron/inputs/` under the path the block shows; each one that
+did not — too large, past the count, a type the agent cannot read, or the app
+missing `files:read` — is named as not available, with the reason. The
+defaults are 10 files, 10 MiB each and 25 MiB per request.
 
 ## Check it
 

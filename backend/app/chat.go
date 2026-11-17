@@ -63,6 +63,11 @@ type ChatPlatform interface {
 	React(ctx context.Context, postID, emoji string) error
 	// MaxPostRunes is the longest post the server accepts.
 	MaxPostRunes() int
+	// Download reads a file attached to a post, with the bot's own
+	// credential, and returns at most limit+1 bytes of it: one past the cap is
+	// how a file larger than it is told apart without reading it whole. A file
+	// the platform will not hand over is a *ChatFileError naming why.
+	Download(ctx context.Context, f ChatFile, limit int64) ([]byte, error)
 }
 
 // ChatMessage is a message as the adapter decoded it. The adapter reports
@@ -99,6 +104,10 @@ type ChatMessage struct {
 	FromWebhook bool
 	// System is a server-generated post: a join, a header change.
 	System bool
+
+	// Files are the files attached to the message, as the platform described
+	// them. Whether the run gets them is Handle's decision.
+	Files []ChatFile
 }
 
 // ChatThreadPost is one post of a thread, as context for a prompt.
@@ -117,6 +126,8 @@ type ChatThreadPost struct {
 	FromBot bool
 	Kind    string
 	System  bool
+	// Files are the files attached to the post.
+	Files []ChatFile
 }
 
 // ChatPost is a post the bot publishes.
@@ -326,13 +337,26 @@ func (c *Chat) Handle(ctx context.Context, m ChatMessage) (ChatOutcome, error) {
 		return c.release(ctx, key)
 	}
 
-	if strings.TrimSpace(m.Text) == "" && len(contextPosts(history, m)) == 0 {
+	// A mention with a file and no words is a request: the file is what to
+	// look at.
+	if strings.TrimSpace(m.Text) == "" && len(contextPosts(history, m)) == 0 && len(m.Files) == 0 {
 		return c.refuse(ctx, key, "Tell me what to do: mention me followed by the task.")
 	}
 
+	// Files: the message's own, then those of the posts the prompt quotes.
+	// Which posts are quoted depends on the room the files' block takes, so
+	// that room is fixed first, from every file there could be.
+	maxBytes := c.svc.maxPromptBytes()
+	att := chatAttachments{reserve: chatFileReserve(history, m, c.svc.InputLimits())}
+	var inputs []run.InputFile
+	if att.reserve > 0 {
+		quoted := chatQuotedPosts(c.platform.Name(), history, m, maxBytes, c.cfg.MaxThreadBytes, att.reserve)
+		inputs, att.block = c.collectFiles(ctx, chatCandidates(quoted, m), att.reserve)
+	}
+
 	submitted, err := c.svc.submit(ctx, run.SubmitRequest{
-		Prompt: BuildChatPrompt(c.platform.Name(), history, m, c.svc.maxPromptBytes(),
-			c.cfg.MaxThreadBytes),
+		Prompt:     buildChatPrompt(c.platform.Name(), history, m, maxBytes, c.cfg.MaxThreadBytes, att),
+		Inputs:     inputs,
 		Role:       c.cfg.Role,
 		RepoURL:    c.cfg.RepoURL,
 		BaseBranch: c.cfg.BaseBranch,
@@ -352,7 +376,8 @@ func (c *Chat) Handle(ctx context.Context, m ChatMessage) (ChatOutcome, error) {
 	}
 
 	id := submitted.Run.ID
-	c.log.Info("a chat message started a run", "message", m.ID, "channel", m.ChannelID, "run", id)
+	c.log.Info("a chat message started a run", "message", m.ID, "channel", m.ChannelID, "run", id,
+		"files", len(inputs))
 
 	// The reaction is the whole acknowledgement: a post ahead of the answer
 	// would be the system talking about itself in the person's thread. It is

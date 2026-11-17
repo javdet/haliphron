@@ -39,6 +39,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("POST "+p+"/clusters/{clusterID}/heartbeat", s.heartbeat)
 	mux.HandleFunc("POST "+p+"/leases/{runID}/ack", s.ack)
 	mux.HandleFunc("POST "+p+"/leases/{runID}/artifacts", s.artifacts)
+	mux.HandleFunc("GET "+p+"/leases/{runID}/inputs/{file}", s.input)
 	mux.HandleFunc("POST "+p+"/ingest/status", s.ingestStatus)
 	mux.HandleFunc("POST "+p+"/ingest/completion", s.ingestCompletion)
 	mux.HandleFunc("POST "+p+"/ingest/artifacts", s.ingestArtifacts)
@@ -206,6 +207,45 @@ func (s *Server) artifacts(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	s.writeSecret(w, http.StatusOK, bundle)
+}
+
+// input streams one input file of a leased run to its controller.
+//
+// Like the relay, the body is the object and nothing is buffered. The answer is
+// no-store, and nothing here logs the name or the bytes: they are what a
+// person sent.
+func (s *Server) input(w http.ResponseWriter, r *http.Request) {
+	runID := runv1.ULID(r.PathValue("runID"))
+	epoch, err := strconv.ParseInt(r.URL.Query().Get(clusterv1.QueryEpoch), 10, 64)
+	if err != nil || epoch < 1 {
+		s.problem(w, clusterv1.Problem{
+			Title: "an input is read under the run's current epoch", Status: http.StatusBadRequest,
+			Code: clusterv1.CodeInvalidRequest, Action: clusterv1.ActionFatal, RunID: runID,
+		})
+		return
+	}
+	cluster, ok := s.authenticate(w, r, "")
+	if !ok {
+		return
+	}
+
+	ref, body, err := s.app.LeaseInput(r.Context(), cluster, runID, epoch, r.PathValue("file"))
+	if err != nil {
+		s.fail(w, r, runID, err)
+		return
+	}
+	defer body.Close()
+
+	w.Header().Set("Cache-Control", "no-store")
+	w.Header().Set("Content-Type", "application/octet-stream")
+	w.Header().Set("Content-Length", strconv.FormatInt(ref.SizeBytes, 10))
+	w.Header().Set(clusterv1.HeaderArtifactSHA256, ref.SHA256)
+	w.WriteHeader(http.StatusOK)
+	if _, err := io.Copy(w, body); err != nil {
+		// The controller checks the digest of what it received and fetches
+		// again; there is nothing to answer.
+		s.log.Warn("an input transfer to a controller was cut", "run", runID, "error", err)
+	}
 }
 
 func (s *Server) heartbeat(w http.ResponseWriter, r *http.Request) {

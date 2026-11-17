@@ -34,6 +34,16 @@ const (
 
 	// DefaultMaxBytesPerRun is artifacts.maxBytesPerRun's default.
 	DefaultMaxBytesPerRun = 1 << 30 // 1 GiB
+
+	// MaxInputsPerLease and MaxInputBytesPerLease bound Lease.Inputs. They
+	// are ceilings on what a controller agrees to fetch before it
+	// acknowledges, not the admission defaults (10 files, 10 MiB each, 25 MiB
+	// in all), which the backend may lower or raise up to these. A lease past
+	// either is refused with InvalidSpec: the fetch happens inside the ack
+	// deadline, and a backend configured to send a gigabyte would turn every
+	// such lease into an expiry.
+	MaxInputsPerLease     = 32
+	MaxInputBytesPerLease = 100 << 20 // 100 MiB
 )
 
 // StatusIngestRequest is the low-latency path for a phase change. It duplicates

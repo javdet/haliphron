@@ -15,11 +15,15 @@ package lease
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"log/slog"
 	"time"
 
+	corev1 "k8s.io/api/core/v1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
+	"k8s.io/apimachinery/pkg/types"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	agentrunv1alpha1 "github.com/automagicops/haliphron/api/agentrun/v1alpha1"
@@ -29,6 +33,7 @@ import (
 	"github.com/automagicops/haliphron/controller/agentrun"
 	"github.com/automagicops/haliphron/controller/clusterapi"
 	"github.com/automagicops/haliphron/controller/config"
+	"github.com/automagicops/haliphron/controller/inputs"
 	"github.com/automagicops/haliphron/controller/materialize"
 )
 
@@ -46,6 +51,10 @@ type Loop struct {
 	K8s          client.Client
 	Materializer *materialize.Materializer
 	Timings      *config.Timings
+	// Inputs fetches a lease's input files into the spool before the lease is
+	// acknowledged. Nil refuses every lease that has inputs, which is the
+	// honest answer from a controller with nowhere to keep them.
+	Inputs *inputs.Fetcher
 
 	Namespace string
 	ClusterID runv1.ULID
@@ -60,7 +69,20 @@ type Loop struct {
 	// timeout — the two are indistinguishable from the outside and only one of
 	// them is normal.
 	pollSlack time.Duration
+
+	// lastSweep is when the inputs area was last swept for runs this
+	// controller no longer holds. In memory on purpose: losing it costs one
+	// early sweep, which is harmless.
+	lastSweep time.Time
 }
+
+// inputSweepInterval and inputOrphanAge pace the sweep of fetched inputs whose
+// run never materialised here. The age is far past any ack deadline, so a
+// lease being handled right now is never swept from under itself.
+const (
+	inputSweepInterval = 10 * time.Minute
+	inputOrphanAge     = time.Hour
+)
 
 // New builds the loop.
 func New(l Loop) (*Loop, error) {
@@ -105,12 +127,9 @@ func (l *Loop) Start(ctx context.Context) error {
 		if !pacer.Wait(ctx, l.Clock) {
 			return nil
 		}
-		timings := l.Timings.Get()
-		wait := time.Duration(timings.MaxWaitSeconds) * time.Second
+		l.maybeSweepInputs(ctx)
 
-		pollCtx, cancel := context.WithTimeout(ctx, wait+l.pollSlack)
-		_, err := l.PollOnce(pollCtx)
-		cancel()
+		_, err := l.PollOnce(ctx)
 
 		if ctx.Err() != nil {
 			return nil
@@ -136,6 +155,11 @@ func (l *Loop) Start(ctx context.Context) error {
 //
 // It is separate from Start so that the protocol can be exercised one step at a
 // time. A loop that can only be run forever can only be tested by waiting.
+//
+// The poll's own deadline covers the long poll only. The leases that come back
+// are handled under ctx, because handling one can take a fetch of its input
+// files, and that is bounded by the ack deadline rather than by whatever was
+// left of thirty seconds of waiting.
 func (l *Loop) PollOnce(ctx context.Context) (int, error) {
 	timings := l.Timings.Get()
 	free, err := l.freeSlots(ctx)
@@ -144,12 +168,15 @@ func (l *Loop) PollOnce(ctx context.Context) (int, error) {
 		free = 0
 	}
 
-	resp, err := l.API.Lease(ctx, clusterv1.LeaseRequest{
+	wait := time.Duration(timings.MaxWaitSeconds) * time.Second
+	pollCtx, cancel := context.WithTimeout(ctx, wait+l.pollSlack)
+	resp, err := l.API.Lease(pollCtx, clusterv1.LeaseRequest{
 		FreeSlots:     free,
 		CapacitySlots: l.Capacity,
 		Runtimes:      l.Runtimes,
 		WaitSeconds:   timings.MaxWaitSeconds,
 	})
+	cancel()
 	if err != nil {
 		return 0, err
 	}
@@ -208,7 +235,32 @@ func (l *Loop) classify(err error, backoff *clusterapi.Backoff) (stop bool, dela
 // work: the Job waits for the acknowledgement, because the backend is entitled
 // to reassign an unacknowledged lease on the grounds that it cannot have
 // started.
+//
+// A lease with input files has them fetched first, into this controller's
+// spool and verified, and only then is anything materialised. That order is
+// what lets the acknowledgement keep both of its promises for such a run: the
+// work has not started, and once it has, it no longer needs the backend.
 func (l *Loop) handle(ctx context.Context, lease clusterv1.Lease) {
+	var fetchCtx context.Context = ctx
+	if len(lease.Inputs) > 0 {
+		var cancel context.CancelFunc
+		fetchCtx, cancel = context.WithTimeout(ctx, inputs.Budget(l.Timings.Get().AckTimeoutSeconds))
+		defer cancel()
+		rejection, err := l.fetcher().Fetch(fetchCtx, lease)
+		if err != nil {
+			// No ack, as for a failed materialisation: the backend reassigns
+			// after the deadline. What did arrive stays in the spool, and the
+			// next lease of this run fetches only what is missing.
+			l.Log.Error("fetching a lease's inputs", "runID", lease.RunID, "epoch", lease.Epoch, "error", err)
+			return
+		}
+		if rejection != nil {
+			l.forgetInputs(lease.RunID)
+			l.ack(ctx, lease, materialize.Result{Rejection: rejection})
+			return
+		}
+	}
+
 	result, err := l.Materializer.Apply(ctx, lease)
 	if err != nil {
 		// No ack, positive or negative. The ack deadline expires, the backend
@@ -223,7 +275,30 @@ func (l *Loop) handle(ctx context.Context, lease clusterv1.Lease) {
 			"runID", lease.RunID, "epoch", lease.Epoch)
 		return
 	}
+	if result.AgentRun != nil && len(lease.Inputs) > 0 {
+		// The inputs were verified before the objects existed; this is the
+		// check that nothing removed them in between. Collecting the previous
+		// epoch of the same run is the one thing that can.
+		rejection, err := l.fetcher().Confirm(fetchCtx, lease)
+		if err != nil {
+			l.Log.Error("re-fetching a lease's inputs", "runID", lease.RunID, "epoch", lease.Epoch, "error", err)
+			return
+		}
+		if rejection != nil {
+			if err := l.K8s.Delete(ctx, result.AgentRun); err != nil && !apierrors.IsNotFound(err) {
+				l.Log.Error("deleting a run whose inputs could not be fetched", "runID", lease.RunID, "error", err)
+				return
+			}
+			l.forgetInputs(lease.RunID)
+			result = materialize.Result{Rejection: rejection}
+		}
+	}
+	l.ack(ctx, lease, result)
+}
 
+// ack sends the acknowledgement for a handled lease: negative when the result
+// carries a rejection, positive otherwise.
+func (l *Loop) ack(ctx context.Context, lease clusterv1.Lease, result materialize.Result) {
 	req := clusterv1.AckRequest{
 		ClusterID: l.ClusterID,
 		Epoch:     lease.Epoch,
@@ -265,6 +340,12 @@ func (l *Loop) handle(ctx context.Context, lease clusterv1.Lease) {
 // that needs action is abandon: the work was reassigned while this cluster was
 // materialising it, and the objects just created have to go.
 func (l *Loop) handleAckError(ctx context.Context, lease clusterv1.Lease, result materialize.Result, err error) {
+	if clusterapi.ActionOf(err) == clusterv1.ActionAbandon {
+		// Whatever was fetched for this lease belongs to whoever holds the run
+		// now. The CR, if there is one, takes the rest with it when the
+		// reconciler collects it.
+		l.forgetInputs(lease.RunID)
+	}
 	if clusterapi.ActionOf(err) == clusterv1.ActionAbandon && result.AgentRun != nil {
 		l.Log.Info("the lease was reassigned before it could be acknowledged",
 			"runID", lease.RunID, "epoch", lease.Epoch)
@@ -296,6 +377,9 @@ func (l *Loop) Resume(ctx context.Context) {
 		cr := &runs.Items[i]
 		if agentrun.IsAcknowledged(cr) || agentrun.IsAbandoned(cr) ||
 			cr.DeletionTimestamp != nil || cr.Status.Phase.IsTerminal() {
+			continue
+		}
+		if !l.resumeInputs(ctx, cr) {
 			continue
 		}
 		resp, err := l.API.Ack(ctx, cr.Spec.RunID, clusterv1.AckRequest{
@@ -349,4 +433,115 @@ func (l *Loop) freeSlots(ctx context.Context) (int32, error) {
 		return free, nil
 	}
 	return 0, nil
+}
+
+// fetcher is the configured Fetcher, or one with nothing wired, which refuses
+// every lease that has inputs.
+func (l *Loop) fetcher() *inputs.Fetcher {
+	if l.Inputs != nil {
+		return l.Inputs
+	}
+	return &inputs.Fetcher{Log: l.Log}
+}
+
+func (l *Loop) forgetInputs(id runv1.ULID) {
+	if l.Inputs == nil || l.Inputs.Spool == nil {
+		return
+	}
+	if err := l.Inputs.Spool.ForgetInputs(id); err != nil {
+		l.Log.Error("discarding a run's inputs", "runID", id, "error", err)
+	}
+}
+
+// resumeInputs is the inputs half of repeating an acknowledgement after a
+// restart: the run's manifest, read back from its Secret, must be in the spool
+// before the ack goes out again. Inputs that are missing — a spool on an
+// emptyDir, a crash mid-fetch that the Secret nonetheless outlived — are
+// fetched again. It reports whether the ack may be repeated.
+//
+// A run whose inputs cannot be fetched is not acknowledged: the reconciler
+// discards it when its ack budget runs out, and the backend reassigns. One
+// whose inputs are refused is deleted and refused, as a fresh lease would be.
+func (l *Loop) resumeInputs(ctx context.Context, cr *agentrunv1alpha1.AgentRun) bool {
+	var secret corev1.Secret
+	err := l.K8s.Get(ctx, types.NamespacedName{Namespace: cr.Namespace, Name: cr.Spec.Materials.SecretName}, &secret)
+	if apierrors.IsNotFound(err) {
+		// The crash came between the CR and the Secret. The ack is repeated
+		// as before; the reconciler cannot start a Job without the Secret, and
+		// the next lease of this run re-ensures it.
+		return true
+	}
+	if err != nil {
+		l.Log.Error("reading a run's Secret at startup", "runID", cr.Spec.RunID, "error", err)
+		return false
+	}
+	raw := secret.Data[runv1.SecretKeyInputs]
+	if len(raw) == 0 {
+		return true
+	}
+	var manifest runv1.InputManifest
+	if err := json.Unmarshal(raw, &manifest); err != nil {
+		l.Log.Error("the input manifest in a run's Secret does not parse", "runID", cr.Spec.RunID)
+		return false
+	}
+	lease := clusterv1.Lease{RunID: cr.Spec.RunID, Epoch: cr.Spec.LeaseEpoch, Inputs: manifest.Inputs}
+	fetchCtx, cancel := context.WithTimeout(ctx, inputs.Budget(l.Timings.Get().AckTimeoutSeconds))
+	defer cancel()
+	rejection, err := l.fetcher().Confirm(fetchCtx, lease)
+	if err != nil {
+		l.Log.Error("fetching a run's inputs at startup", "runID", cr.Spec.RunID, "epoch", cr.Spec.LeaseEpoch, "error", err)
+		return false
+	}
+	if rejection != nil {
+		if err := l.K8s.Delete(ctx, cr); err != nil && !apierrors.IsNotFound(err) {
+			l.Log.Error("deleting a run whose inputs could not be fetched", "runID", cr.Spec.RunID, "error", err)
+			return false
+		}
+		l.forgetInputs(cr.Spec.RunID)
+		l.ack(ctx, lease, materialize.Result{Rejection: rejection})
+		return false
+	}
+	return true
+}
+
+// maybeSweepInputs drops, at most once per interval, the inputs of runs that
+// have no AgentRun here: fetched for a lease that was then never
+// materialised. The explicit paths — a refusal, an abandon, the CR's
+// finalizer — handle every run that got as far as an object.
+func (l *Loop) maybeSweepInputs(ctx context.Context) {
+	if l.Inputs == nil || l.Inputs.Spool == nil {
+		return
+	}
+	now := l.Clock()
+	if !l.lastSweep.IsZero() && now.Sub(l.lastSweep) < inputSweepInterval {
+		return
+	}
+	l.lastSweep = now
+	l.SweepInputs(ctx)
+}
+
+// SweepInputs is one pass of the sweep, exported so that it can be driven a
+// step at a time.
+func (l *Loop) SweepInputs(ctx context.Context) {
+	if l.Inputs == nil || l.Inputs.Spool == nil {
+		return
+	}
+	var runs agentrunv1alpha1.AgentRunList
+	if err := l.K8s.List(ctx, &runs, client.InNamespace(l.Namespace)); err != nil {
+		l.Log.Error("listing AgentRuns to sweep inputs", "error", err)
+		return
+	}
+	held := make(map[runv1.ULID]bool, len(runs.Items))
+	for i := range runs.Items {
+		held[runs.Items[i].Spec.RunID] = true
+	}
+	dropped, err := l.Inputs.Spool.SweepInputs(func(id runv1.ULID) bool { return held[id] },
+		l.Clock().Add(-inputOrphanAge))
+	if err != nil {
+		l.Log.Error("sweeping inputs", "error", err)
+		return
+	}
+	if dropped > 0 {
+		l.Log.Info("dropped the inputs of runs this cluster does not hold", "runs", dropped)
+	}
 }

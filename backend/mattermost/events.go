@@ -72,6 +72,7 @@ func decodePosted(data json.RawMessage, self User) (m app.ChatMessage, ok bool, 
 		FromBot:            fromBot(p),
 		FromWebhook:        truthy(p.Props["from_webhook"]),
 		System:             p.Type != "",
+		Files:              p.files(),
 	}, true, nil
 }
 

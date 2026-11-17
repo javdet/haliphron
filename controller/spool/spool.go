@@ -290,6 +290,9 @@ func (s *Spool) Done(e Entry) error {
 // copy that cluster's pod produced is the one that counts — and when the CR is
 // collected. Without it the spool keeps the artifacts of every run the
 // controller ever lost.
+//
+// The run's inputs go with it: a run that is not this cluster's any more has
+// no pod here that will read them.
 func (s *Spool) Forget(id runv1.ULID) error {
 	dir, err := s.runDir(id)
 	if err != nil {
@@ -297,6 +300,9 @@ func (s *Spool) Forget(id runv1.ULID) error {
 	}
 	if err := os.RemoveAll(dir); err != nil && !errors.Is(err, fs.ErrNotExist) {
 		return fmt.Errorf("spool: discard the spool of %s: %w", id, err)
+	}
+	if err := s.ForgetInputs(id); err != nil {
+		return err
 	}
 	s.mu.Lock()
 	delete(s.spent, id)
@@ -317,6 +323,9 @@ func (s *Spool) Pending() ([]Entry, error) {
 			return filepath.SkipAll
 		case err != nil:
 			return err
+		case entry.IsDir() && path == filepath.Join(s.root, inputsDir):
+			// Inputs are read by pods, never forwarded; see inputs.go.
+			return filepath.SkipDir
 		case entry.IsDir() || !strings.HasSuffix(path, metaSuffix):
 			return nil
 		}

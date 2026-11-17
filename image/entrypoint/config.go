@@ -365,6 +365,11 @@ type Secrets struct {
 	// be indistinguishable from the default mode.
 	Bundle        *clusterv1.ArtifactBundle
 	CallbackToken string
+	// Inputs is the manifest of the files that arrived with the request, from
+	// SecretKeyInputs, every key already through runv1.InputKey. Nil when the
+	// key is absent, which is the normal case. Not a secret either — the names
+	// are the customer's words rather than credentials — and so not in Values.
+	Inputs []runv1.InputRef
 }
 
 // LoadSecrets reads the mount. A missing file is exit 30 naming the file: the
@@ -474,7 +479,73 @@ func LoadSecrets(dir string, c *Config) (*Secrets, error) {
 			}
 		}
 	}
+
+	inputs, err := read(runv1.SecretKeyInputs, false)
+	if err != nil {
+		return nil, err
+	}
+	if inputs != nil {
+		if s.Inputs, err = parseInputManifest(inputs); err != nil {
+			return nil, err
+		}
+	}
 	return s, nil
+}
+
+// parseInputManifest reads SecretKeyInputs and refuses anything the inputs
+// phase could not act on safely.
+//
+// Refused, never repaired, and refused here rather than in the phase: the
+// controller wrote this file from a lease the backend built, so a key outside
+// the allow-list or a digest that is not one is a defect upstream that a retry
+// reproduces exactly — exit 30, like every other malformed file in the mount.
+// The errors name entries by position, never by key or name: the message
+// reaches the report, and the names are customer data.
+func parseInputManifest(body []byte) ([]runv1.InputRef, error) {
+	var manifest runv1.InputManifest
+	if err := json.Unmarshal(body, &manifest); err != nil {
+		return nil, failWrap(runv1.ExitConfig, "MalformedSecret", err,
+			"%s does not parse as an input manifest", runv1.SecretKeyInputs)
+	}
+	seen := make(map[string]bool, len(manifest.Inputs))
+	for i, ref := range manifest.Inputs {
+		if _, err := runv1.InputKey(ref.Key); err != nil {
+			return nil, fail(runv1.ExitConfig, "MalformedSecret",
+				"%s: entry %d has a key no input may have", runv1.SecretKeyInputs, i+1)
+		}
+		if seen[ref.Key] {
+			return nil, fail(runv1.ExitConfig, "MalformedSecret",
+				"%s: entry %d repeats the key of an earlier one", runv1.SecretKeyInputs, i+1)
+		}
+		seen[ref.Key] = true
+		if !isSHA256Hex(ref.SHA256) {
+			return nil, fail(runv1.ExitConfig, "MalformedSecret",
+				"%s: entry %d has no lowercase hex sha256; nothing could verify what is read",
+				runv1.SecretKeyInputs, i+1)
+		}
+		if ref.SizeBytes < 0 {
+			return nil, fail(runv1.ExitConfig, "MalformedSecret",
+				"%s: entry %d has a negative size", runv1.SecretKeyInputs, i+1)
+		}
+	}
+	if manifest.Inputs == nil {
+		manifest.Inputs = []runv1.InputRef{}
+	}
+	return manifest.Inputs, nil
+}
+
+// isSHA256Hex is the digest shape the manifest promises: 64 lowercase hex
+// characters.
+func isSHA256Hex(s string) bool {
+	if len(s) != 64 {
+		return false
+	}
+	for _, c := range s {
+		if !(c >= '0' && c <= '9' || c >= 'a' && c <= 'f') {
+			return false
+		}
+	}
+	return true
 }
 
 // Values returns every secret string worth redacting. Short values are dropped

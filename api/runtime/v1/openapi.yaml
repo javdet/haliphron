@@ -22,7 +22,7 @@ info:
   title: Haliphron Runtime API
   version: 1.0.0
   description: |
-    Three endpoints, and they are not equally important.
+    Four endpoints, and they are not equally important.
 
     `/completion` tells the controller how the run ended. It is an
     **optimization, not a correctness condition**: by the time it is made the
@@ -42,6 +42,11 @@ info:
     pod's. That acknowledgement is the whole of principle P5 in relay mode, and
     it is what makes an object store optional rather than what an object store
     was for.
+
+    `/inputs` is the one read: the files a person sent with the request, which
+    the controller fetched from the backend before it acknowledged the lease.
+    The pod reads them in the `inputs` phase and writes them under
+    `/workspace/.haliphron/inputs/`. Both artifact modes.
 
     `CompletionReport` here is **the same schema** as in the Cluster API: the
     controller forwards the report to `/ingest/completion` unchanged, merely
@@ -66,6 +71,8 @@ tags:
     description: Phase transitions, as they happen
   - name: artifacts
     description: The run's output, in relay mode
+  - name: inputs
+    description: The files that arrived with the request
 
 security:
   - callbackToken: []
@@ -298,6 +305,70 @@ paths:
             application/json:
               schema: {$ref: '#/components/schemas/Error'}
 
+  /inputs:
+    get:
+      tags: [inputs]
+      operationId: getInput
+      summary: Read one of the run's input files from the controller
+      description: |
+        The bytes of one entry of the manifest the controller wrote into the
+        per-run Secret under `inputs.json`. The controller fetched every entry
+        from the backend before it acknowledged the lease, so this never waits
+        on the control plane and works while it is down.
+
+        The key is checked against this run's manifest, not only against the
+        allow-list: a pod can read the inputs of its own run and of no other.
+        The pod verifies the body against the manifest's `sha256` before it
+        writes the file.
+      parameters:
+        - $ref: '#/components/parameters/RuntimeContract'
+        - $ref: '#/components/parameters/Traceparent'
+        - name: runID
+          in: query
+          required: true
+          description: The run whose callback token authenticates the request.
+          schema: {type: string, minLength: 26, maxLength: 26}
+        - name: key
+          in: query
+          required: true
+          description: The entry's key, as the manifest has it.
+          schema: {type: string, maxLength: 139, pattern: '^inputs/[0-9]{1,3}-[A-Za-z0-9][A-Za-z0-9._-]*$', example: 'inputs/1-screenshot.png'}
+      responses:
+        '200':
+          description: The file.
+          headers:
+            X-Haliphron-SHA256:
+              description: The digest the manifest records.
+              schema: {type: string, pattern: '^[a-f0-9]{64}$'}
+          content:
+            application/octet-stream:
+              schema: {type: string, format: binary}
+        '400':
+          description: The key is not one an input may have.
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/Error'}
+        '401':
+          description: The token is missing, does not match, or is bound to a different run.
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/Error'}
+        '404':
+          description: The key is not in this run's manifest. A defect; a retry repeats it.
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/Error'}
+        '409':
+          description: This cluster holds no such run.
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/Error'}
+        '503':
+          description: The controller cannot read the file right now. The pod retries with backoff.
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/Error'}
+
 components:
 
   securitySchemes:
@@ -363,7 +434,7 @@ components:
 
     RuntimePhase:
       type: string
-      enum: [init, validate, fetch, checkpoint, auth, clone, role, plugins,
+      enum: [init, validate, fetch, checkpoint, auth, clone, inputs, role, plugins,
              mcp-prepare, mcp-verify, run, parse, output, persist, commit, push,
              pr, finalize, notify]
       description: An entrypoint phase. The names are contract, not logging.

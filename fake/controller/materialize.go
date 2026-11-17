@@ -149,6 +149,16 @@ func (c *Controller) buildSecret(lease clusterv1.Lease, state *runState, owner m
 	// which keeps it out of the Job's spec as well.
 	data[runv1.SecretKeyPrompt] = []byte(lease.Prompt)
 
+	// The input manifest, from Lease.Inputs and never from Lease.Secrets: it
+	// names the files this controller fetched and verified before the ack,
+	// and the names are the person's words — a Secret key, not a CR field.
+	delete(data, runv1.SecretKeyInputs)
+	if len(lease.Inputs) > 0 {
+		if manifest, err := json.Marshal(runv1.InputManifest{Inputs: lease.Inputs}); err == nil {
+			data[runv1.SecretKeyInputs] = manifest
+		}
+	}
+
 	// The presigned bundle is object-store mode only. In relay mode there is
 	// nothing to sign — the pod posts to the controller — and writing an empty
 	// bundle would give the entrypoint a mode to misread.

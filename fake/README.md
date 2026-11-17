@@ -25,6 +25,17 @@ a curiosity: it is the only place where the two independent readings of one
 contract are checked against each other, and `test/contract` goes one further by
 applying what `controller` builds to a real API server.
 
+Inputs — the files a person attached to a request — cross both of the first
+two fakes. `backend` takes them with `WithInputs`, lists them in the lease, and
+serves `GET /leases/{runID}/inputs/{file}` with the real rules: the epoch fence
+of `/ack` (abandon), `RunLeasedByAnotherCluster` for another cluster, and
+`InputNotFound` with action fatal for a file the manifest does not name or
+whose object a test removed with `DropInput`; `CorruptInput` makes the bytes
+disagree with the manifest. `controller` fetches every input before it
+acknowledges, refuses the lease with `MaterializationFailed` on a fatal answer
+or a digest mismatch, sends no ack at all on anything else, and writes the
+manifest into the Secret as `inputs.json`.
+
 A fake that is merely permissive is worse than no fake: it teaches the other
 side habits the real implementation will reject. These implement the rules from
 `docs/contracts/`, including the ones that only ever fire in failure —

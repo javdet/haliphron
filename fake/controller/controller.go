@@ -57,6 +57,10 @@ type Controller struct {
 
 	runs map[runv1.ULID]*runState
 
+	// inputs is what this controller fetched for each run, by key: the spool,
+	// in memory. Filled before the ack, read by nobody but a test.
+	inputs map[runv1.ULID]map[string][]byte
+
 	// abandoned records work this controller was told to drop. Nothing about a
 	// run in here may ever be reported again — that is the whole meaning of the
 	// abandon action, and the property is worth being able to assert.
@@ -184,6 +188,7 @@ func New(baseURL string, opts ...Option) (*Controller, error) {
 		timings:     clusterv1.DefaultTimings(),
 		objects:     newObjectStore(),
 		runs:        map[runv1.ULID]*runState{},
+		inputs:      map[runv1.ULID]map[string][]byte{},
 		abandoned:   map[runv1.ULID]bool{},
 		clock:       time.Now,
 	}

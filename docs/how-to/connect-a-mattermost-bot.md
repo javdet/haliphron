@@ -385,6 +385,14 @@ and in `GET /api/v1/runs` with `created_via` `mattermost` and `created_by`
   thread. It needs the WebSocket transport. An outgoing webhook fires only on
   its trigger word, so a reply without one never reaches the backend. `0`
   switches it off.
+- **Attached files.** A file attached to the message — a screenshot, a log, a
+  PDF — is downloaded by the backend with the bot's token and handed to the
+  agent under `/workspace/.haliphron/inputs/`, and the prompt lists it after
+  the request. Inside a thread, files of the earlier posts the prompt quotes go
+  with them, newest first. A file the agent cannot be given (too large, past
+  the count, a type it cannot read, a failed download) is still named in the
+  prompt as not available, with the reason. A mention with a file and no text
+  is a request about the file. The run's page lists what was delivered.
 - **Mentions in the result.** `@channel`, `@here` and every other `@` in the
   agent's text are defused before posting. The agent read a repository that
   may have been written to manipulate it, and its answer must not be able to
@@ -407,7 +415,10 @@ and in `GET /api/v1/runs` with `created_via` `mattermost` and `created_by`
   while the server accepts posts. A post the server refuses outright, such as
   a 403 because the bot was removed from the channel, is given up on after one
   attempt. Other failures are retried for up to 20 attempts.
-- **Attachments are ignored.** Only the text of a message reaches the prompt.
+- **Attachments are capped.** At most 10 files, 10 MiB each and 25 MiB in all
+  per request by default (`HALIPHRON_INPUT_MAX_*`). PNG, JPEG, GIF, WebP, PDF
+  and text are delivered; anything else is named as not available. Files
+  posted after the message, by the bot, or by other automation are never sent.
 - **A configuration from the environment needs a restart to change.** One
   saved from the UI does not: every replica checks for a change every 15
   seconds and restarts the bot when it finds one.

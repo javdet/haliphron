@@ -155,10 +155,28 @@ func chatHeaderValue(v string) string {
 // BuildChatPrompt renders a message, and the thread it was posted in, as a
 // prompt of at most maxBytes.
 func BuildChatPrompt(platform string, thread []ChatThreadPost, trigger ChatMessage, maxBytes, maxThreadBytes int) string {
+	return buildChatPrompt(platform, thread, trigger, maxBytes, maxThreadBytes, chatAttachments{})
+}
+
+// buildChatPrompt is BuildChatPrompt with what the prompt says about attached
+// files. The block follows the request, and its room — att.reserve, fixed from
+// how many files there could be — comes out of the thread's budget before the
+// thread is quoted.
+func buildChatPrompt(platform string, thread []ChatThreadPost, trigger ChatMessage,
+	maxBytes, maxThreadBytes int, att chatAttachments) string {
+
 	header := RenderChatHeader(chatOriginOf(platform, trigger))
-	posts := contextPosts(thread, trigger)
-	if len(posts) == 0 {
-		return header + trigger.Text
+	tail := ""
+	if att.block != "" {
+		tail = "\n\n" + att.block
+	}
+	quoted, _ := chatQuote(header, thread, trigger, maxBytes, maxThreadBytes, att.reserve)
+	if quoted == "" {
+		ask := trigger.Text
+		if strings.TrimSpace(ask) == "" && att.block != "" {
+			ask = chatEmptyAskFiles
+		}
+		return header + ask + tail
 	}
 
 	ask := trigger.Text
@@ -166,19 +184,55 @@ func BuildChatPrompt(platform string, thread []ChatThreadPost, trigger ChatMessa
 		ask = chatEmptyAsk
 	}
 	request := fmt.Sprintf(chatRequestHead, speaker(trigger.Username, false)) + ask + "\n"
+	return header + chatPromptPreamble + chatThreadOpen + quoted + chatThreadClose + request +
+		strings.TrimPrefix(tail, "\n")
+}
+
+// chatQuotedPosts is which posts of the thread the prompt quotes, decided by
+// the same arithmetic buildChatPrompt uses. The files a run is given come from
+// these posts and the message itself: a post left out for the budget is left
+// out with its files.
+func chatQuotedPosts(platform string, thread []ChatThreadPost, trigger ChatMessage,
+	maxBytes, maxThreadBytes, reserve int) []ChatThreadPost {
+
+	header := RenderChatHeader(chatOriginOf(platform, trigger))
+	_, kept := chatQuote(header, thread, trigger, maxBytes, maxThreadBytes, reserve)
+	return kept
+}
+
+// chatQuote quotes the thread within what the header, the request and the
+// attachments' reserve leave of the budget, and returns the posts it kept.
+func chatQuote(header string, thread []ChatThreadPost, trigger ChatMessage,
+	maxBytes, maxThreadBytes, reserve int) (string, []ChatThreadPost) {
+
+	posts := contextPosts(thread, trigger)
+	if len(posts) == 0 {
+		return "", nil
+	}
+	ask := trigger.Text
+	if strings.TrimSpace(ask) == "" {
+		ask = chatEmptyAsk
+	}
+	request := fmt.Sprintf(chatRequestHead, speaker(trigger.Username, false)) + ask + "\n"
 
 	budget := maxBytes - len(header) - len(chatPromptPreamble) - len(chatThreadOpen) -
-		len(chatThreadClose) - len(request)
+		len(chatThreadClose) - len(request) - reserve
 	if maxThreadBytes > 0 && maxThreadBytes < budget {
 		budget = maxThreadBytes
 	}
-	quoted := quoteThread(posts, trigger.RootID, budget)
+	quoted, keep := quoteThreadKept(posts, trigger.RootID, budget)
 	if quoted == "" {
 		// No room for any of it. The request alone is still the request, and
 		// whether it fits is admission's call.
-		return header + trigger.Text
+		return "", nil
 	}
-	return header + chatPromptPreamble + chatThreadOpen + quoted + chatThreadClose + request
+	kept := make([]ChatThreadPost, 0, len(posts))
+	for i, p := range posts {
+		if keep[i] {
+			kept = append(kept, p)
+		}
+	}
+	return quoted, kept
 }
 
 // contextPosts is the part of a thread that is context for a message: what was
@@ -188,7 +242,7 @@ func BuildChatPrompt(platform string, thread []ChatThreadPost, trigger ChatMessa
 func contextPosts(thread []ChatThreadPost, trigger ChatMessage) []ChatThreadPost {
 	out := make([]ChatThreadPost, 0, len(thread))
 	for _, p := range thread {
-		if p.ID == trigger.ID || p.System || strings.TrimSpace(p.Text) == "" {
+		if p.ID == trigger.ID || p.System || (strings.TrimSpace(p.Text) == "" && len(p.Files) == 0) {
 			continue
 		}
 		if !trigger.CreatedAt.IsZero() && p.CreatedAt.After(trigger.CreatedAt) {
@@ -200,9 +254,10 @@ func contextPosts(thread []ChatThreadPost, trigger ChatMessage) []ChatThreadPost
 	return out
 }
 
-// quoteThread renders posts within budget bytes: the root, then as many of the
-// newest as fit, with a note where the ones between were left out.
-func quoteThread(posts []ChatThreadPost, rootID string, budget int) string {
+// quoteThreadKept renders posts within budget bytes: the root, then as many of
+// the newest as fit, with a note where the ones between were left out. It also
+// reports which posts it kept.
+func quoteThreadKept(posts []ChatThreadPost, rootID string, budget int) (string, []bool) {
 	// Room for the omission note is held back from the start, so adding it
 	// after the choice is made cannot break the budget. At most one note is
 	// ever written: the root is the oldest post and the rest are the newest, so
@@ -210,7 +265,7 @@ func quoteThread(posts []ChatThreadPost, rootID string, budget int) string {
 	const noteRoom = 48
 	budget -= noteRoom
 	if budget <= 0 {
-		return ""
+		return "", nil
 	}
 	// No single post may take more than a quarter of the room, or one pasted
 	// log would push out the whole conversation around it.
@@ -260,9 +315,9 @@ func quoteThread(posts []ChatThreadPost, rootID string, budget int) string {
 		b.WriteString(rendered[i])
 	}
 	if b.Len() == 0 {
-		return ""
+		return "", nil
 	}
-	return b.String()
+	return b.String(), keep
 }
 
 // quotePost renders one post as "name: text", with continuation lines indented
@@ -270,6 +325,19 @@ func quoteThread(posts []ChatThreadPost, rootID string, budget int) string {
 func quotePost(p ChatThreadPost, limit int) string {
 	head := speaker(p.Username, p.FromSelf) + ": "
 	text := strings.ReplaceAll(strings.TrimSpace(p.Text), "\n", "\n  ")
+	if n := len(p.Files); n > 0 {
+		// The note says a file was there; the attachments block says what
+		// became of it.
+		note := "[1 file attached]"
+		if n > 1 {
+			note = fmt.Sprintf("[%d files attached]", n)
+		}
+		if text == "" {
+			text = note
+		} else {
+			text += " " + note
+		}
+	}
 	if room := limit - len(head) - 1; len(text) > room {
 		text = cutBytes(text, room-len(" […]")) + " […]"
 	}

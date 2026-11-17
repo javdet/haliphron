@@ -228,6 +228,69 @@ paths:
         '429': {$ref: '#/components/responses/RateLimited'}
         '500': {$ref: '#/components/responses/ServerError'}
 
+  /leases/{runID}/inputs/{file}:
+    get:
+      tags: [lease]
+      operationId: getLeaseInput
+      summary: Fetch one input file of a leased run
+      description: |
+        The bytes of one entry of the lease's `inputs`, streamed. The controller
+        calls it for every input **before it acknowledges** the lease, writes
+        what it read to its own volume and checks it against the entry's
+        `sha256`. That ordering keeps two invariants: nothing starts before the
+        acknowledgement, and a run the controller has taken finishes even while
+        the backend is down — the pod later reads the file from the controller,
+        never from here.
+
+        Requires the run's current epoch, like `/ack`. A stale one is
+        `EpochMismatch`, action abandon: the work went elsewhere. A `file` the
+        run's manifest does not name, or whose object is gone from the store,
+        is `InputNotFound`, action fatal — no repeat brings it back, and the
+        controller refuses the lease rather than start a run without a file its
+        agent will be told it has. Anything else is retried, and a fetch that
+        never succeeds is an unacknowledged lease the backend reassigns.
+
+        The response is `no-store`, and neither side logs the name or the bytes:
+        they are what a person sent.
+      parameters:
+        - $ref: '#/components/parameters/RunID'
+        - $ref: '#/components/parameters/ControllerVersion'
+        - $ref: '#/components/parameters/Traceparent'
+        - name: file
+          in: path
+          required: true
+          description: The entry's key without its `inputs/` prefix.
+          schema: {type: string, minLength: 3, maxLength: 132, pattern: '^[0-9]{1,3}-[A-Za-z0-9][A-Za-z0-9._-]*$'}
+        - name: epoch
+          in: query
+          required: true
+          schema: {$ref: '#/components/schemas/Epoch'}
+      responses:
+        '200':
+          description: The file
+          headers:
+            Cache-Control: {$ref: '#/components/headers/NoStore'}
+            X-Haliphron-SHA256:
+              description: The digest the manifest records for this file.
+              schema: {type: string, pattern: '^[a-f0-9]{64}$'}
+          content:
+            application/octet-stream:
+              schema: {type: string, format: binary}
+        '400': {$ref: '#/components/responses/BadRequest'}
+        '401': {$ref: '#/components/responses/Unauthenticated'}
+        '403': {$ref: '#/components/responses/Forbidden'}
+        '404':
+          description: |
+            The run is unknown (code=RunNotFound, action=abandon), or the input
+            is not in its manifest or no longer in the store
+            (code=InputNotFound, action=fatal).
+          content:
+            application/problem+json:
+              schema: {$ref: '#/components/schemas/Problem'}
+        '409': {$ref: '#/components/responses/EpochMismatch'}
+        '429': {$ref: '#/components/responses/RateLimited'}
+        '500': {$ref: '#/components/responses/ServerError'}
+
   /clusters/{clusterID}/heartbeat:
     post:
       tags: [heartbeat]
@@ -653,6 +716,35 @@ components:
       enum: [claude-code, codex]
       description: opencode is deferred (closed question 6), but the value is an extension point
 
+    InputRef:
+      type: object
+      description: |
+        One file that arrived with the request, as the backend stored it under
+        the run's prefix. The same shape is what the controller writes into the
+        per-run Secret under `inputs.json` (agent runtime contract, section 2.4).
+      required: [key, name, mediaType, sizeBytes, sha256]
+      properties:
+        key:
+          type: string
+          maxLength: 139
+          pattern: '^inputs/[0-9]{1,3}-[A-Za-z0-9][A-Za-z0-9._-]*$'
+          description: |
+            Relative to the run's prefix. Both sides check it with one
+            allow-list, `runv1.InputKey`, and refuse — never repair — a key
+            outside it.
+          example: 'inputs/1-screenshot.png'
+        name:
+          type: string
+          maxLength: 1024
+          description: What the person called the file. Display only, never a path.
+        mediaType:
+          type: string
+          maxLength: 128
+          description: What the bytes sniffed as at admission; never the name's or the platform's claim.
+          example: 'image/png'
+        sizeBytes: {type: integer, format: int64, minimum: 0}
+        sha256: {type: string, maxLength: 64, pattern: '^[a-f0-9]{64}$'}
+
     ObjectRef:
       type: object
       description: |
@@ -701,6 +793,7 @@ components:
             - BootstrapTokenConsumed
             - UnsupportedControllerVersion
             - RunNotFound
+            - InputNotFound
             - EpochMismatch
             - RunLeasedByAnotherCluster
             - RunTerminal
@@ -959,6 +1052,22 @@ components:
             and this one is what the controller checks `prompt` against before
             writing a Secret. A lease whose two halves disagree is then caught
             at materialization rather than by a pod that refuses to start.
+        inputs:
+          type: array
+          maxItems: 32
+          items: {$ref: '#/components/schemas/InputRef'}
+          description: |
+            The files that arrived with the request — a screenshot attached to
+            a chat message — as the backend stored them. Absent for almost every
+            run.
+
+            Beside `prompt` rather than inside `spec` for the prompt's reason:
+            the names are customer context and must stay out of the CR. The
+            bytes are not here. The controller fetches each with
+            `GET /leases/{runID}/inputs/{file}` before it acknowledges, checks
+            the digest, and writes this list into the per-run Secret under
+            `inputs.json`. At most 32 entries and 100 MiB in all; a lease past
+            either is refused with `InvalidSpec`.
         completedPhases:
           type: array
           maxItems: 32
@@ -1269,7 +1378,7 @@ components:
       type: string
       maxLength: 32
       enum:
-        [init, validate, fetch, checkpoint, auth, clone, role, plugins,
+        [init, validate, fetch, checkpoint, auth, clone, inputs, role, plugins,
          mcp-prepare, mcp-verify, run, parse, output, persist, commit, push, pr,
          finalize, notify]
       description: |
@@ -1790,7 +1899,7 @@ components:
 
     RuntimePhase:
       type: string
-      enum: [init, validate, fetch, checkpoint, auth, clone, role, plugins,
+      enum: [init, validate, fetch, checkpoint, auth, clone, inputs, role, plugins,
              mcp-prepare, mcp-verify, run, parse, output, persist, commit, push,
              pr, finalize, notify]
       description: |

@@ -89,6 +89,13 @@ type RunRequest struct {
 	// which used to require writing a state.json object into the bucket first.
 	CompletedPhases []runv1.RuntimePhase
 
+	// Inputs are the files the request arrived with, as the controller would
+	// have fetched them before acknowledging. Prepare writes their manifest
+	// into the Secret under SecretKeyInputs and serves their bytes on the
+	// callback's GET /inputs, to this run's token and for these keys only. A
+	// run without any gets no manifest at all, which is the normal case.
+	Inputs []InputFile
+
 	// ContractMajor overrides HALIPHRON_CONTRACT. Set it to one above the
 	// image's own to check that the image refuses to start.
 	ContractMajor int
@@ -159,6 +166,13 @@ func (c *ControlPlane) Prepare(req RunRequest) *Prepared {
 		// the real controller puts it here: a secretKeyRef keeps customer text
 		// out of the CR, out of the Job's spec and out of `kubectl describe`.
 		runv1.SecretKeyPrompt: req.Prompt,
+	}
+	// Before the overrides, so that a test can replace the manifest with one
+	// the controller would never write and see what the image makes of it.
+	if len(req.Inputs) > 0 {
+		state.inputs, secrets[runv1.SecretKeyInputs] = prepareInputs(req.Inputs)
+	} else {
+		state.inputs = nil
 	}
 	for k, v := range req.Secrets {
 		secrets[k] = v

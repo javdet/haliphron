@@ -7,6 +7,34 @@ of `VERSION`, and it is the tag of the published images.
 
 ### Added
 
+- **Files attached in chat reach the agent.** A screenshot, a log or a PDF
+  attached to a message addressed to the bot in Mattermost or Slack — or to a
+  post earlier in the thread that the prompt quotes — is downloaded by the
+  backend with the bot's credential, stored under the run's prefix and fetched
+  by the controller before it acknowledges the lease. The agent finds it under
+  `/workspace/.haliphron/inputs/`, and the prompt lists each file after the
+  request. The pod never holds a chat credential.
+  - **What is delivered.** PNG, JPEG, GIF, WebP, PDF and text, decided by
+    sniffing the bytes, never by the name. At most 10 files, 10 MiB each and
+    25 MiB per run by default (`HALIPHRON_INPUT_MAX_*`, chart
+    `agent.inputs.*`). A file over a cap, of another type, or that could not
+    be downloaded is named in the prompt as not available, with the reason,
+    so the agent says it cannot see it instead of guessing.
+  - **A mention with only a file** is now a request: the file is what to look
+    at.
+  - **Contract.** A new runtime phase `inputs` after `clone` (twenty phases
+    now; a failure is exit 21, infra, retried), `Lease.inputs`,
+    `GET /leases/{runID}/inputs/{file}` on the Cluster API, `GET /inputs` on
+    the pod callback, and the per-run Secret key `inputs.json`. The init
+    container the runtime contract reserved for inputs is struck. Migration
+    `0020` adds `run_inputs` and an upload ledger the reaper uses to delete
+    files of admissions that never inserted their run.
+  - **UI and API.** The run page lists the attached files with a download;
+    `GET /api/v1/runs/{id}/inputs` and `/inputs/{file}`. Files are served as
+    attachments, never rendered in the UI's origin.
+  - **Slack** needs the `files:read` scope; an installation without it gets
+    the files named as not available.
+
 - **Alertmanager webhooks.** An alert receiver turns each Prometheus
   Alertmanager notification into a run under a role the operator chose, with
   the notification's firing alerts appended to the operator's instruction as

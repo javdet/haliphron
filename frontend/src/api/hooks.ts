@@ -19,6 +19,7 @@ import {
   type ApiToken,
   type ApiTokenSecret,
   type Attempt,
+  type RunInput,
   type BootstrapToken,
   type BootstrapTokenSecret,
   type ChatIntegration,
@@ -63,6 +64,7 @@ export const keys = {
   runs: (filter: RunFilter) => ['runs', filter] as const,
   run: (id: string) => ['run', id] as const,
   attempts: (id: string) => ['run', id, 'attempts'] as const,
+  inputs: (id: string) => ['run', id, 'inputs'] as const,
   logs: (id: string) => ['run', id, 'logs'] as const,
   result: (id: string, key?: string) => ['run', id, 'result', key ?? ''] as const,
   roles: () => ['roles'] as const,
@@ -141,6 +143,18 @@ export function useAttempts(id: string, live: boolean) {
         (r) => r.attempts,
       ),
     refetchInterval: live ? LIVE_MS : false,
+  })
+}
+
+/** The files sent with a run. They never change once the run exists. */
+export function useInputs(id: string) {
+  return useQuery({
+    queryKey: keys.inputs(id),
+    queryFn: ({ signal }) =>
+      request<{ inputs: RunInput[] }>(`/runs/${encodeURIComponent(id)}/inputs`, { signal }).then(
+        (r) => r.inputs,
+      ),
+    staleTime: Infinity,
   })
 }
 

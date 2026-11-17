@@ -899,6 +899,40 @@ The footprint is at most the runs admitted within `retention + 1 day`, times
 
 ---
 
+### Run inputs
+
+**A run's input files are its manifest, written once by `InsertRun`** (0020).
+`run_inputs` is one row per file a person sent with the request — `ordinal`,
+`key` (`inputs/<n>-<name>`, relative to the run's prefix), `name` (what the
+person called it, display only), `media_type` (what the bytes sniffed as),
+`size_bytes`, `sha256` (32 bytes) and the chat message it came from. The rows
+are written by `insertRunInputs` inside `InsertRun`'s transaction, like a chat
+trigger's link, so a run never commits without its manifest. Nothing updates
+them, and they go with the run by `ON DELETE CASCADE`; the primary key
+`(run_id, ordinal)` leads with `run_id`, which is the index run retention's batch
+deletes need. The `key` CHECK is the database's copy of the part of
+`runv1.InputKey` a regex can say.
+
+**The bytes are stored before the row exists**, under the run's prefix in the
+artifact store, because the row's transaction is the run's and must not be held
+open across an upload. That makes the store part of starting a run that has
+inputs — and only such a run. An admission that stored files and then did not
+insert — refused, or a process that died between the two — would leave objects
+under a prefix no run owns. **`run_input_uploads` is the ledger that finds them
+without listing a bucket.** A row is written before the first object
+(`BeginInputUpload`), deleted by `InsertRun` in the run's own transaction, and
+otherwise found by the reaper once it is an hour old: a row whose run exists is
+closed, and the rest name prefixes whose `inputs/` objects are deleted before
+the row is (`OrphanInputUploads`, `ForgetInputUpload`). It has no foreign key,
+because its point is to outlive a run that never came to be. An admission that
+fails in-process deletes what it stored at once, and the ledger is only the
+backstop for a crash.
+
+**`runtime_phase` gains `inputs`**, between `clone` and `role`, by the
+drop-and-re-add 0006 uses (`NOT VALID`, widening only).
+
+---
+
 ## 12. There is no table of downward commands
 
 Both Cluster API commands are functions of the current state:
@@ -960,6 +994,7 @@ architecture document says what it says, and what to look at during review.
 | D16 | Duplicate attempts | a convention plus `backoffLimit: 0` | `run_attempts_one_live`, a partial unique index, plus `runs_close_attempt` | `backoffLimit` constrains one Job, not two controllers. The trigger is what keeps the index from becoming a trap that makes a run permanently unrunnable |
 | D17 | Where the result is | implied to be S3 | `runs.result_ref`, a URI carrying its scheme | an installation that switches artifact modes keeps its old runs readable instead of orphaning them |
 | D18 | The scheduler's single runner | a Postgres advisory lock for leadership | no leader; each fire fenced on `next_run_at` and `revision` inside `InsertRun` | the fence and the run commit or roll back together, so a lost lock, a pool connection that held it, or a fire racing an edit cannot produce a second run (section 11, Schedules) |
+| D19 | Input files | an init container reading previous steps' artifacts, phase 3 | `run_inputs`, written in `InsertRun`, plus the `run_input_uploads` ledger for objects stored before an insert that never came | a run never commits without its manifest, and an orphaned upload is found by a query rather than a listing of the store (section 11, Run inputs) |
 
 ---
 
@@ -976,6 +1011,8 @@ real PostgreSQL — generated columns, domains, partial indexes,
 - [x] the precision and scale of `money_usd` are derived from the `MoneyUSD` pattern; the maximum permitted value survives a round trip without rounding; a negative one is rejected
 - [x] eight simultaneous polls of one cluster drain the queue without a single duplicate
 - [x] the first lease issues epoch 1
+- [x] `run_inputs` refuses a key outside `inputs/<n>-<name>`, a digest that is not 32 bytes, two inputs under one key, and a row for a run that does not exist; its rows go with their run
+- [x] `run_input_uploads` accepts a run that does not exist yet, and `runtime_phase` accepts `inputs`
 - [x] `ackDeadline` expiry → `Queued`, the epoch raised **in the same statement**, the deadlines cleared, the assignment preserved
 - [x] `leaseDeadline` expiry → `Unknown`, the epoch untouched, the rank still 30
 - [x] `runs_guard`: an epoch regression, an attempt regression, a second terminal phase, an edit to `spec`, an edit to the prompt or its digest — all rejected; an attempt reset under a new epoch, an attempt increase out of a terminal state, an operator retry — all accepted

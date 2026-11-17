@@ -332,6 +332,16 @@ agent:
   # injection, so the ceiling is the control rather than the agent's judgement.
   maxRunChildren: 10
   maxPromptBytes: 0       # 0 keeps the backend's own limit
+  # Files attached to a chat request (a screenshot, a log, a PDF). The backend
+  # downloads them, the controller fetches them before acknowledging the lease,
+  # and the agent finds them under /workspace/.haliphron/inputs/. A file over
+  # a cap, or of a type the agent cannot read, is named in the prompt as not
+  # available instead of being delivered. 0 keeps the backend's own limit:
+  # 10 files, 10 MiB each, 25 MiB in all; the per-run total is at most 100 MiB.
+  inputs:
+    maxFiles: 0
+    maxFileBytes: 0
+    maxBytesPerRun: 0
   logChunkIntervalSeconds: 5
 
   # Where the agent pods send traces. Empty disables tracing.

@@ -316,6 +316,12 @@ func Load() (Config, error) {
 			// How long a run's notes stay readable by the runs below it,
 			// counted from the run's admission. Bounded in validate.
 			NoteRetention: durationEnv("HALIPHRON_NOTE_RETENTION", app.DefaultNoteRetention),
+			// The files a person attaches to a chat request. Fetched by the
+			// controller before it acknowledges, so the per-run total is
+			// bounded by the contract's MaxInputBytesPerLease in validate.
+			MaxInputFiles:       intEnv("HALIPHRON_INPUT_MAX_FILES", app.DefaultMaxInputFiles),
+			MaxInputFileBytes:   int64(intEnv("HALIPHRON_INPUT_MAX_FILE_BYTES", app.DefaultMaxInputFileBytes)),
+			MaxInputBytesPerRun: int64(intEnv("HALIPHRON_INPUT_MAX_BYTES_PER_RUN", app.DefaultMaxInputBytesPerRun)),
 		},
 
 		SweepInterval:    durationEnv("HALIPHRON_SWEEP_INTERVAL", 5*time.Second),
@@ -478,6 +484,21 @@ func (c Config) validate() error {
 		// of every run's notes for a feature meant to hand work on.
 		return fmt.Errorf("config: HALIPHRON_NOTE_RETENTION is %s; it is between %s and %s",
 			r, app.MinNoteRetention, app.MaxNoteRetention)
+	}
+	if n := c.Limits.MaxInputFiles; n < 0 || n > clusterv1.MaxInputsPerLease {
+		return fmt.Errorf("config: HALIPHRON_INPUT_MAX_FILES is %d; it is between 0 and %d",
+			n, clusterv1.MaxInputsPerLease)
+	}
+	if b := c.Limits.MaxInputBytesPerRun; b < 0 || b > clusterv1.MaxInputBytesPerLease {
+		// The controller refuses a lease above the contract's ceiling, so a
+		// larger number here would be a promise to the person that every
+		// controller then breaks.
+		return fmt.Errorf("config: HALIPHRON_INPUT_MAX_BYTES_PER_RUN is %d; it is at most %d",
+			b, int64(clusterv1.MaxInputBytesPerLease))
+	}
+	if b := c.Limits.MaxInputFileBytes; b < 0 || b > clusterv1.MaxInputBytesPerLease {
+		return fmt.Errorf("config: HALIPHRON_INPUT_MAX_FILE_BYTES is %d; it is at most %d",
+			b, int64(clusterv1.MaxInputBytesPerLease))
 	}
 	if c.Database.DSN == "" {
 		return fmt.Errorf("config: HALIPHRON_DSN is required")

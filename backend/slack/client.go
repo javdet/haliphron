@@ -241,6 +241,45 @@ type wireMessage struct {
 		EventType    string         `json:"event_type"`
 		EventPayload map[string]any `json:"event_payload"`
 	} `json:"metadata"`
+	// Files are attached to a file_share message, and to any message a client
+	// lets a person attach files to.
+	Files []wireFile `json:"files"`
+}
+
+// wireFile is a file as a message carries it.
+type wireFile struct {
+	ID                 string `json:"id"`
+	Name               string `json:"name"`
+	Mimetype           string `json:"mimetype"`
+	Size               int64  `json:"size"`
+	URLPrivateDownload string `json:"url_private_download"`
+	URLPrivate         string `json:"url_private"`
+	// Mode "tombstone" is a deleted file and "hidden_by_limit" one past a free
+	// workspace's history; neither has bytes to fetch.
+	Mode string `json:"mode"`
+}
+
+// files is what is attached to a message.
+func (m wireMessage) files() []app.ChatFile {
+	if len(m.Files) == 0 {
+		return nil
+	}
+	out := make([]app.ChatFile, 0, len(m.Files))
+	for _, f := range m.Files {
+		if f.ID == "" || f.Mode == "tombstone" || f.Mode == "hidden_by_limit" {
+			continue
+		}
+		u := f.URLPrivateDownload
+		if u == "" {
+			u = f.URLPrivate
+		}
+		name := f.Name
+		if name == "" {
+			name = f.ID
+		}
+		out = append(out, app.ChatFile{ID: f.ID, Name: name, MediaType: f.Mimetype, SizeBytes: f.Size, URL: u})
+	}
+	return out
 }
 
 // Thread implements app.ChatPlatform.
@@ -291,6 +330,7 @@ func (c *Client) Thread(ctx context.Context, rootID string) ([]app.ChatThreadPos
 			FromSelf:  fromSelf,
 			FromBot:   isBot(m),
 			System:    isSystem(m.Subtype),
+			Files:     m.files(),
 		}
 		switch {
 		case m.User != "":
@@ -453,6 +493,92 @@ func (c *Client) React(ctx context.Context, postID, emoji string) error {
 		return nil
 	}
 	return err
+}
+
+// downloadTimeout bounds one file download, inside the minute the chat
+// handler has for the whole message.
+const downloadTimeout = 40 * time.Second
+
+// Download implements app.ChatPlatform: the file's private URL, with the bot
+// token. It reads at most limit+1 bytes.
+//
+// The token goes only to Slack's own file hosts. A URL, or a redirect, to any
+// other host is refused before the request is made: the token must not follow
+// a link it did not come from.
+func (c *Client) Download(ctx context.Context, f app.ChatFile, limit int64) ([]byte, error) {
+	if f.URL == "" {
+		return nil, &app.ChatFileError{Reason: "Slack did not share it with the app"}
+	}
+	target, err := url.Parse(f.URL)
+	// https, except to the configured API host itself, which is what a test
+	// server or an internal mirror over plain http is.
+	if err != nil || !c.fileHost(target.Hostname()) ||
+		(target.Scheme != "https" && !strings.EqualFold(target.Hostname(), c.base.Hostname())) {
+		return nil, &app.ChatFileError{Reason: "Slack named a download address outside its own file hosts"}
+	}
+
+	ctx, cancel := context.WithTimeout(ctx, downloadTimeout)
+	defer cancel()
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, target.String(), nil)
+	if err != nil {
+		return nil, fmt.Errorf("slack: download %s: %w", f.ID, err)
+	}
+	req.Header.Set("Authorization", "Bearer "+c.botToken)
+
+	h := *c.http
+	h.Timeout = 0
+	h.CheckRedirect = func(next *http.Request, via []*http.Request) error {
+		if len(via) >= 5 {
+			return errors.New("slack: too many redirects")
+		}
+		if !c.fileHost(next.URL.Hostname()) {
+			return errForeignRedirect
+		}
+		return nil
+	}
+	resp, err := h.Do(req)
+	if errors.Is(err, errForeignRedirect) {
+		return nil, &app.ChatFileError{Reason: "Slack redirected the download outside its own file hosts"}
+	}
+	if err != nil {
+		return nil, fmt.Errorf("slack: download %s: %w", f.ID, scrubURLError(err))
+	}
+	defer resp.Body.Close()
+	switch {
+	case resp.StatusCode == http.StatusForbidden || resp.StatusCode == http.StatusUnauthorized:
+		return nil, &app.ChatFileError{Reason: "the Slack app is not allowed to read it; it needs the files:read scope"}
+	case resp.StatusCode == http.StatusNotFound:
+		return nil, &app.ChatFileError{Reason: "it was deleted"}
+	case resp.StatusCode >= 300:
+		return nil, &APIError{Method: "files.download", Status: resp.StatusCode}
+	}
+	// Without files:read Slack answers a private URL with its sign-in page,
+	// 200 and HTML. A file the person attached as HTML is declared as such.
+	if ct := resp.Header.Get("Content-Type"); strings.HasPrefix(ct, "text/html") &&
+		!strings.HasPrefix(f.MediaType, "text/html") {
+		return nil, &app.ChatFileError{Reason: "the Slack app is not allowed to read it; it needs the files:read scope"}
+	}
+	body, err := io.ReadAll(io.LimitReader(resp.Body, limit+1))
+	if err != nil {
+		return nil, fmt.Errorf("slack: read the download of %s: %w", f.ID, err)
+	}
+	return body, nil
+}
+
+var errForeignRedirect = errors.New("slack: a redirect to a host outside Slack's file hosts")
+
+// fileHost reports whether the bot token may be sent to a host: Slack's file
+// hosts, or the host of the Web API this client was configured with and its
+// files. subdomain (files.slack-gov.com for slack-gov.com).
+func (c *Client) fileHost(host string) bool {
+	host = strings.ToLower(host)
+	switch host {
+	case "files.slack.com", "slack-files.com":
+		return true
+	}
+	base := strings.ToLower(c.base.Hostname())
+	apex := strings.TrimPrefix(base, "api.")
+	return host == base || host == "files."+apex
 }
 
 // call makes one Web API request. Every method accepts a form, so every

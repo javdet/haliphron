@@ -11,6 +11,7 @@
 package launcher
 
 import (
+	"encoding/json"
 	"errors"
 	"fmt"
 	"path/filepath"
@@ -311,8 +312,8 @@ func Container(r *state.Run, attempt int32, completedPhases []runv1.RuntimePhase
 // Files is what the attempt directory holds: the per-run Secret's keys under
 // secrets/, mode 0400, and the role's files under role/, mode 0444. The
 // mapping is the Kubernetes controller's ensureMaterials: every lease secret,
-// the prompt, the callback token, and the presigned bundle in object-store
-// mode.
+// the prompt, the callback token, the presigned bundle in object-store mode,
+// and the input manifest when the run has inputs.
 type Files struct {
 	Secrets map[string][]byte
 	Role    map[string][]byte
@@ -326,6 +327,14 @@ func MaterialFiles(r *state.Run, presigned []byte) Files {
 	}
 	f.Secrets[runv1.SecretKeyPrompt] = []byte(r.Materials.Prompt)
 	f.Secrets[runv1.SecretKeyCallbackToken] = []byte(r.CallbackToken)
+	// From the row's manifest, never passed through from the lease's secrets:
+	// the files it names are the ones this controller fetched and verified.
+	delete(f.Secrets, runv1.SecretKeyInputs)
+	if len(r.Materials.Inputs) > 0 {
+		if manifest, err := json.Marshal(runv1.InputManifest{Inputs: r.Materials.Inputs}); err == nil {
+			f.Secrets[runv1.SecretKeyInputs] = manifest
+		}
+	}
 	if r.ArtifactMode() == runv1.ArtifactModeObjectStore && len(presigned) > 0 {
 		f.Secrets[runv1.SecretKeyPresigned] = presigned
 	}

@@ -60,6 +60,9 @@ type Run struct {
 	// missingPlugins is what the plugins phase was asked to install and could
 	// not. The run goes ahead without it, and the agent is told.
 	missingPlugins []missingPlugin
+	// inputs are the files the inputs phase put in DirInputs, verified, in
+	// manifest order. Empty when the run has none.
+	inputs []fetchedInput
 	// agentEnv is the environment handed to the agent's child process, built
 	// rather than inherited. It carries the model key under the name that CLI
 	// expects and the MCP header values, and nothing else: the git token, the

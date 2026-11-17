@@ -14,7 +14,9 @@
 // are secret material. Nothing in this package logs a request or response body
 // at any level, and there is deliberately no debug mode that would. A logging
 // mistake here costs an hour-long git token and a bearer capability on a
-// bucket prefix.
+// bucket prefix. The body of /leases/{id}/inputs/{file} is not a secret but is
+// customer data — a screenshot somebody attached — and the same rule covers
+// it, together with the file's name.
 package clusterapi
 
 import (

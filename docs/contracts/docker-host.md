@@ -75,7 +75,7 @@ with its Secret and its ConfigMap.
 | `cancel_requested_at`, `cancel_grace_seconds`, `cancel_reason` | the cancel annotations |
 | `abandoned_at` | the abandon annotation |
 | `callback_token` | the Secret's `callback-token` key, minted here |
-| `materials` (JSON: prompt, secrets, role files, artifact bundle) | the per-run Secret and ConfigMap |
+| `materials` (JSON: prompt, secrets, role files, artifact bundle, input manifest) | the per-run Secret and ConfigMap |
 | `version` | `resourceVersion`: every write is a compare-and-swap on it |
 | `created_at`, `terminal_at` | creation timestamp; the TTL anchor |
 
@@ -141,7 +141,9 @@ agents bridge's gateway address and the callback port, default
 | `/haliphron/role` | bind, `…/a<n>/role`, only when the role has files | read-only; files 0444 |
 
 The secret files are the per-run Secret's keys: every lease secret, `prompt`,
-`callback-token`, and `presigned.json` in object-store mode. They are written
+`callback-token`, `presigned.json` in object-store mode, and `inputs.json` when
+files were sent with the request. `inputs.json` is written from the row's input
+manifest, never passed through from the lease's secrets. They are written
 before every attempt from the row and removed with the attempt. `/run` must be
 a tmpfs (install.sh refuses otherwise), so a git token never reaches a disk.
 
@@ -397,6 +399,7 @@ run names, and that are not among the three most recently used.
 | `/var/lib/haliphron/state.db` | 0600 | the rows |
 | `/var/lib/haliphron/identity.json` | 0600 | the cluster's Ed25519 key and ID |
 | `/var/lib/haliphron/spool/` | | relayed artifacts awaiting the backend |
+| `/var/lib/haliphron/spool/_inputs/<run>/` | | the run's input files, fetched before the ack; removed with the row, and swept after an hour when no row owns them |
 | `/var/lib/haliphron/lock` | | the single-instance lock |
 | `/run/haliphron/runs/` | tmpfs | per-attempt secret and role files |
 | `/etc/haliphron/` | 0700 | `dockerhost.env`, `firewall.env`, `bootstrap-token`, and with the control plane its secrets |
@@ -432,11 +435,18 @@ and an in-memory daemon.
 - [x] reassignment: the old epoch removed, a later epoch started at attempt 1
 - [x] a controller restart re-attaches without a second attempt
 - [x] a callback with another run's token, or an escaping key, is refused
+- [x] a lease with inputs is not acknowledged until every input is spooled and verified; `InputNotFound` and a digest mismatch refuse it; the row holds the manifest and `inputs.json` is written from it; the callback serves only keys of the run's own manifest; removing the row removes its inputs
 - [x] the network check's verdict: DROP passes, a reset fails; the network's configuration
 - [ ] `make dockerhost-e2e` on a Linux host: the check fails without the firewall and passes with it
 - [ ] the same host with the control plane: an agent reaches MCP, and 8080/8082/8443/9090/5432 are closed
 
 ## 11. Deltas from the plan
+
+- Input files (agent runtime contract §2.4) arrive the same way as on
+  Kubernetes: the shared fetch step in `controller/inputs` writes them to the
+  spool before the ack, the row's `materials` holds the manifest, and the
+  callback server's `GET /inputs` checks a requested key against that manifest.
+  An abandoned row answers 409, like the other callback routes.
 
 - The environment is not a second implementation with a parity test: it is the
   Kubernetes builder's output (§5.1). The second `env()` the plan deferred to

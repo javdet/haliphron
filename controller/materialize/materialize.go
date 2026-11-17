@@ -317,9 +317,35 @@ const maxSecretBytes = 1<<20 - 16<<10
 func materialBytes(lease clusterv1.Lease) int {
 	total := len(lease.Prompt)
 	for k, v := range lease.Secrets {
+		if k == runv1.SecretKeyInputs {
+			continue
+		}
 		total += len(k) + len(v)
 	}
+	if manifest, err := inputManifest(lease); err == nil && manifest != nil {
+		total += len(runv1.SecretKeyInputs) + len(manifest)
+	}
 	return total
+}
+
+// inputManifest is the document the Secret carries under SecretKeyInputs, or
+// nil for a run without inputs — which is almost every run, and for which the
+// key is absent rather than an empty list.
+//
+// The manifest is the one piece of the inputs that goes into a Kubernetes
+// object, and it goes into the Secret for the prompt's reason: the names are
+// the person's words. The CR carries nothing about inputs at all — not a
+// count, not a flag — so `kubectl get agentrun -o yaml` says nothing about
+// what was attached.
+func inputManifest(lease clusterv1.Lease) ([]byte, error) {
+	if len(lease.Inputs) == 0 {
+		return nil, nil
+	}
+	raw, err := json.Marshal(runv1.InputManifest{Inputs: lease.Inputs})
+	if err != nil {
+		return nil, fmt.Errorf("materialize: encode the input manifest: %w", err)
+	}
+	return raw, nil
 }
 
 // preflightJob asks the API server to admit the Job without persisting it. A
@@ -457,6 +483,19 @@ func (m *Materializer) ensureMaterials(ctx context.Context, cr *agentrunv1alpha1
 	// valueFrom.secretKeyRef stays out of the Job's spec and out of
 	// `kubectl describe pod`.
 	data[runv1.SecretKeyPrompt] = []byte(lease.Prompt)
+
+	// The input manifest is written from Lease.Inputs, never passed through
+	// from Lease.Secrets: the files it names are the ones this controller
+	// fetched and verified before the lease was acknowledged, and the callback
+	// serves a pod only what this copy lists.
+	delete(data, runv1.SecretKeyInputs)
+	manifest, err := inputManifest(lease)
+	if err != nil {
+		return err
+	}
+	if manifest != nil {
+		data[runv1.SecretKeyInputs] = manifest
+	}
 
 	// The presigned bundle exists only in object-store mode. In relay mode
 	// there is nothing to sign — the pod posts to this controller — and writing

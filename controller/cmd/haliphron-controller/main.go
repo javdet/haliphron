@@ -35,6 +35,7 @@ import (
 	"github.com/automagicops/haliphron/controller/clusterapi"
 	"github.com/automagicops/haliphron/controller/config"
 	"github.com/automagicops/haliphron/controller/identity"
+	"github.com/automagicops/haliphron/controller/inputs"
 	"github.com/automagicops/haliphron/controller/launcher"
 	"github.com/automagicops/haliphron/controller/lease"
 	"github.com/automagicops/haliphron/controller/materialize"
@@ -186,6 +187,7 @@ func run(ctx context.Context) error {
 		Builder:         builder,
 		Notifier:        reporter,
 		Bundles:         api,
+		Inputs:          artifactSpool,
 		StartupDeadline: cfg.StartupDeadline,
 		Log:             log,
 	})
@@ -212,11 +214,15 @@ func run(ctx context.Context) error {
 		K8s:          mgr.GetClient(),
 		Materializer: materializer,
 		Timings:      timings,
-		Namespace:    cfg.AgentNamespace,
-		ClusterID:    id.ClusterID(),
-		Capacity:     cfg.CapacitySlots,
-		Runtimes:     cfg.Runtimes,
-		Log:          log,
+		// Inputs land in the spool too, in an area of their own: the volume
+		// that outlives a pod is the one place a run's attachments can wait
+		// for it while the backend is unreachable.
+		Inputs:    &inputs.Fetcher{API: api, Spool: artifactSpool, Log: log},
+		Namespace: cfg.AgentNamespace,
+		ClusterID: id.ClusterID(),
+		Capacity:  cfg.CapacitySlots,
+		Runtimes:  cfg.Runtimes,
+		Log:       log,
 	})
 	if err != nil {
 		return err
@@ -226,6 +232,7 @@ func run(ctx context.Context) error {
 		K8s:            mgr.GetClient(),
 		Namespace:      cfg.AgentNamespace,
 		Sink:           reporter,
+		Inputs:         artifactSpool,
 		Addr:           cfg.CallbackAddr,
 		CallbackURL:    cfg.CallbackURL,
 		MaxBytesPerRun: cfg.MaxArtifactBytesPerRun,

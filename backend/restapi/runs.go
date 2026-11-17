@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"io"
 	"net/http"
+	"strconv"
 	"time"
 
 	runv1 "github.com/automagicops/haliphron/api/run/v1"
@@ -422,6 +423,59 @@ func (s *Server) runAttempts(w http.ResponseWriter, r *http.Request, _ caller) {
 		})
 	}
 	s.write(w, http.StatusOK, map[string]any{"attempts": items})
+}
+
+// inputResponse is one file a person sent with the request.
+type inputResponse struct {
+	// File is the name under /workspace/.haliphron/inputs/ and the last
+	// segment of the download URL.
+	File      string `json:"file"`
+	Name      string `json:"name"`
+	MediaType string `json:"media_type"`
+	SizeBytes int64  `json:"size_bytes"`
+	SHA256    string `json:"sha256"`
+}
+
+// runInputs lists the files sent with a run.
+func (s *Server) runInputs(w http.ResponseWriter, r *http.Request, _ caller) {
+	inputs, err := s.app.RunInputs(r.Context(), runv1.ULID(r.PathValue("id")))
+	if err != nil {
+		s.failFor(w, r, err)
+		return
+	}
+	items := make([]inputResponse, 0, len(inputs))
+	for _, in := range inputs {
+		ref := in.Ref()
+		items = append(items, inputResponse{
+			File: ref.File(), Name: in.Name, MediaType: in.MediaType,
+			SizeBytes: in.SizeBytes, SHA256: ref.SHA256,
+		})
+	}
+	s.write(w, http.StatusOK, map[string]any{"inputs": items})
+}
+
+// runInput streams one file sent with a run.
+//
+// Served as a download, never rendered in the UI's origin as what it sniffed
+// as: the file is whatever a person attached, and an HTML or SVG one opened
+// inline would be a script running with the UI's cookies.
+func (s *Server) runInput(w http.ResponseWriter, r *http.Request, _ caller) {
+	in, body, err := s.app.OpenRunInput(r.Context(), runv1.ULID(r.PathValue("id")), r.PathValue("file"))
+	if err != nil {
+		s.failFor(w, r, err)
+		return
+	}
+	defer func() { _ = body.Close() }()
+
+	w.Header().Set("Content-Type", app.InputServedType(in.MediaType))
+	w.Header().Set("Content-Length", strconv.FormatInt(in.SizeBytes, 10))
+	w.Header().Set("Content-Disposition", `attachment; filename="`+in.Ref().File()+`"`)
+	w.Header().Set("Content-Security-Policy", "sandbox")
+	w.Header().Set("Cache-Control", "no-store")
+	w.Header().Set("X-Content-Type-Options", "nosniff")
+	if _, err := io.Copy(w, body); err != nil {
+		s.log.Warn("streaming a run input was cut short", "run", r.PathValue("id"), "error", err)
+	}
 }
 
 type cancelRequest struct {

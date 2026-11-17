@@ -32,6 +32,12 @@ type ArtifactForgetter interface {
 	ForgetArtifacts(runID runv1.ULID)
 }
 
+// InputForgetter drops the input files fetched for a run. Called when the row
+// is removed, by whatever path: nothing on this host will read them again.
+type InputForgetter interface {
+	ForgetInputs(runID runv1.ULID) error
+}
+
 // BundleRefresher mints a fresh presigned bundle, in object-store mode.
 type BundleRefresher interface {
 	Artifacts(ctx context.Context, runID runv1.ULID, req clusterv1.ArtifactBundleRequest) (*clusterv1.ArtifactBundle, error)
@@ -59,8 +65,10 @@ type Reconciler struct {
 	Host      launcher.Host
 	Notifier  Notifier
 	Artifacts ArtifactForgetter
-	Bundles   BundleRefresher
-	Auths     *docker.Auths
+	// Inputs is optional; nil means this host keeps no inputs.
+	Inputs  InputForgetter
+	Bundles BundleRefresher
+	Auths   *docker.Auths
 
 	StartupDeadline time.Duration
 	BundleSlack     time.Duration
@@ -845,6 +853,15 @@ func (r *Reconciler) removeRun(ctx context.Context, row *state.Run) error {
 	}
 	if r.Host.AttemptDir != nil {
 		if err := launcher.RemoveFiles(runDirOf(r.Host, row.RunID)); err != nil {
+			return err
+		}
+	}
+	// The inputs before the row, for the row's reason: a crash in between
+	// leaves a row that says what is left to remove. A lease of a newer epoch
+	// fetched before this ran confirms its inputs after its row exists, and
+	// fetches again what went here.
+	if r.Inputs != nil {
+		if err := r.Inputs.ForgetInputs(row.RunID); err != nil {
 			return err
 		}
 	}

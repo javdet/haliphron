@@ -157,6 +157,57 @@ type wirePost struct {
 	Message   string         `json:"message"`
 	Type      string         `json:"type"`
 	Props     map[string]any `json:"props"`
+	// FileIDs are the files attached to the post, and Metadata.Files what the
+	// server says about each. A server that sent the ids without the metadata
+	// still gets its files fetched, under their ids as names.
+	FileIDs  []string `json:"file_ids"`
+	Metadata struct {
+		Files []wireFile `json:"files"`
+	} `json:"metadata"`
+}
+
+// wireFile is a file's info as the server reports it.
+type wireFile struct {
+	ID       string `json:"id"`
+	Name     string `json:"name"`
+	Size     int64  `json:"size"`
+	MimeType string `json:"mime_type"`
+	DeleteAt int64  `json:"delete_at"`
+}
+
+// files is what is attached to a post, in the order the post lists it.
+func (p wirePost) files() []app.ChatFile {
+	if len(p.FileIDs) == 0 && len(p.Metadata.Files) == 0 {
+		return nil
+	}
+	info := make(map[string]wireFile, len(p.Metadata.Files))
+	for _, f := range p.Metadata.Files {
+		info[f.ID] = f
+	}
+	ids := p.FileIDs
+	if len(ids) == 0 {
+		for _, f := range p.Metadata.Files {
+			ids = append(ids, f.ID)
+		}
+	}
+	out := make([]app.ChatFile, 0, len(ids))
+	seen := make(map[string]bool, len(ids))
+	for _, id := range ids {
+		if id == "" || seen[id] {
+			continue
+		}
+		seen[id] = true
+		f, ok := info[id]
+		if ok && f.DeleteAt != 0 {
+			continue
+		}
+		name := f.Name
+		if name == "" {
+			name = id
+		}
+		out = append(out, app.ChatFile{ID: id, Name: name, MediaType: f.MimeType, SizeBytes: f.Size})
+	}
+	return out
 }
 
 // Thread implements app.ChatPlatform.
@@ -198,6 +249,7 @@ func (c *Client) Thread(ctx context.Context, rootID string) ([]app.ChatThreadPos
 			FromBot: fromBot(p) || truthy(p.Props["from_webhook"]),
 			Kind:    kind,
 			System:  p.Type != "",
+			Files:   p.files(),
 		})
 	}
 	return out, nil
@@ -307,6 +359,49 @@ func (c *Client) React(ctx context.Context, postID, emoji string) error {
 	return c.do(ctx, http.MethodPost, "/api/v4/reactions", map[string]string{
 		"user_id": self.ID, "post_id": postID, "emoji_name": emoji,
 	}, nil)
+}
+
+// downloadTimeout bounds one file download: a 10 MiB screenshot over a slow
+// link, inside the minute the chat handler has for the whole message.
+const downloadTimeout = 40 * time.Second
+
+// Download implements app.ChatPlatform: GET /api/v4/files/{id} with the bot's
+// token. It reads at most limit+1 bytes, so a file over the cap is detected
+// without being read whole, whatever size the server declared.
+func (c *Client) Download(ctx context.Context, f app.ChatFile, limit int64) ([]byte, error) {
+	ctx, cancel := context.WithTimeout(ctx, downloadTimeout)
+	defer cancel()
+
+	path := "/api/v4/files/" + url.PathEscape(f.ID)
+	u := *c.base
+	u.Path += path
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, u.String(), nil)
+	if err != nil {
+		return nil, fmt.Errorf("mattermost: GET %s: %w", path, err)
+	}
+	req.Header.Set("Authorization", "Bearer "+c.token)
+	// The client's own timeout is sized for a JSON answer; the context above
+	// is the bound for a file. Same transport, so the same proxy and CA.
+	h := *c.http
+	h.Timeout = 0
+	resp, err := h.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("mattermost: GET %s: %w", path, err)
+	}
+	defer resp.Body.Close()
+	switch {
+	case resp.StatusCode == http.StatusForbidden || resp.StatusCode == http.StatusUnauthorized:
+		return nil, &app.ChatFileError{Reason: "the bot is not allowed to read it"}
+	case resp.StatusCode == http.StatusNotFound:
+		return nil, &app.ChatFileError{Reason: "it was deleted"}
+	case resp.StatusCode >= 300:
+		return nil, fmt.Errorf("GET %s: %w", path, &APIError{Status: resp.StatusCode})
+	}
+	body, err := io.ReadAll(io.LimitReader(resp.Body, limit+1))
+	if err != nil {
+		return nil, fmt.Errorf("mattermost: read %s: %w", path, err)
+	}
+	return body, nil
 }
 
 // do makes one request. Errors name the method, the path and the status — the

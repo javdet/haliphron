@@ -89,7 +89,7 @@ means](../explanation/what-succeeded-means.md).
 
 ## Runtime phases
 
-The nineteen phases of the agent image entrypoint, in execution order. The
+The twenty phases of the agent image entrypoint, in execution order. The
 order is contract: the checkpoint's resume rule is "every phase before the
 first unfinished one is done", which is only meaningful against a fixed
 sequence.
@@ -102,19 +102,20 @@ sequence.
 | 4 | `checkpoint` | reads which phases a previous attempt completed |
 | 5 | `auth` | wires the model credential and the git credential helper |
 | 6 | `clone` | clones the repository |
-| 7 | `role` | resolves the role chain and intersects it with the policy ceiling |
-| 8 | `plugins` | registers the role's marketplaces and installs its plugins |
-| 9 | `mcp-prepare` | renders MCP configuration, referencing secrets rather than inlining them |
-| 10 | `mcp-verify` | proves the MCP servers came up |
-| 11 | `run` | the agent CLI, under the timeout |
-| 12 | `parse` | normalises the runtime's output into `result.md` and usage |
-| 13 | `output` | wraps the payload in the envelope and validates any declared schema |
-| 14 | `persist` | uploads the result, output and log so far |
-| 15 | `commit` | commits what the agent left uncommitted |
-| 16 | `push` | pushes with `--force-with-lease` |
-| 17 | `pr` | creates or updates the pull request |
-| 18 | `finalize` | uploads the final log and the completion report |
-| 19 | `notify` | posts the report to the controller |
+| 7 | `inputs` | fetches the files sent with the request from the controller into `.haliphron/inputs/`; skipped when there are none |
+| 8 | `role` | resolves the role chain and intersects it with the policy ceiling |
+| 9 | `plugins` | registers the role's marketplaces and installs its plugins |
+| 10 | `mcp-prepare` | renders MCP configuration, referencing secrets rather than inlining them |
+| 11 | `mcp-verify` | proves the MCP servers came up |
+| 12 | `run` | the agent CLI, under the timeout |
+| 13 | `parse` | normalises the runtime's output into `result.md` and usage |
+| 14 | `output` | wraps the payload in the envelope and validates any declared schema |
+| 15 | `persist` | uploads the result, output and log so far |
+| 16 | `commit` | commits what the agent left uncommitted |
+| 17 | `push` | pushes with `--force-with-lease` |
+| 18 | `pr` | creates or updates the pull request |
+| 19 | `finalize` | uploads the final log and the completion report |
+| 20 | `notify` | posts the report to the controller |
 
 `persist` runs **before** the git phases, so what the model produced is durable
 before anything allowed to fail. See [what "Succeeded"

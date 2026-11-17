@@ -21,6 +21,7 @@ func (b *Backend) routes() http.Handler {
 	mux.HandleFunc("POST "+p+"/clusters/{clusterID}/heartbeat", b.handleHeartbeat)
 	mux.HandleFunc("POST "+p+"/leases/{runID}/ack", b.handleAck)
 	mux.HandleFunc("POST "+p+"/leases/{runID}/artifacts", b.handleArtifacts)
+	mux.HandleFunc("GET "+p+"/leases/{runID}/inputs/{file}", b.handleInput)
 	mux.HandleFunc("POST "+p+"/ingest/status", b.handleIngestStatus)
 	mux.HandleFunc("POST "+p+"/ingest/completion", b.handleIngestCompletion)
 	mux.HandleFunc("POST "+p+"/ingest/artifacts", b.handleIngestArtifacts)

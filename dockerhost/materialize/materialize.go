@@ -4,8 +4,8 @@
 //
 // The rule from controller/materialize carries over: whatever the controller
 // materialises does not go into the spec. Secrets, the prompt, the role's
-// files and the presigned bundle go into the row's materials column, which
-// never leaves this host and is never logged.
+// files, the presigned bundle and the input manifest go into the row's
+// materials column, which never leaves this host and is never logged.
 package materialize
 
 import (
@@ -115,6 +115,7 @@ func (m *Materializer) Apply(ctx context.Context, lease clusterv1.Lease) (Result
 			Secrets:    lease.Secrets,
 			RoleConfig: lease.RoleConfig,
 			Artifacts:  bundle,
+			Inputs:     lease.Inputs,
 		},
 		Status: state.Status{
 			// The backend's copy of the checkpoint: non-empty when it is

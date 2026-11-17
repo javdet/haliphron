@@ -94,6 +94,12 @@ type Limits struct {
 	// DefaultNoteRetention; config bounds it to MinNoteRetention ...
 	// MaxNoteRetention.
 	NoteRetention time.Duration
+
+	// MaxInputFiles, MaxInputFileBytes and MaxInputBytesPerRun cap the files
+	// a person attaches to a request; zero is the default. See InputLimits.
+	MaxInputFiles       int
+	MaxInputFileBytes   int64
+	MaxInputBytesPerRun int64
 }
 
 // Options assembles a Service.

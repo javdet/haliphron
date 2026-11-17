@@ -36,6 +36,7 @@ import (
 	"github.com/automagicops/haliphron/controller/clusterapi"
 	ctrlconfig "github.com/automagicops/haliphron/controller/config"
 	ctrlidentity "github.com/automagicops/haliphron/controller/identity"
+	"github.com/automagicops/haliphron/controller/inputs"
 	"github.com/automagicops/haliphron/controller/spool"
 
 	"github.com/automagicops/haliphron/dockerhost/callback"
@@ -104,6 +105,7 @@ type harness struct {
 	wg     sync.WaitGroup
 
 	Store     *state.Store
+	Spool     *spool.Spool
 	Reporter  *report.Reporter
 	ClusterID runv1.ULID
 	Callback  *httptest.Server
@@ -192,16 +194,17 @@ func start(t *testing.T, w *world) *harness {
 	if err != nil {
 		t.Fatal(err)
 	}
+	h.Spool = sp
 	reporter := &report.Reporter{API: api, Store: store, Timings: timings, Spool: sp, Host: fixedHost{slots: 4},
 		ClusterID: h.ClusterID, Capacity: 4, Version: controllerVersion, Log: log}
 	h.Reporter = reporter
 
-	cb := &callback.Server{Store: store, Sink: reporter, Spent: reporter.Spent, Log: log}
+	cb := &callback.Server{Store: store, Sink: reporter, Inputs: sp, Spent: reporter.Spent, Log: log}
 	h.Callback = httptest.NewServer(cb.Handler())
 
 	h.Seen = &recordingNotifier{next: reporter}
 	reconciler := &reconcile.Reconciler{
-		Store: store, Engine: w.Docker, Notifier: h.Seen, Artifacts: reporter, Bundles: api,
+		Store: store, Engine: w.Docker, Notifier: h.Seen, Artifacts: reporter, Inputs: sp, Bundles: api,
 		Host: launcher.Host{
 			ClusterID: h.ClusterID, CallbackURL: h.Callback.URL, Network: network, DNS: []string{"10.0.0.53"},
 			GraceSeconds: 1, DeadlineSlackSeconds: 600, AttemptDir: w.attemptDir,
@@ -214,6 +217,7 @@ func start(t *testing.T, w *world) *harness {
 	reporter.Kicker = driver
 	loop := &lease.Loop{
 		API: api, Store: store, Timings: timings, Kicker: driver, Slots: fixedHost{slots: 4},
+		Inputs:       &inputs.Fetcher{API: api, Spool: sp, Log: log},
 		Materializer: &materialize.Materializer{Store: store, RawSpecs: tap, CallbackURL: h.Callback.URL, Log: log},
 		Network:      network, ClusterID: h.ClusterID, Capacity: 4, Log: log,
 	}

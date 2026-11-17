@@ -1,8 +1,10 @@
-// Package callback is the endpoint agent containers post to: /completion,
-// /phase and /artifacts, authenticated with the per-run callback token. The
-// handlers are controller/callback's, with the row in place of the AgentRun:
-// the status codes, the size limits, the key allow-list and the order of
-// obligations are the same, because the image on the other end is the same.
+// Package callback is the endpoint agent containers talk to: POST /completion,
+// /phase and /artifacts, and GET /inputs, authenticated with the per-run
+// callback token. The handlers are controller/callback's, with the row in
+// place of the AgentRun and its Secret: the status codes, the size limits, the
+// key allow-lists and the order of obligations are the same, because the image
+// on the other end is the same. GET /inputs serves only a key the row's own
+// input manifest names, from the spool the lease loop fetched it into.
 //
 // It listens on the agents bridge's gateway address, the one host address the
 // firewall lets an agent reach.
@@ -15,9 +17,11 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"io/fs"
 	"log/slog"
 	"net"
 	"net/http"
+	"os"
 	"strconv"
 	"strings"
 	"time"
@@ -38,10 +42,17 @@ type Sink interface {
 	Forwarded()
 }
 
+// InputSource is where a run's input files are read back from: the spool.
+type InputSource interface {
+	OpenInput(id runv1.ULID, key string) (*os.File, int64, error)
+}
+
 // Server receives the agents' reports.
 type Server struct {
-	Store          *state.Store
-	Sink           Sink
+	Store *state.Store
+	Sink  Sink
+	// Inputs serves GET /inputs; nil answers 503.
+	Inputs         InputSource
 	Addr           string
 	Base           string
 	MaxBytesPerRun int64
@@ -75,6 +86,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("POST "+s.path(runv1.CallbackPathCompletion), s.handleCompletion)
 	mux.HandleFunc("POST "+s.path(runv1.CallbackPathPhase), s.handlePhase)
 	mux.HandleFunc("POST "+s.path(runv1.CallbackPathArtifacts), s.handleArtifact)
+	mux.HandleFunc("GET "+s.path(runv1.CallbackPathInputs), s.handleInput)
 	mux.HandleFunc("GET /healthz", func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(http.StatusOK) })
 	return mux
 }
@@ -283,6 +295,66 @@ func (s *Server) handleArtifact(w http.ResponseWriter, r *http.Request) {
 		},
 		BytesRemaining: remaining,
 	})
+}
+
+// handleInput serves one of the run's input files to its container: the key
+// against the allow-list, the token against the row, the key against the
+// row's own manifest — a container reads only its own run's inputs — and the
+// bytes from the spool, never from the backend.
+func (s *Server) handleInput(w http.ResponseWriter, r *http.Request) {
+	ctx := r.Context()
+	q := r.URL.Query()
+	key := q.Get(runv1.QueryKey)
+	runID := runv1.ULID(q.Get(runv1.QueryRunID))
+	if runID == "" || key == "" {
+		http.Error(w, "an input must name its run and its key", http.StatusBadRequest)
+		return
+	}
+	if _, err := runv1.InputKey(key); err != nil {
+		http.Error(w, "the key is not an input key", http.StatusBadRequest)
+		return
+	}
+	row, ok := s.authenticatedRun(ctx, w, r, runID)
+	if !ok {
+		return
+	}
+	var ref runv1.InputRef
+	found := false
+	for _, in := range row.Materials.Inputs {
+		if in.Key == key {
+			ref, found = in, true
+			break
+		}
+	}
+	if !found {
+		http.Error(w, "this run has no such input", http.StatusNotFound)
+		return
+	}
+	if s.Inputs == nil {
+		s.log().Error("an input was requested and this controller has no spool", "runID", row.RunID)
+		http.Error(w, "this controller holds no inputs", http.StatusServiceUnavailable)
+		return
+	}
+	f, size, err := s.Inputs.OpenInput(row.RunID, ref.Key)
+	if err != nil {
+		if errors.Is(err, fs.ErrNotExist) {
+			s.log().Error("an input this run was given is missing from the spool", "runID", row.RunID)
+		} else {
+			s.log().Error("opening a spooled input", "runID", row.RunID, "error", err)
+		}
+		http.Error(w, "the input is not available on this controller", http.StatusServiceUnavailable)
+		return
+	}
+	defer func() { _ = f.Close() }()
+
+	w.Header().Set("Content-Type", "application/octet-stream")
+	w.Header().Set("Cache-Control", "no-store")
+	w.Header().Set("Content-Length", strconv.FormatInt(size, 10))
+	w.Header().Set(runv1.HeaderSHA256, ref.SHA256)
+	w.WriteHeader(http.StatusOK)
+	if _, err := io.Copy(w, f); err != nil {
+		s.log().Warn("an input transfer to a container was cut", "runID", row.RunID)
+	}
 }
 
 func (s *Server) markSpooled(ctx context.Context, row *state.Run) {

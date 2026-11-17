@@ -199,6 +199,10 @@ func (s *Service) issue(ctx context.Context, cluster store.Cluster, runtimes []r
 		if err != nil {
 			return nil, err
 		}
+		inputs, err := s.leaseInputs(ctx, l.RunID)
+		if err != nil {
+			return nil, err
+		}
 
 		out = append(out, clusterv1.Lease{
 			RunID:         l.RunID,
@@ -212,8 +216,11 @@ func (s *Service) issue(ctx context.Context, cluster store.Cluster, runtimes []r
 			// secrets do: the backend cannot create a Secret inside the
 			// cluster. Unlike them it is not a credential, and unlike them it
 			// becomes exactly one environment variable rather than a file.
-			Prompt:          l.Prompt,
-			PromptSHA256:    hex.EncodeToString(l.PromptSHA256),
+			Prompt:       l.Prompt,
+			PromptSHA256: hex.EncodeToString(l.PromptSHA256),
+			// The manifest only. The controller fetches the bytes before it
+			// acknowledges, from LeaseInput.
+			Inputs:          inputs,
 			CompletedPhases: l.CompletedPhases,
 			Secrets:         secrets,
 			RoleConfig:      roleConfig,
@@ -228,6 +235,20 @@ func (s *Service) issue(ctx context.Context, cluster store.Cluster, runtimes []r
 	// customer's prompt and — in object-store mode — presigned URLs, and this
 	// is the line where a control plane usually leaks them.
 	s.log.Info("leases issued", "cluster", cluster.ID, "count", len(out))
+	return out, nil
+}
+
+// leaseInputs is a run's manifest as the lease carries it; nil for the run
+// without inputs, so the field is absent from the wire.
+func (s *Service) leaseInputs(ctx context.Context, id runv1.ULID) ([]runv1.InputRef, error) {
+	rows, err := s.store.RunInputs(ctx, id)
+	if err != nil || len(rows) == 0 {
+		return nil, err
+	}
+	out := make([]runv1.InputRef, len(rows))
+	for i, in := range rows {
+		out[i] = in.Ref()
+	}
 	return out, nil
 }
 

@@ -50,6 +50,7 @@ import (
 	"github.com/automagicops/haliphron/controller/clusterapi"
 	"github.com/automagicops/haliphron/controller/config"
 	"github.com/automagicops/haliphron/controller/identity"
+	"github.com/automagicops/haliphron/controller/inputs"
 	"github.com/automagicops/haliphron/controller/launcher"
 	"github.com/automagicops/haliphron/controller/lease"
 	"github.com/automagicops/haliphron/controller/materialize"
@@ -352,7 +353,7 @@ func newHarness(t *testing.T, opts ...harnessOption) *harness {
 
 	reconciler, err := agentrun.New(agentrun.Config{
 		Client: k8s, Scheme: scheme, ClusterID: id.ClusterID(),
-		Builder: builder, Notifier: reporter, Bundles: api,
+		Builder: builder, Notifier: reporter, Bundles: api, Inputs: artifactSpool,
 		Clock: clk.Now, Log: log,
 	})
 	if err != nil {
@@ -371,14 +372,15 @@ func newHarness(t *testing.T, opts ...harnessOption) *harness {
 	leaseLoop, err := lease.New(lease.Loop{
 		API: api, K8s: k8s, Materializer: materializer, Timings: timings,
 		Namespace: namespace, ClusterID: id.ClusterID(), Capacity: 4,
-		Clock: clk.Now, Log: log,
+		Inputs: &inputs.Fetcher{API: api, Spool: artifactSpool, Log: log},
+		Clock:  clk.Now, Log: log,
 	})
 	if err != nil {
 		t.Fatalf("lease loop: %v", err)
 	}
 
 	callbackServer, err := callback.New(callback.Config{
-		K8s: k8s, Namespace: namespace, Sink: reporter,
+		K8s: k8s, Namespace: namespace, Sink: reporter, Inputs: artifactSpool,
 		CallbackURL: materializer.CallbackURL, Clock: clk.Now, Log: log,
 		Spent: reporter.Spent,
 	})

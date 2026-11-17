@@ -46,6 +46,23 @@ type SubmitRequest struct {
 
 	CreatedBy  string
 	CreatedVia string
+
+	// Inputs are files sent with the request — today the files attached to a
+	// chat message — that the agent finds under runv1.DirInputs. Admission
+	// checks them against the installation's caps, sniffs their type, stores
+	// them under the run's prefix and writes the manifest in the run's insert.
+	Inputs []InputFile
+}
+
+// InputFile is one file sent with a request, as admission receives it. Its
+// type is not here on purpose: admission sniffs it from the bytes, and a type
+// the sender declared is not believed.
+type InputFile struct {
+	// Name is what the person called the file. Display only.
+	Name string
+	Body []byte
+	// SourceMessageID is the chat message the file was attached to.
+	SourceMessageID string
 }
 
 // Defaults are the installation-wide values admission fills in. They live in

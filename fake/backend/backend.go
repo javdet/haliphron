@@ -180,6 +180,14 @@ type run struct {
 	cancelRequested bool
 	injected        []clusterv1.Command
 	attempts        []AttemptRecord
+
+	// inputs is the run's manifest as the lease carries it, and inputBytes
+	// the stored object under each key — kept apart so that a test can make
+	// the two disagree, which is the failure the controller's digest check
+	// exists for. inputFetches counts GETs per key.
+	inputs       []runv1.InputRef
+	inputBytes   map[string][]byte
+	inputFetches map[string]int
 }
 
 // AttemptRecord is one row of what the real backend keeps in run_attempts.

@@ -167,6 +167,31 @@ export async function fetchResult(runId: string, key?: string, signal?: AbortSig
   return response.text()
 }
 
+/**
+ * Saves one file sent with a run.
+ *
+ * Fetched with the token and handed to the browser as a blob, because a plain
+ * link would carry no Authorization header. The backend serves it as an
+ * attachment and never as something the browser renders in this origin.
+ */
+export async function downloadInput(runId: string, file: string, name: string): Promise<void> {
+  const url = `${PREFIX}/runs/${encodeURIComponent(runId)}/inputs/${encodeURIComponent(file)}`
+  const response = await fetch(url, { headers: authHeaders() })
+  if (!response.ok) throw await toError(response)
+  const blob = await response.blob()
+  const href = URL.createObjectURL(blob)
+  try {
+    const a = document.createElement('a')
+    a.href = href
+    a.download = name || file
+    document.body.appendChild(a)
+    a.click()
+    a.remove()
+  } finally {
+    setTimeout(() => URL.revokeObjectURL(href), 10_000)
+  }
+}
+
 /** A client-side Idempotency-Key, so a retried submit is one run. */
 export function newIdempotencyKey(): string {
   return crypto.randomUUID()

@@ -13,15 +13,17 @@ did not choose. Nothing here assumes otherwise.
 
 | Path | What |
 |---|---|
-| `entrypoint/` | the nineteen phases, as a package |
+| `entrypoint/` | the twenty phases, as a package |
 | `cmd/haliphron-entrypoint/` | the binary the image runs |
 | `Dockerfile` | Debian slim, Node, both agent CLIs, non-root, read-only root |
 
 Inside `entrypoint/`, the files follow the pipeline rather than the type
-hierarchy: `phases.go` is init through role, `agent.go` and `runtimes.go` are the
-model and the two CLIs, `persist.go` is output through finalize, `git.go` is the
-four git phases, `report.go` is the completion webhook. `runner.go` is the spine
-and the only place that decides what happens after something fails.
+hierarchy: `phases.go` is init through role, except `inputs.go`, which reads the
+files a request arrived with from the controller; `agent.go` and `runtimes.go`
+are the model and the two CLIs, `persist.go` is output through finalize,
+`git.go` is the four git phases, `report.go` is the completion webhook.
+`runner.go` is the spine and the only place that decides what happens after
+something fails.
 
 ## The three rules
 

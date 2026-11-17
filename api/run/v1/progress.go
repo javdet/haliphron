@@ -30,6 +30,11 @@ const (
 	// Relay mode only; in object-store mode the pod PUTs to the store instead
 	// and this endpoint is never called.
 	CallbackPathArtifacts = "/artifacts"
+	// CallbackPathInputs is the one GET: the pod reads one of the run's input
+	// files, named by QueryRunID and QueryKey, from the controller that
+	// fetched it before acknowledging the lease. Both artifact modes; the
+	// controller is the only place an input is ever read from.
+	CallbackPathInputs = "/inputs"
 )
 
 // Query and header names on CallbackPathArtifacts. Metadata rides outside the
@@ -126,6 +131,13 @@ func ArtifactKey(key string) (string, error) {
 	switch key {
 	case StorageKeyResult, StorageKeyOutput, StorageKeyCompletion, StorageKeyAgentLog:
 		return key, nil
+	}
+	// Named rather than left to the allow-list below, because the reason is
+	// worth saying: inputs/ is what the person sent, and what the UI shows as
+	// that must not be something the agent can overwrite.
+	if strings.HasPrefix(key, StoragePrefixInputs) {
+		return "", fmt.Errorf("%q is under %s, which holds what the person sent; "+
+			"a run may not write there", key, StoragePrefixInputs)
 	}
 	for _, prefix := range []string{StoragePrefixChunks, StoragePrefixArtifacts} {
 		if strings.HasPrefix(key, prefix) && len(key) > len(prefix) {

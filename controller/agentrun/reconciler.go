@@ -46,6 +46,13 @@ type Notifier interface {
 	Forget(runID runv1.ULID)
 }
 
+// InputForgetter drops the input files a run's controller fetched for it. It is
+// called when the AgentRun is finalised: the pods that read them are gone, and
+// a spool that kept every run's attachments would be a disk that only fills.
+type InputForgetter interface {
+	ForgetInputs(runID runv1.ULID) error
+}
+
 // BundleRefresher mints a fresh presigned bundle for a lease this cluster still
 // holds.
 type BundleRefresher interface {
@@ -62,6 +69,8 @@ type Reconciler struct {
 	Builder   launcher.Builder
 	Notifier  Notifier
 	Bundles   BundleRefresher
+	// Inputs is optional; nil means this controller keeps no inputs.
+	Inputs InputForgetter
 
 	// StartupDeadline is how long a pod may fail to start before the attempt is
 	// called a failure. Without it a nonexistent image waits forever, because
@@ -93,6 +102,7 @@ type Config struct {
 	Builder         launcher.Builder
 	Notifier        Notifier
 	Bundles         BundleRefresher
+	Inputs          InputForgetter
 	StartupDeadline time.Duration
 	BundleSlack     time.Duration
 	HardTTL         time.Duration
@@ -134,6 +144,7 @@ func New(cfg Config) (*Reconciler, error) {
 		Builder:         cfg.Builder,
 		Notifier:        cfg.Notifier,
 		Bundles:         cfg.Bundles,
+		Inputs:          cfg.Inputs,
 		StartupDeadline: cfg.StartupDeadline,
 		BundleSlack:     cfg.BundleSlack,
 		HardTTL:         cfg.HardTTL,

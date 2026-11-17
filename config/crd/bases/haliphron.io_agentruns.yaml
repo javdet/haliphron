@@ -562,6 +562,7 @@ spec:
                   - checkpoint
                   - auth
                   - clone
+                  - inputs
                   - role
                   - plugins
                   - mcp-prepare

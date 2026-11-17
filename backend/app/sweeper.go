@@ -198,7 +198,8 @@ func (s *Service) RunSweeper(ctx context.Context, interval time.Duration) {
 }
 
 // RunReaper purges what has expired but is not state: spent idempotency keys,
-// and answered chat messages that started no run. It is separate from the
+// answered chat messages that started no run, and the input files of
+// admissions whose run was never inserted. It is separate from the
 // sweep because it is housekeeping on tables nothing waits for, and running it
 // every few seconds would be a delete storm for no reason.
 func (s *Service) RunReaper(ctx context.Context, interval time.Duration) {
@@ -238,6 +239,15 @@ func (s *Service) RunReaper(ctx context.Context, interval time.Duration) {
 			}
 			if deliveries > 0 || fingerprints > 0 {
 				s.log.Info("alert history purged", "deliveries", deliveries, "fingerprints", fingerprints)
+			}
+			// Inputs stored by an admission whose run was never inserted.
+			cleared, err := s.SweepOrphanInputs(ctx)
+			if err != nil && !ctxDone(ctx) {
+				s.log.Error("sweeping orphaned inputs failed", "error", err)
+				continue
+			}
+			if cleared > 0 {
+				s.log.Info("orphaned run inputs deleted", "runs", cleared)
 			}
 		}
 	}

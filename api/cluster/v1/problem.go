@@ -58,16 +58,21 @@ const (
 	CodeBootstrapTokenConsumed       ProblemCode = "BootstrapTokenConsumed"
 	CodeUnsupportedControllerVersion ProblemCode = "UnsupportedControllerVersion"
 	CodeRunNotFound                  ProblemCode = "RunNotFound"
-	CodeEpochMismatch                ProblemCode = "EpochMismatch"
-	CodeRunLeasedByAnotherCluster    ProblemCode = "RunLeasedByAnotherCluster"
-	CodeRunTerminal                  ProblemCode = "RunTerminal"
-	CodePhaseRegression              ProblemCode = "PhaseRegression"
-	CodeAttemptRegression            ProblemCode = "AttemptRegression"
-	CodeLeaseExpired                 ProblemCode = "LeaseExpired"
-	CodePayloadTooLarge              ProblemCode = "PayloadTooLarge"
-	CodeRateLimited                  ProblemCode = "RateLimited"
-	CodeUnavailable                  ProblemCode = "Unavailable"
-	CodeInternal                     ProblemCode = "Internal"
+	// CodeInputNotFound is an input the run's manifest does not name, or one
+	// whose object is gone from the store. Always action fatal: no repeat
+	// brings an object back, and the controller refuses the lease rather than
+	// start the run without a file the agent will be told it has.
+	CodeInputNotFound             ProblemCode = "InputNotFound"
+	CodeEpochMismatch             ProblemCode = "EpochMismatch"
+	CodeRunLeasedByAnotherCluster ProblemCode = "RunLeasedByAnotherCluster"
+	CodeRunTerminal               ProblemCode = "RunTerminal"
+	CodePhaseRegression           ProblemCode = "PhaseRegression"
+	CodeAttemptRegression         ProblemCode = "AttemptRegression"
+	CodeLeaseExpired              ProblemCode = "LeaseExpired"
+	CodePayloadTooLarge           ProblemCode = "PayloadTooLarge"
+	CodeRateLimited               ProblemCode = "RateLimited"
+	CodeUnavailable               ProblemCode = "Unavailable"
+	CodeInternal                  ProblemCode = "Internal"
 )
 
 // Action is the instruction to the controller.

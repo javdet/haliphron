@@ -25,6 +25,17 @@ func (c *Controller) Sync(ctx context.Context) (int, error) {
 		return 0, err
 	}
 	for _, lease := range leases {
+		// The inputs first: nothing is materialised, and nothing acknowledged,
+		// until every file the pod will ask for is held here and verified.
+		if len(lease.Inputs) > 0 {
+			switch outcome, rejection := c.fetchInputs(ctx, lease); outcome {
+			case fetchSkip:
+				continue
+			case fetchRefuse:
+				c.refuse(lease, rejection)
+				continue
+			}
+		}
 		c.take(lease)
 	}
 	if err := c.ackPending(ctx); err != nil {
@@ -86,6 +97,20 @@ func (c *Controller) take(lease clusterv1.Lease) {
 		return
 	}
 	c.runs[lease.RunID] = state
+}
+
+// refuse records a lease this controller will not run, without materialising
+// anything, so that ackPending sends the negative ack. What was fetched for it
+// goes.
+func (c *Controller) refuse(lease clusterv1.Lease, rejection *clusterv1.AckRejection) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.noteLocked("refusing run %s: %s", lease.RunID, rejection.Code)
+	delete(c.inputs, lease.RunID)
+	c.runs[lease.RunID] = &runState{
+		runID: lease.RunID, epoch: lease.Epoch, attempt: lease.Attempt,
+		lease: lease, rejection: rejection,
+	}
 }
 
 // ackPending acknowledges everything materialised and not yet acknowledged.
@@ -581,6 +606,7 @@ func (c *Controller) abandon(id runv1.ULID, reason string) {
 	}
 	c.abandoned[id] = true
 	delete(c.runs, id)
+	delete(c.inputs, id)
 	c.objects.deleteAgentRun(agentrunv1alpha1.ObjectName(id))
 	c.noteLocked("abandoned run=%s: %s", id, reason)
 }

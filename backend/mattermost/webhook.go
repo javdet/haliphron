@@ -235,5 +235,8 @@ func webhookMessage(post wirePost, p webhookPayload, self User, username string)
 		FromBot:     fromBot(post),
 		FromWebhook: truthy(post.Props["from_webhook"]),
 		System:      post.Type != "" || post.DeleteAt != 0,
+		// Read from the post the server returned, not from the delivery's
+		// own comma-separated file_ids: the post carries names and sizes too.
+		Files: post.files(),
 	}
 }

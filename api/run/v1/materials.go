@@ -73,6 +73,18 @@ const (
 	// minted by the controller, not the backend: without it any pod in the
 	// agents namespace could post a forged completion for another run.
 	SecretKeyCallbackToken = "callback-token"
+
+	// SecretKeyInputs holds the run's input manifest, InputManifest as JSON:
+	// the files a person attached to the request, which the pod fetches from
+	// its controller in RuntimePhaseInputs. Absent when the run has none, which
+	// is the normal case.
+	//
+	// Written by the controller from Lease.Inputs, not passed through from
+	// Lease.Secrets. In the Secret rather than the CR because the names are
+	// the customer's words — "salary-review.pdf" in `kubectl get agentrun`
+	// is a leak — and so that reconciliation remembers nothing: the callback
+	// endpoint checks a requested key against this copy, not against memory.
+	SecretKeyInputs = "inputs.json"
 )
 
 // PlatformMCPServer is the name the backend gives its own MCP server in
@@ -127,6 +139,9 @@ const (
 	StorageKeyAgentLog     = "logs/agent.log"
 	StoragePrefixChunks    = "logs/chunks/"
 	StoragePrefixArtifacts = "artifacts/"
+	// StoragePrefixInputs is what a person sent with the request, written by
+	// the backend at admission and never by a run: ArtifactKey refuses it.
+	StoragePrefixInputs = "inputs/"
 )
 
 // URI schemes for runs.result_ref. A stored row says which store wrote it, so

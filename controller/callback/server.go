@@ -6,14 +6,24 @@
 // text from outside with tools that text chose. So it reports to the
 // controller, which forwards what it was given unchanged.
 //
-// Three things arrive here, on three paths, all authenticated with the same
-// per-run callback token:
+// Four paths, all authenticated with the same per-run callback token. Three
+// carry something in:
 //
-//	/completion  the report, posted last
-//	/phase       one entrypoint phase, as it completes
-//	/artifacts   one object, bytes in the body — relay mode only
+//	POST /completion  the report, posted last
+//	POST /phase       one entrypoint phase, as it completes
+//	POST /artifacts   one object, bytes in the body — relay mode only
 //
-// The three are not equally important and the handlers say so. Losing a
+// and one carries something out:
+//
+//	GET  /inputs      one of the run's input files, which this controller
+//	                  fetched from the backend before acknowledging the lease
+//
+// The GET answers only for a key the run's own manifest names, read from the
+// run's own Secret: a pod reads its own run's inputs and nobody else's. It
+// reads them from this controller's volume and never from the backend, which
+// is what lets a run with attachments start while the control plane is down.
+//
+// The three POSTs are not equally important and the handlers say so. Losing a
 // completion costs nothing structural: the same document is already durable as
 // completion.json, written before the call was made, which is what makes the
 // webhook an optimisation rather than a correctness condition. Losing a phase
@@ -30,9 +40,11 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"io/fs"
 	"log/slog"
 	"net"
 	"net/http"
+	"os"
 	"strconv"
 	"strings"
 	"time"
@@ -69,12 +81,21 @@ type Sink interface {
 	Forwarded()
 }
 
+// InputSource is where a run's input files are read back from: the spool the
+// lease loop fetched them into.
+type InputSource interface {
+	OpenInput(id runv1.ULID, key string) (*os.File, int64, error)
+}
+
 // Server receives completion reports from agent pods.
 type Server struct {
 	K8s       client.Client
 	Namespace string
 	Sink      Sink
-	Addr      string
+	// Inputs serves GET /inputs. Nil answers every such request 503: a
+	// controller with no spool has no inputs to give.
+	Inputs InputSource
+	Addr   string
 	// Base is the URL prefix the pods were told to post under, taken from the
 	// same callback URL that goes into the CR so that the two cannot drift
 	// apart. Normally empty.
@@ -99,6 +120,7 @@ type Config struct {
 	K8s       client.Client
 	Namespace string
 	Sink      Sink
+	Inputs    InputSource
 	Addr      string
 	// CallbackURL is the URL handed to pods; its path is what this server
 	// listens on, so that the two cannot drift apart.
@@ -145,7 +167,7 @@ func New(cfg Config) (*Server, error) {
 		cfg.Addr = ":8083"
 	}
 	return &Server{
-		K8s: cfg.K8s, Namespace: cfg.Namespace, Sink: cfg.Sink,
+		K8s: cfg.K8s, Namespace: cfg.Namespace, Sink: cfg.Sink, Inputs: cfg.Inputs,
 		Addr: cfg.Addr, Base: base, Clock: cfg.Clock, Log: cfg.Log,
 		MaxBytesPerRun: cfg.MaxBytesPerRun, Spent: cfg.Spent,
 	}, nil
@@ -167,6 +189,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("POST "+s.path(runv1.CallbackPathCompletion), s.handleCompletion)
 	mux.HandleFunc("POST "+s.path(runv1.CallbackPathPhase), s.handlePhase)
 	mux.HandleFunc("POST "+s.path(runv1.CallbackPathArtifacts), s.handleArtifact)
+	mux.HandleFunc("GET "+s.path(runv1.CallbackPathInputs), s.handleInput)
 	mux.HandleFunc("GET /healthz", func(w http.ResponseWriter, _ *http.Request) {
 		w.WriteHeader(http.StatusOK)
 	})
@@ -420,6 +443,88 @@ func (s *Server) handleArtifact(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
+// handleInput serves one of the run's input files to its pod.
+//
+// The key is checked three times, each for its own reason: against the
+// allow-list, so that nothing that could be a path reaches the spool; against
+// the run's manifest in its Secret, so that a pod reads only what its own run
+// was given — the token proves which run is asking, and the manifest says
+// what that run may have; and by the spool, which holds the bytes this
+// controller verified before it acknowledged.
+//
+// A file that is in the manifest and missing from the spool is a 503. The
+// controller confirmed every input before the acknowledgement, so this is a
+// volume that lost data or a sweep that misjudged; the pod retries, and the
+// log says which run without saying which file.
+func (s *Server) handleInput(w http.ResponseWriter, r *http.Request) {
+	ctx := r.Context()
+	q := r.URL.Query()
+	key := q.Get(runv1.QueryKey)
+	runID := runv1.ULID(q.Get(runv1.QueryRunID))
+	if runID == "" || key == "" {
+		http.Error(w, "an input must name its run and its key", http.StatusBadRequest)
+		return
+	}
+	if _, err := runv1.InputKey(key); err != nil {
+		http.Error(w, "the key is not an input key", http.StatusBadRequest)
+		return
+	}
+
+	cr, secret, ok := s.authenticatedRunSecret(ctx, w, r, runID)
+	if !ok {
+		return
+	}
+	ref, ok := manifestEntry(secret, key)
+	if !ok {
+		http.Error(w, "this run has no such input", http.StatusNotFound)
+		return
+	}
+	if s.Inputs == nil {
+		s.Log.Error("an input was requested and this controller has no spool", "runID", cr.Spec.RunID)
+		http.Error(w, "this controller holds no inputs", http.StatusServiceUnavailable)
+		return
+	}
+	f, size, err := s.Inputs.OpenInput(cr.Spec.RunID, ref.Key)
+	if err != nil {
+		if errors.Is(err, fs.ErrNotExist) {
+			s.Log.Error("an input this run was given is missing from the spool", "runID", cr.Spec.RunID)
+		} else {
+			s.Log.Error("opening a spooled input", "runID", cr.Spec.RunID, "error", err)
+		}
+		http.Error(w, "the input is not available on this controller", http.StatusServiceUnavailable)
+		return
+	}
+	defer func() { _ = f.Close() }()
+
+	w.Header().Set("Content-Type", "application/octet-stream")
+	w.Header().Set("Cache-Control", "no-store")
+	w.Header().Set("Content-Length", strconv.FormatInt(size, 10))
+	w.Header().Set(runv1.HeaderSHA256, ref.SHA256)
+	w.WriteHeader(http.StatusOK)
+	if _, err := io.Copy(w, f); err != nil {
+		// The pod checks the digest of what it read and asks again.
+		s.Log.Warn("an input transfer to a pod was cut", "runID", cr.Spec.RunID)
+	}
+}
+
+// manifestEntry finds key in the input manifest a run's Secret carries.
+func manifestEntry(secret *corev1.Secret, key string) (runv1.InputRef, bool) {
+	raw := secret.Data[runv1.SecretKeyInputs]
+	if len(raw) == 0 {
+		return runv1.InputRef{}, false
+	}
+	var manifest runv1.InputManifest
+	if err := json.Unmarshal(raw, &manifest); err != nil {
+		return runv1.InputRef{}, false
+	}
+	for _, ref := range manifest.Inputs {
+		if ref.Key == key {
+			return ref, true
+		}
+	}
+	return runv1.InputRef{}, false
+}
+
 // budgetFor is what this run may store, as the backend stated it in the lease.
 //
 // Read off the CR rather than from this controller's configuration, because the
@@ -479,12 +584,21 @@ func (s *Server) recordSpooled(ctx context.Context, cr *agentrunv1alpha1.AgentRu
 // authenticatedRun is the two checks every handler here makes: the run belongs
 // to this cluster, and the caller holds its callback token.
 //
-// One function because the three endpoints must not diverge on it. A phase
+// One function because the four endpoints must not diverge on it. A phase
 // endpoint that authenticated by namespace rather than by run would let any pod
 // in the agents namespace mark another run's expensive phase as done, and the
 // next attempt of that run would skip its model call.
 func (s *Server) authenticatedRun(ctx context.Context, w http.ResponseWriter, r *http.Request,
 	runID runv1.ULID) (*agentrunv1alpha1.AgentRun, bool) {
+
+	cr, _, ok := s.authenticatedRunSecret(ctx, w, r, runID)
+	return cr, ok
+}
+
+// authenticatedRunSecret is authenticatedRun returning the per-run Secret the
+// token was checked against, for the handler that needs more from it.
+func (s *Server) authenticatedRunSecret(ctx context.Context, w http.ResponseWriter, r *http.Request,
+	runID runv1.ULID) (*agentrunv1alpha1.AgentRun, *corev1.Secret, bool) {
 
 	var cr agentrunv1alpha1.AgentRun
 	err := s.K8s.Get(ctx, types.NamespacedName{
@@ -495,19 +609,20 @@ func (s *Server) authenticatedRun(ctx context.Context, w http.ResponseWriter, r 
 		// A repeat will not change that, so the answer is one the pod stops on.
 		s.Log.Warn("a callback arrived for a run this cluster does not hold", "runID", runID)
 		http.Error(w, "no such run in this cluster", http.StatusConflict)
-		return nil, false
+		return nil, nil, false
 	}
 	if err != nil {
 		s.Log.Error("reading a run for a callback", "runID", runID, "error", err)
 		http.Error(w, "could not read the run", http.StatusServiceUnavailable)
-		return nil, false
+		return nil, nil, false
 	}
-	if !s.authenticate(ctx, r, &cr) {
+	secret, ok := s.authenticate(ctx, r, &cr)
+	if !ok {
 		s.Log.Warn("a callback was refused: the token does not match the run", "runID", runID)
 		http.Error(w, "the callback token does not match this run", http.StatusUnauthorized)
-		return nil, false
+		return nil, nil, false
 	}
-	return &cr, true
+	return &cr, secret, true
 }
 
 // write answers with JSON.
@@ -522,11 +637,12 @@ func (s *Server) write(w http.ResponseWriter, body any) {
 // authenticate compares the bearer token with the one the controller minted for
 // this run. Constant-time, and bound to the run rather than to the namespace:
 // without the binding, any pod in the agents namespace could post a forged
-// completion for somebody else's work.
-func (s *Server) authenticate(ctx context.Context, r *http.Request, cr *agentrunv1alpha1.AgentRun) bool {
+// completion for somebody else's work. It returns the Secret it read, so that
+// a handler needing another key from it does not read it twice.
+func (s *Server) authenticate(ctx context.Context, r *http.Request, cr *agentrunv1alpha1.AgentRun) (*corev1.Secret, bool) {
 	presented, ok := bearer(r)
 	if !ok {
-		return false
+		return nil, false
 	}
 	var secret corev1.Secret
 	if err := s.K8s.Get(ctx, types.NamespacedName{
@@ -534,13 +650,16 @@ func (s *Server) authenticate(ctx context.Context, r *http.Request, cr *agentrun
 	}, &secret); err != nil {
 		s.Log.Error("reading the per-run secret for authentication",
 			"runID", cr.Spec.RunID, "error", err)
-		return false
+		return nil, false
 	}
 	expected := secret.Data[runv1.SecretKeyCallbackToken]
 	if len(expected) == 0 {
-		return false
+		return nil, false
 	}
-	return subtle.ConstantTimeCompare([]byte(presented), expected) == 1
+	if subtle.ConstantTimeCompare([]byte(presented), expected) != 1 {
+		return nil, false
+	}
+	return &secret, true
 }
 
 func bearer(r *http.Request) (string, bool) {

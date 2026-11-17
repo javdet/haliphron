@@ -16,11 +16,11 @@ NetworkPolicy.
 | `state` | the SQLite store: one row per run, compare-and-swap writes |
 | `rawspec` | captures each lease's raw spec for the pruning guard |
 | `materialize` | lease → preflight → row |
-| `lease` | the long poll, the ack, commands as column writes |
+| `lease` | the long poll, input files fetched before the ack (`controller/inputs`), the ack, commands as column writes |
 | `launcher` | row + attempt → container create request and secret files |
 | `docker` | the narrow Engine API interface and its client over the socket |
 | `reconcile` | the phase table, the stop sequence, retries, abandon, the reaper, the work queue |
-| `callback` | `/completion`, `/phase`, `/artifacts` for agent containers |
+| `callback` | `/completion`, `/phase`, `/artifacts` and `GET /inputs` for agent containers |
 | `report` | ingest, heartbeat, artifact relay |
 | `netcheck` | the network self-test |
 | `capacity` | free slots and disk floors |
@@ -40,7 +40,11 @@ Rules specific to this module:
 - **Every signal is recorded before it is sent** (`status.stop`). That record is
   the only way to tell a container this controller stopped from one a daemon
   restart killed.
-- **Nothing logs the materials column, a lease body or a secret file.**
+- **Nothing logs the materials column, a lease body or a secret file**, nor an
+  input's name or bytes. Inputs are fetched into the spool's `_inputs/` area
+  and verified before the ack; the row's `materials.inputs` is the manifest,
+  written as the `inputs.json` secret file, and the only list the callback
+  serves a container from. Removing the row removes its inputs.
 
 Tests: `make dockerhost-test` (unit + `test/dockerhost`, no daemon needed);
 `make dockerhost-e2e` against a real Linux daemon, opt-in.

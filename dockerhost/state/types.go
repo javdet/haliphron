@@ -61,6 +61,11 @@ type Materials struct {
 	Secrets    map[string]string        `json:"secrets,omitempty"`
 	RoleConfig map[string]string        `json:"roleConfig,omitempty"`
 	Artifacts  clusterv1.ArtifactBundle `json:"artifacts"`
+	// Inputs is the run's input manifest, Lease.Inputs as the lease carried
+	// it: what the per-run Secret holds under inputs.json on Kubernetes. The
+	// files themselves are in the spool, fetched and verified before the
+	// acknowledgement; the callback serves a container only what this lists.
+	Inputs []runv1.InputRef `json:"inputs,omitempty"`
 }
 
 // Status is the AgentRunStatus shape, less what only Kubernetes has.

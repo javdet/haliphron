@@ -124,6 +124,12 @@ type runState struct {
 	// relayed is how many bytes this run has pushed through the relay, for the
 	// per-run budget.
 	relayed int64
+	// inputs are the files the run arrived with, by key: exactly the entries
+	// of the manifest Prepare wrote, and the only keys GET /inputs serves.
+	inputs map[string]*inputFile
+	// inputReads counts the GETs of an input that reached the run, refusals
+	// and injected faults included.
+	inputReads int
 }
 
 // ReceivedReport is one delivery of the completion webhook, as it arrived.
@@ -246,12 +252,13 @@ func (c *ControlPlane) Handler() http.Handler {
 	mux.HandleFunc("GET /storage/{bucket}/{key...}", c.handleGet)
 	mux.HandleFunc("PUT /storage/{bucket}/{key...}", c.handlePut)
 	mux.HandleFunc("POST /storage/{bucket}", c.handlePost)
-	// The three callback paths, under the base the CR advertises. They are
+	// The four callback paths, under the base the CR advertises. They are
 	// named by the contract's own constants rather than spelled out, so a fake
 	// and an image built from one contract agree on the routes by construction.
 	mux.HandleFunc("POST /runtime/v1"+runv1.CallbackPathCompletion, c.handleCompletion)
 	mux.HandleFunc("POST /runtime/v1"+runv1.CallbackPathPhase, c.handlePhase)
 	mux.HandleFunc("POST /runtime/v1"+runv1.CallbackPathArtifacts, c.handleRelay)
+	mux.HandleFunc("GET /runtime/v1"+runv1.CallbackPathInputs, c.handleInput)
 	return mux
 }
 

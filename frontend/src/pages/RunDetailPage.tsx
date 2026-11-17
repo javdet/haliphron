@@ -4,6 +4,7 @@ import {
   isLive,
   useAttempts,
   useCancelRun,
+  useInputs,
   useClusters,
   useDeferredRuns,
   useLocks,
@@ -30,6 +31,7 @@ import {
   money,
   tokens,
 } from '../components/ui'
+import { downloadInput } from '../api/client'
 import type { Attempt, Run } from '../api/types'
 
 type Tab = 'result' | 'logs' | 'attempts'
@@ -269,6 +271,63 @@ function Summary({ run }: { run: Run }) {
   )
 }
 
+function humanBytes(n: number): string {
+  if (n >= 1 << 20) return `${(n / (1 << 20)).toFixed(1)} MiB`
+  if (n >= 1 << 10) return `${Math.round(n / (1 << 10))} KiB`
+  return `${n} bytes`
+}
+
+/**
+ * The files a person sent with the request, as the agent received them. A
+ * file the person attached that is not listed here did not reach the agent:
+ * the prompt names it as not available, with the reason.
+ */
+function InputsCard({ id }: { id: string }) {
+  const inputs = useInputs(id)
+  const [error, setError] = useState<unknown>(null)
+  const files = inputs.data ?? []
+  if (files.length === 0) return null
+  return (
+    <Card title={`Attached files (${files.length})`} tight>
+      <ErrorBanner error={error} what="download the file" />
+      <div className="table-wrap">
+        <table>
+          <thead>
+            <tr>
+              <th>Name</th>
+              <th>Type</th>
+              <th className="num">Size</th>
+              <th>In the workspace</th>
+              <th />
+            </tr>
+          </thead>
+          <tbody>
+            {files.map((f) => (
+              <tr key={f.file}>
+                <td className="trunc">{f.name}</td>
+                <td className="small muted">{f.media_type.split(';')[0]}</td>
+                <td className="num small">{humanBytes(f.size_bytes)}</td>
+                <td className="mono small muted">.haliphron/inputs/{f.file}</td>
+                <td className="num">
+                  <button
+                    className="small"
+                    onClick={() => {
+                      setError(null)
+                      downloadInput(id, f.file, f.name).catch(setError)
+                    }}
+                  >
+                    Download
+                  </button>
+                </td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
+    </Card>
+  )
+}
+
 function AttemptsTable({ attempts }: { attempts: Attempt[] }) {
   if (attempts.length === 0) return <Empty>No attempt has been recorded yet.</Empty>
   return (
@@ -504,6 +563,7 @@ export function RunDetailPage() {
         <ErrorBanner error={retry.error} what="retry the run" />
         <Summary run={data} />
         <LocksAndDeferrals id={id} live={live} />
+        <InputsCard id={id} />
         <RunTokensCard runId={id} live={live} />
 
         <Card tight>

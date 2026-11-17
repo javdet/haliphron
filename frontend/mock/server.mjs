@@ -421,6 +421,13 @@ const routes = [
     return {}
   }],
   ['GET', /^\/api\/v1\/runs\/([^/]+)\/attempts$/, (m, _u, { attempts }) => ({ attempts: attempts[m[1]] ?? [] })],
+  // The first run of the list came from a chat message with a screenshot.
+  ['GET', /^\/api\/v1\/runs\/([^/]+)\/inputs$/, (m, _u, { runs }) => ({
+    inputs: runs[0] && runs[0].run_id === m[1]
+      ? [{ file: '1-checkout-error.png', name: 'checkout error.png', media_type: 'image/png',
+           size_bytes: 318_204, sha256: 'a'.repeat(64) }]
+      : [],
+  })],
   ['GET', /^\/api\/v1\/runs\/([^/]+)\/logs$/, (m, _u, { LOG }) => ({
     chunks: [{ key: '000001.log', size_bytes: LOG.length, at: iso(60000), url: `/api/v1/runs/${m[1]}/logs/000001.log` }],
     next_after: '000001.log',

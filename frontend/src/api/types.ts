@@ -237,6 +237,18 @@ export interface AlertSuppression {
   suppressed: number
 }
 
+/** A file a person sent with the request, as the agent received it. */
+export interface RunInput {
+  /** The name under /workspace/.haliphron/inputs/, and the download path's last segment. */
+  file: string
+  /** What the person called it. */
+  name: string
+  /** What the bytes sniffed as, not what the chat platform claimed. */
+  media_type: string
+  size_bytes: number
+  sha256: string
+}
+
 export interface Attempt {
   attempt: number
   epoch: number
