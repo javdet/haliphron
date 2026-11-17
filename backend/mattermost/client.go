@@ -227,7 +227,11 @@ func (c *Client) Thread(ctx context.Context, rootID string) ([]app.ChatThreadPos
 		}
 	}
 	sort.Slice(posts, func(i, j int) bool { return posts[i].CreateAt < posts[j].CreateAt })
+	return c.threadPosts(ctx, posts)
+}
 
+// threadPosts turns posts, in the order given, into what the rules read.
+func (c *Client) threadPosts(ctx context.Context, posts []wirePost) ([]app.ChatThreadPost, error) {
 	names, err := c.usernames(ctx, posts)
 	if err != nil {
 		return nil, err
@@ -238,9 +242,10 @@ func (c *Client) Thread(ctx context.Context, rootID string) ([]app.ChatThreadPos
 		kind, _ := p.Props["haliphron_kind"].(string)
 		out = append(out, app.ChatThreadPost{
 			ID:        p.ID,
+			RootID:    p.RootID,
 			UserID:    p.UserID,
 			Username:  names[p.UserID],
-			Text:      p.Message,
+			Text:      p.text(),
 			CreatedAt: time.UnixMilli(p.CreateAt),
 			FromSelf:  self.ID != "" && p.UserID == self.ID,
 			// An incoming webhook posts under the account of whoever created
@@ -248,7 +253,7 @@ func (c *Client) Thread(ctx context.Context, rootID string) ([]app.ChatThreadPos
 			// person.
 			FromBot: fromBot(p) || truthy(p.Props["from_webhook"]),
 			Kind:    kind,
-			System:  p.Type != "",
+			System:  p.system(),
 			Files:   p.files(),
 		})
 	}
@@ -419,7 +424,11 @@ func (c *Client) do(ctx context.Context, method, path string, in, out any) error
 		body = bytes.NewReader(encoded)
 	}
 	u := *c.base
-	u.Path += path
+	// A query, when the path carries one, is the URL's and not the path's:
+	// it would otherwise be escaped into the path.
+	p, query, _ := strings.Cut(path, "?")
+	u.Path += p
+	u.RawQuery = query
 	req, err := http.NewRequestWithContext(ctx, method, u.String(), body)
 	if err != nil {
 		return fmt.Errorf("mattermost: %s %s: %w", method, path, err)

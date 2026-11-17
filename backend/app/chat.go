@@ -68,6 +68,14 @@ type ChatPlatform interface {
 	// how a file larger than it is told apart without reading it whole. A file
 	// the platform will not hand over is a *ChatFileError naming why.
 	Download(ctx context.Context, f ChatFile, limit int64) ([]byte, error)
+	// ChannelInfo describes a channel and whether the bot is a member. A
+	// channel that does not exist, or that the bot cannot see, is
+	// ErrChatChannelNotFound.
+	ChannelInfo(ctx context.Context, channelID string) (ChatChannel, error)
+	// RecentPosts returns the channel's root posts created at or after since,
+	// oldest first, at most limit, with their text rendered as Thread renders
+	// it: the message and its attachments or blocks.
+	RecentPosts(ctx context.Context, channelID string, since time.Time, limit int) ([]ChatThreadPost, error)
 }
 
 // ChatMessage is a message as the adapter decoded it. The adapter reports
@@ -110,13 +118,18 @@ type ChatMessage struct {
 	Files []ChatFile
 }
 
-// ChatThreadPost is one post of a thread, as context for a prompt.
+// ChatThreadPost is one post of a thread, as context for a prompt, or of a
+// channel, as a candidate for the post that announced an alert.
 type ChatThreadPost struct {
 	ID string
+	// RootID is the thread the post is a reply in, empty for a root post.
+	RootID string
 	// UserID is the author's account, which is what tells two people apart
 	// when a name could not be read.
-	UserID    string
-	Username  string
+	UserID   string
+	Username string
+	// Text is the message and, for a post made by automation, the text of
+	// its attachments or blocks, rendered as lines after it.
 	Text      string
 	CreatedAt time.Time
 	FromSelf  bool
@@ -438,6 +451,9 @@ func (c *Chat) RunReplier(ctx context.Context, interval time.Duration) {
 		case <-ticker.C:
 		case <-c.kick:
 		}
+		if _, err := c.SearchThreads(ctx); err != nil && !ctxDone(ctx) {
+			c.log.Error("chat alert thread search failed", "error", err)
+		}
 		if _, err := c.Deliver(ctx); err != nil && !ctxDone(ctx) {
 			c.log.Error("chat reply pass failed", "error", err)
 		}
@@ -514,6 +530,13 @@ func (c *Chat) deliver(ctx context.Context, t store.ChatTrigger) (bool, error) {
 		text = chatLostClaim
 	}
 
+	// An alert's reply whose post was never found goes out as a root post of
+	// its own, headed by the alerts it is about, and becomes the thread.
+	root := t.ThreadID == ""
+	if root {
+		text = cutRunes(chatAlertRootHeader(t.AlertNames)+"\n\n"+text, c.platform.MaxPostRunes())
+	}
+
 	postID, err := c.platform.Post(ctx, ChatPost{
 		ChannelID: t.ChannelID, RootID: t.ThreadID, Text: text, RunID: t.RunID, Kind: kind,
 	})
@@ -528,6 +551,14 @@ func (c *Chat) deliver(ctx context.Context, t store.ChatTrigger) (bool, error) {
 		}
 		return false, c.svc.store.FailChatReply(ctx, t.ChatTriggerKey, err.Error(),
 			chatBackoff(t.Attempts), abandon)
+	}
+	if root {
+		if err := c.svc.store.MarkChatRootPosted(ctx, t.ChatTriggerKey, t.OriginMessageID, postID); err != nil {
+			return true, err
+		}
+		c.log.Info("no post of the alert was found; the reply was posted as a new post in the channel",
+			"message", t.MessageID, "run", t.RunID, "channel", t.ChannelID)
+		return true, nil
 	}
 	if err := c.svc.store.MarkChatReplied(ctx, t.ChatTriggerKey, postID); err != nil {
 		return true, err

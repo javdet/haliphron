@@ -89,6 +89,9 @@ type AlertReceiverInput struct {
 	// alerts are appended to it. CreatedBy, CreatedVia and the parent fields
 	// are ignored: a run is attributed to its receiver.
 	Run run.SubmitRequest
+	// ChatReply is the channel the runs answer in, in the thread of the post
+	// that announced the alerts; nil for none.
+	ChatReply *AlertChatReply
 }
 
 // AlertReceiverPatch is a partial edit; a nil field is left as it is.
@@ -98,12 +101,24 @@ type AlertReceiverPatch struct {
 	Enabled         *bool
 	ThrottleSeconds *int32
 	Run             *run.SubmitRequest
+	// ChatReplySet is a patch that names the chat channel: ChatReply is the
+	// new one, or nil to clear it.
+	ChatReplySet bool
+	ChatReply    *AlertChatReply
 }
 
 // AlertReceiver is a stored receiver with its template decoded.
 type AlertReceiver struct {
 	store.AlertReceiver
 	Template run.SubmitRequest
+}
+
+// ChatReply is the receiver's chat channel, nil for none.
+func (r AlertReceiver) ChatReply() *AlertChatReply {
+	if r.ChatPlatform == "" {
+		return nil
+	}
+	return &AlertChatReply{Platform: r.ChatPlatform, ChannelID: r.ChatChannelID}
 }
 
 // AlertOutcome is what a notification did.
@@ -175,6 +190,12 @@ func (s *Service) CreateAlertReceiver(ctx context.Context, in AlertReceiverInput
 	if err != nil {
 		return AlertReceiver{}, "", err
 	}
+	var channelName string
+	if in.ChatReply != nil {
+		if channelName, err = s.checkAlertChatReply(ctx, *in.ChatReply); err != nil {
+			return AlertReceiver{}, "", err
+		}
+	}
 	id, err := run.NewULID(s.now())
 	if err != nil {
 		return AlertReceiver{}, "", err
@@ -186,6 +207,9 @@ func (s *Service) CreateAlertReceiver(ctx context.Context, in AlertReceiverInput
 		Enabled:         in.Enabled,
 		Run:             template,
 		ThrottleSeconds: *in.ThrottleSeconds,
+		ChatPlatform:    chatReplyPlatform(in.ChatReply),
+		ChatChannelID:   chatReplyChannel(in.ChatReply),
+		ChatChannelName: channelName,
 		CreatedBy:       by,
 	})
 	if err != nil {
@@ -213,6 +237,7 @@ func (s *Service) UpdateAlertReceiver(ctx context.Context, id runv1.ULID, patch 
 		Enabled:         current.Enabled,
 		ThrottleSeconds: &throttle,
 		Run:             current.Template,
+		ChatReply:       current.ChatReply(),
 	}
 	if patch.Name != nil {
 		in.Name = *patch.Name
@@ -229,11 +254,25 @@ func (s *Service) UpdateAlertReceiver(ctx context.Context, id runv1.ULID, patch 
 	if patch.Run != nil {
 		in.Run = *patch.Run
 	}
+	if patch.ChatReplySet {
+		in.ChatReply = patch.ChatReply
+	}
 
 	in = normalizeAlertReceiver(in)
 	template, err := s.validateAlertReceiver(ctx, in)
 	if err != nil {
 		return AlertReceiver{}, err
+	}
+	// The channel is checked against the platform only when it changes: an
+	// edit of the prompt must not be refused because the integration is
+	// switched off for maintenance.
+	channelName := current.ChatChannelName
+	if in.ChatReply == nil {
+		channelName = ""
+	} else if old := current.ChatReply(); old == nil || *old != *in.ChatReply {
+		if channelName, err = s.checkAlertChatReply(ctx, *in.ChatReply); err != nil {
+			return AlertReceiver{}, err
+		}
 	}
 	row, err := s.store.UpdateAlertReceiver(ctx, store.AlertReceiver{
 		ID:              id,
@@ -242,6 +281,9 @@ func (s *Service) UpdateAlertReceiver(ctx context.Context, id runv1.ULID, patch 
 		Enabled:         in.Enabled,
 		Run:             template,
 		ThrottleSeconds: *in.ThrottleSeconds,
+		ChatPlatform:    chatReplyPlatform(in.ChatReply),
+		ChatChannelID:   chatReplyChannel(in.ChatReply),
+		ChatChannelName: channelName,
 		UpdatedBy:       by,
 	})
 	if err != nil {
@@ -377,6 +419,14 @@ func (s *Service) ReceiveAlerts(ctx context.Context, id runv1.ULID, credential s
 	if err != nil {
 		return s.recordAlertDelivery(ctx, delivery, store.AlertRefused, nil, err.Error())
 	}
+	chatReply, err := s.chatAlertReplyFor(ctx, row)
+	if err != nil {
+		return AlertOutcome{}, err
+	}
+	replyLine := ""
+	if chatReply != nil {
+		replyLine = chatAlertPromptLine(chatReply.ChannelName)
+	}
 
 	candidates := firing
 	for attempt := 1; ; attempt++ {
@@ -392,7 +442,7 @@ func (s *Service) ReceiveAlerts(ctx context.Context, id runv1.ULID, credential s
 		}
 
 		prompt, carried, err := renderAlertPrompt(receiver.Template.Prompt, receiver.Name, payload, live,
-			len(throttled), handledBy, alertBoundary())
+			len(throttled), handledBy, alertBoundary(), replyLine)
 		if err != nil {
 			return s.recordAlertDelivery(ctx, delivery, store.AlertRefused, throttled, err.Error())
 		}
@@ -410,7 +460,16 @@ func (s *Service) ReceiveAlerts(ctx context.Context, id runv1.ULID, credential s
 		}
 		fire.Delivery.Throttled = throttled
 
-		submitted, err := s.submit(ctx, req, submitLinks{alertReceiver: id, alert: fire})
+		links := submitLinks{alertReceiver: id, alert: fire}
+		if chatReply != nil {
+			// The alerts the run carries, not the throttled ones: those are
+			// another run's, and its own row looks for their post.
+			reply := *chatReply
+			reply.Fingerprints, reply.Alertnames = fire.Fingerprints, fire.Alertnames
+			links.chatAlert = &reply
+		}
+
+		submitted, err := s.submit(ctx, req, links)
 		var (
 			settled  *store.AlertSettledError
 			invalid  *run.InvalidRequestError
@@ -452,7 +511,8 @@ func (s *Service) ReceiveAlerts(ctx context.Context, id runv1.ULID, credential s
 			s.log.Error("could not audit an alert receiver's fire", "receiver", id, "run", submitted.Run.ID, "error", err)
 		}
 		s.log.Info("alert notification started a run", "receiver", id, "name", row.Name,
-			"run", submitted.Run.ID, "alerts", len(carried), "throttled", len(throttled))
+			"run", submitted.Run.ID, "alerts", len(carried), "throttled", len(throttled),
+			"chat_reply", chatReply != nil)
 		return AlertOutcome{
 			Outcome: store.AlertSubmitted, RunID: submitted.Run.ID,
 			Alerts: len(carried), Throttled: len(throttled),
@@ -540,12 +600,36 @@ func normalizeAlertReceiver(in AlertReceiverInput) AlertReceiverInput {
 	}
 	in.Run.CreatedBy, in.Run.CreatedVia = "", ""
 	in.Run.ParentRunID, in.Run.Depth = "", 0
+	if in.ChatReply != nil {
+		r := AlertChatReply{
+			Platform:  strings.ToLower(strings.TrimSpace(in.ChatReply.Platform)),
+			ChannelID: strings.TrimSpace(in.ChatReply.ChannelID),
+		}
+		in.ChatReply = &r
+	}
 	return in
+}
+
+func chatReplyPlatform(r *AlertChatReply) string {
+	if r == nil {
+		return ""
+	}
+	return r.Platform
+}
+
+func chatReplyChannel(r *AlertChatReply) string {
+	if r == nil {
+		return ""
+	}
+	return r.ChannelID
 }
 
 func (s *Service) auditAlertReceiver(ctx context.Context, by, via, action string, row store.AlertReceiver, extra map[string]any) {
 	payload := map[string]any{
 		"name": row.Name, "enabled": row.Enabled, "throttle_seconds": row.ThrottleSeconds,
+	}
+	if row.ChatPlatform != "" {
+		payload["chat_platform"], payload["chat_channel_id"] = row.ChatPlatform, row.ChatChannelID
 	}
 	for k, v := range extra {
 		payload[k] = v
@@ -816,8 +900,11 @@ type blockAlert struct {
 // MaxAlertBlockBytes; alerts that do not fit are dropped from the end, said
 // to be left out, and not returned — so they are not claimed, and the next
 // notification of the group carries them.
+//
+// replyLine, when set, is the sentence telling the agent where its answer
+// will be posted; it ends the prompt, outside the data block.
 func renderAlertPrompt(instruction, receiver string, p alertPayload, alerts []alertmanagerAlert,
-	throttled int, handledBy []runv1.ULID, boundary string) (string, []alertmanagerAlert, error) {
+	throttled int, handledBy []runv1.ULID, boundary, replyLine string) (string, []alertmanagerAlert, error) {
 
 	encode := func(n int) ([]byte, error) {
 		block := alertBlock{
@@ -888,6 +975,9 @@ func renderAlertPrompt(instruction, receiver string, p alertPayload, alerts []al
 			p.TruncatedAlerts, plural(p.TruncatedAlerts))
 	}
 	fmt.Fprintf(&b, "\n<<<ALERTS-%s\n%s\nALERTS-%s>>>\n", boundary, encoded, boundary)
+	if replyLine != "" {
+		b.WriteString("\n" + replyLine + "\n")
+	}
 	return b.String(), alerts[:fits], nil
 }
 

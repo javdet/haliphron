@@ -17,8 +17,10 @@ import {
   AlertReceiverDialog,
   CredentialDialog,
   DeleteAlertReceiverDialog,
+  FINGERPRINT_FOOTER,
   LastDelivery,
   OutcomeBadge,
+  PLATFORM_LABEL,
   alertmanagerConfig,
   throttleLabel,
 } from './AlertReceiversPage'
@@ -76,6 +78,20 @@ export function AlertReceiverDetailPage() {
         <ErrorBanner error={update.error} what="change the alert receiver" />
         <ErrorBanner error={clear.error} what="clear the suppression" />
 
+        {r?.chat_reply && r.chat_reply_platform_enabled === false && (
+          <div className="banner warn" role="status">
+            <div>
+              <div className="banner-title">
+                The {PLATFORM_LABEL[r.chat_reply.platform]} integration is not enabled: no reply is posted
+              </div>
+              <div className="small muted">
+                Runs this receiver starts keep their answer in the run only, until the integration is enabled again
+                on the <Link to="/integrations">Integrations</Link> page or the chat reply is changed.
+              </div>
+            </div>
+          </div>
+        )}
+
         {r && (
           <div className="grid-2">
             <Card title="Receiver">
@@ -92,6 +108,25 @@ export function AlertReceiverDetailPage() {
                 <dd>
                   {throttleLabel(r.throttle_seconds)}{' '}
                   <span className="faint">per alert, from the run it started</span>
+                </dd>
+                <dt>Team chat</dt>
+                <dd>
+                  {r.chat_reply ? (
+                    <>
+                      {PLATFORM_LABEL[r.chat_reply.platform]}{' '}
+                      {r.chat_reply.channel_name || <span className="mono small">{r.chat_reply.channel_id}</span>}{' '}
+                      {r.chat_reply.channel_name && (
+                        <span className="mono small faint">{r.chat_reply.channel_id}</span>
+                      )}
+                      <div className="small faint">
+                        Each run's answer is replied under the alert's post. The chat notification must carry{' '}
+                        <span className="mono">{FINGERPRINT_FOOTER}</span>, or the answer is posted as a new message
+                        in the channel after 10 minutes.
+                      </div>
+                    </>
+                  ) : (
+                    <span className="faint">no reply — the answer stays in the run</span>
+                  )}
                 </dd>
                 <dt>Enabled</dt>
                 <dd>{r.enabled ? 'yes' : <span className="faint">no — deliveries are answered 404</span>}</dd>

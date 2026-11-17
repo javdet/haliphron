@@ -43,6 +43,9 @@ type Service struct {
 	// chatEnv is the chat integration the deployment's environment
 	// configures, which overrides chat_integrations while it is set.
 	chatEnv chatEnvironment
+	// chats is the running bot of each platform in this replica, which a
+	// receiver's chat channel is checked through when it is saved.
+	chats chatRegistry
 
 	now func() time.Time
 }

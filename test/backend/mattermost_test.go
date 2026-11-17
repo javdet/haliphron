@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
@@ -172,6 +173,38 @@ func newFakeMattermost(t *testing.T) *fakeMattermost {
 		f.reactions = append(f.reactions, reaction)
 		f.mu.Unlock()
 		writeMM(w, http.StatusOK, reaction)
+	}))
+	// The channel reads an alert reply makes: the channel, the bot's own
+	// membership, and the posts since a time. mmChannel exists with the bot
+	// in it; "channelnobot" exists without it; anything else does not exist.
+	mux.HandleFunc("GET /api/v4/channels/{id}", f.authorised(func(w http.ResponseWriter, r *http.Request) {
+		id := r.PathValue("id")
+		if id != mmChannel && id != "channelnobot" {
+			writeMM(w, http.StatusNotFound, map[string]string{"id": "app.channel.get.existing.app_error"})
+			return
+		}
+		writeMM(w, http.StatusOK, map[string]string{"id": id, "name": "prod-alerts", "display_name": "Prod alerts"})
+	}))
+	mux.HandleFunc("GET /api/v4/channels/{id}/members/me", f.authorised(func(w http.ResponseWriter, r *http.Request) {
+		if r.PathValue("id") != mmChannel {
+			writeMM(w, http.StatusNotFound, map[string]string{"id": "app.channel.get_member.missing.app_error"})
+			return
+		}
+		writeMM(w, http.StatusOK, map[string]string{"channel_id": mmChannel, "user_id": mmBotID})
+	}))
+	mux.HandleFunc("GET /api/v4/channels/{id}/posts", f.authorised(func(w http.ResponseWriter, r *http.Request) {
+		since, _ := strconv.ParseInt(r.URL.Query().Get("since"), 10, 64)
+		f.mu.Lock()
+		defer f.mu.Unlock()
+		posts := map[string]mmPost{}
+		var order []string
+		for id, p := range f.posts {
+			if p.ChannelID == r.PathValue("id") && p.CreateAt > since {
+				posts[id] = p
+				order = append(order, id)
+			}
+		}
+		writeMM(w, http.StatusOK, map[string]any{"order": order, "posts": posts})
 	}))
 	mux.HandleFunc("GET /api/v4/websocket", f.authorised(func(w http.ResponseWriter, r *http.Request) {
 		conn, err := websocket.Accept(w, r, nil)

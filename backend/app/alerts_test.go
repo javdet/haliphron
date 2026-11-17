@@ -137,7 +137,7 @@ func TestTheAlertPromptCarriesTheAlertsAsDataBetweenRandomMarkers(t *testing.T) 
 	}
 	firing, _ := p.split()
 	prompt, carried, err := renderAlertPrompt("Investigate.", "triage", p, firing,
-		2, []runv1.ULID{"01JAAAAAAAAAAAAAAAAAAAAAAA"}, "f00dfeedf00dfeed")
+		2, []runv1.ULID{"01JAAAAAAAAAAAAAAAAAAAAAAA"}, "f00dfeedf00dfeed", "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -173,7 +173,7 @@ func TestTheAlertPromptCarriesTheAlertsAsDataBetweenRandomMarkers(t *testing.T) 
 	}
 
 	again, _, _ := renderAlertPrompt("Investigate.", "triage", p, firing,
-		2, []runv1.ULID{"01JAAAAAAAAAAAAAAAAAAAAAAA"}, "f00dfeedf00dfeed")
+		2, []runv1.ULID{"01JAAAAAAAAAAAAAAAAAAAAAAA"}, "f00dfeedf00dfeed", "")
 	if again != prompt {
 		t.Error("the same payload rendered two different prompts")
 	}
@@ -192,7 +192,7 @@ func TestAlertsThatDoNotFitThePromptAreLeftOutAndNotCarried(t *testing.T) {
 		t.Fatal(err)
 	}
 	firing, _ := p.split()
-	prompt, carried, err := renderAlertPrompt("Investigate.", "triage", p, firing, 0, nil, "ab")
+	prompt, carried, err := renderAlertPrompt("Investigate.", "triage", p, firing, 0, nil, "ab", "")
 	if err != nil {
 		t.Fatal(err)
 	}

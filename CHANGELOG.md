@@ -63,6 +63,36 @@ of `VERSION`, and it is the tag of the published images.
     `alert_deliveries` and `runs.alert_receiver_id`, and adds `alertmanager`
     to `created_via`.
 
+- **Alert answers in the alert's chat thread.** An alert receiver can name
+  one Mattermost or Slack channel (`chat_reply`). When its run ends, the
+  backend posts the agent's answer in the thread of the channel post that
+  announced the same alerts, so on-call staff see it under the alert they are
+  already looking at. The agent gets no chat access: the backend finds the post
+  and replies, as it does for a chat-started run.
+  - **Required in Alertmanager.** The chat notification must print the
+    alerts' fingerprints, for example
+    `footer: 'fp:{{ range .Alerts.Firing }} {{ .Fingerprint }}{{ end }}'` in
+    its `slack_configs`. A root post by automation that holds one of the run's
+    fingerprints is the alert's post; the one nearest the run's admission wins.
+  - **Search window.** The post is looked for every 15 seconds, among posts
+    from 5 minutes before admission, for 10 minutes. When it is found, the bot
+    reacts with :eyes: at once. When it is not, the answer is posted as a new
+    post in the channel, headed by the alert names, and becomes the thread.
+    Runs the agent starts answer in the same thread.
+  - **Saving.** The channel is checked when it is set or changed: the
+    integration must be enabled, the channel must exist, and the bot must be a
+    member. A notification admitted while the integration is switched off
+    owes no reply, and the receiver's page warns about it.
+  - **Mattermost.** A post with message attachments, such as an incoming
+    webhook's, is no longer treated as a system post, and its attachment text
+    is read with the message. A thread rooted in an alert post is now quoted
+    with the alert's text when the bot is mentioned in it.
+  - **Metric.** `haliphron_chat_alert_threads_24h{platform,outcome}`, with
+    `found`, `not_found` and `searching`. A rising `not_found` means the chat
+    notification does not print the fingerprints.
+  - **Migration 0021** adds the receiver's channel columns and lets a
+    `chat_triggers` row wait for its thread.
+
 - **Run notes.** A run can write down what it learned, and the runs it starts
   can read it instead of learning it again. There are four MCP tools for a
   run's own token: `put_note`, `get_note`, `list_notes` and `delete_note`.

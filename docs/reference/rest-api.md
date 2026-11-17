@@ -421,9 +421,29 @@ returned this once, with `Cache-Control: no-store`; only its digest is stored.
 | `enabled` | boolean | no | `true` | a disabled receiver answers deliveries `404` |
 | `throttle_seconds` | integer | no | `3600` | 0 to 604800 (a week). `0` suppresses nothing |
 | `run` | object | yes | — | the template: the fields of [`POST /api/v1/runs`](#post-apiv1runs) except `async` and `wait_seconds`. `role` is required. `prompt` is required, at most 64 KiB, and is the instruction the alerts are appended to |
+| `chat_reply` | object | no | none | `{"platform": "mattermost" \| "slack", "channel_id": "…"}`: the team-chat channel the runs answer in, in the thread of the post that announced the alerts. See below |
 
 The template is checked by the same rules as `POST /api/v1/runs` when the
 receiver is saved; a refusal names the field with a `run.` prefix.
+
+`chat_reply` is checked when it is set or changed: the platform's integration
+must be enabled and its bot running, and the channel must exist with the bot as
+a member. A refusal is `422` naming `chat_reply.platform` or
+`chat_reply.channel_id`. The channel's name is read from the platform and
+returned as `chat_reply.channel_name`.
+
+**The chat notification must print the fingerprints.** The answer is matched
+to the channel post by Alertmanager's alert fingerprints, so the
+`slack_configs` that posts to the channel must include them, for example
+`footer: 'fp:{{ range .Alerts.Firing }} {{ .Fingerprint }}{{ end }}'`. A post
+by automation (an incoming webhook, a bot) that holds one of the run's
+fingerprints as a whole token, made from 5 minutes before the run's admission,
+is the alert's post; the nearest to admission wins. It is looked for every 15
+seconds for 10 minutes. When it is found, the bot reacts with :eyes: and the
+answer is posted in its thread when the run ends. When it is not, the answer is
+posted as a new post in the channel, headed by the alert names. A notification
+admitted while the platform's integration is switched off owes no reply. The
+agent itself gets no chat access either way.
 
 ### `GET /api/v1/alert-receivers`
 
@@ -440,7 +460,9 @@ Scope: `runs:read`. Returns an [alert receiver object](#the-alert-receiver-objec
 ### `PATCH /api/v1/alert-receivers/{id}`
 
 Scope: `admin`. The fields of the create body, all optional; `run`, when
-present, replaces the whole template. A new `throttle_seconds` applies to the
+present, replaces the whole template. `chat_reply` absent leaves the channel
+as it is, `null` clears it, and an object sets it; an unchanged channel is not
+checked against the platform again. A new `throttle_seconds` applies to the
 alerts claimed after it; live suppressions keep the window they were claimed
 with. Returns `200` and the receiver.
 
@@ -531,6 +553,8 @@ and not suppressed, so the group's next notification carries them.
 | `enabled` | boolean | |
 | `run` | object | the template |
 | `throttle_seconds` | integer | |
+| `chat_reply` | object or null | `platform`, `channel_id` and `channel_name`, the name the platform gave when it was saved |
+| `chat_reply_platform_enabled` | boolean | `false` when `chat_reply` is set and its platform's integration is switched off: the runs then owe no reply |
 | `webhook_path` | string | where Alertmanager delivers, relative to the API's origin |
 | `last_received_at` | timestamp | the last notification, whatever it did |
 | `last_outcome` | string | `submitted`, `throttled`, `resolved` or `refused` |

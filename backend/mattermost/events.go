@@ -54,6 +54,9 @@ func decodePosted(data json.RawMessage, self User) (m app.ChatMessage, ok bool, 
 	}
 
 	text, named := stripMention(p.Message, self.Username)
+	if att := attachmentText(p.Props); att != "" {
+		text = strings.TrimSpace(text + "\n" + att)
+	}
 	return app.ChatMessage{
 		ID:                 p.ID,
 		ChannelID:          p.ChannelID,
@@ -71,7 +74,7 @@ func decodePosted(data json.RawMessage, self User) (m app.ChatMessage, ok bool, 
 		FromSelf:           self.ID != "" && p.UserID == self.ID,
 		FromBot:            fromBot(p),
 		FromWebhook:        truthy(p.Props["from_webhook"]),
-		System:             p.Type != "",
+		System:             p.system(),
 		Files:              p.files(),
 	}, true, nil
 }

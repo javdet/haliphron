@@ -88,6 +88,11 @@ type NewRun struct {
 	// AlertSettledError if another run claimed any of them first.
 	AlertReceiverID runv1.ULID
 	AlertFire       *AlertFire
+	// ChatAlertReply is the reply the run owes in the receiver's chat
+	// channel, written in the same transaction, right after the claim: a run
+	// never commits without the reply it owes, and a reply is never owed for a
+	// run that rolled back.
+	ChatAlertReply *ChatAlertReply
 
 	// Inputs is the run's manifest: the files stored under its prefix at
 	// admission. Written in the same transaction as the run, which also closes
@@ -119,7 +124,8 @@ var ErrTooManyChildren = errors.New("store: the parent run has started its full 
 // again: a fire whose run committed without the advance would be fired a
 // second time by the next replica to look. A deferred run's fire marks its row
 // submitted here, for that reason once more, and a run admitted for an
-// Alertmanager notification claims its alerts' throttle windows here.
+// Alertmanager notification claims its alerts' throttle windows here, and
+// records the reply it owes in its receiver's chat channel.
 //
 // A run admitted with input files writes its manifest here, for the same
 // reason a chat-started run links its message here.
@@ -154,6 +160,11 @@ func (s *Store) InsertRun(ctx context.Context, r NewRun) error {
 		}
 		if r.AlertFire != nil {
 			if err := linkAlertFire(ctx, tx, r.AlertReceiverID, r.ID, *r.AlertFire); err != nil {
+				return err
+			}
+		}
+		if r.ChatAlertReply != nil {
+			if err := linkChatAlertReply(ctx, tx, *r.ChatAlertReply, r.ID); err != nil {
 				return err
 			}
 		}

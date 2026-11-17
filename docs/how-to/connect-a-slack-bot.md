@@ -200,6 +200,11 @@ did not — too large, past the count, a type the agent cannot read, or the app
 missing `files:read` — is named as not available, with the reason. The
 defaults are 10 files, 10 MiB each and 25 MiB per request.
 
+An [alert receiver](route-alertmanager-alerts.md#reply-in-a-team-chat-thread)
+can post its runs' answers in the thread of the alert's channel post through
+this app. Invite the app to that channel: it reads the channel's history with
+the `channels:history` (or `groups:history`) scope thread reads already use.
+
 ## Check it
 
 - Mention the app in a thread. Expect 👀 and nothing else while the work runs.

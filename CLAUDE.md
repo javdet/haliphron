@@ -191,10 +191,14 @@ anything arriving from outside, including backend commands, arrives as an annota
 
 **A chat-started run's reply is owed through `chat_triggers`, and so is its children's.** A
 run admitted from a chat message links its claimed row; a run whose parent has a row gets a
-follow-up row (`message_id` `run:<child id>`, `origin_message_id` set). Both are written only
-inside `InsertRun`'s transaction (`linkChatTrigger`, `linkChatFollowUp` in
-`backend/store/chat.go`). A run committed without its row is a run whose end nobody is told
-about — never insert a run, or one of these rows, from another path.
+follow-up row (`message_id` `run:<child id>`, `origin_message_id` set). A run admitted for an
+alert receiver that names a chat channel gets an alert row (`message_id` `alert:<run id>`,
+`thread_id` NULL until the search pass finds the alert's channel post or its window closes).
+All three are written only inside `InsertRun`'s transaction (`linkChatTrigger`,
+`linkChatFollowUp`, `linkChatAlertReply` in `backend/store/chat.go`). A run committed without its
+row is a run whose end nobody is told about — never insert a run, or one of these rows, from
+another path. An alert row's `thread_id` is set only by `ResolveChatThread` (`WHERE thread_id IS
+NULL`, one winner, who alone reacts) or by `MarkChatRootPosted` after the fallback root post.
 
 **A scheduled fire advances its schedule only inside `InsertRun`.** There is no scheduler
 leader: every replica running the background loops fires due schedules, and what makes a slot

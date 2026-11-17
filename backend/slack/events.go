@@ -66,7 +66,7 @@ func decodeEvent(payload json.RawMessage, self Identity) (m app.ChatMessage, ok 
 		ChannelID:      e.Channel,
 		ChannelType:    channelTypes[e.ChannelType],
 		UserID:         e.User,
-		Text:           unescape(text),
+		Text:           unescape(joinRich(text, richText(e.Attachments, e.Blocks))),
 		CreatedAt:      parseTS(e.TS),
 		Direct:         e.ChannelType == "im",
 		MentionsBot:    e.Type == "app_mention" || named,
@@ -153,4 +153,12 @@ func stripMention(text, userID string) (string, bool) {
 		return trimmed, named
 	}
 	return strings.TrimSpace(strings.TrimLeft(trimmed, " \t\r\n,:;")), true
+}
+
+// joinRich appends a message's rendered attachments and blocks to its text.
+func joinRich(text, rich string) string {
+	if rich == "" {
+		return text
+	}
+	return strings.TrimSpace(text + "\n" + rich)
 }

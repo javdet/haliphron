@@ -171,3 +171,28 @@ func TestDeletingARunClearsEveryAlertReferenceToIt(t *testing.T) {
 		t.Error("deleting the run lifted the suppression it claimed; the window outlives the run")
 	}
 }
+
+func TestAnAlertReceiversChatChannelIsAPlatformAndAnIDOrNeither(t *testing.T) {
+	t.Parallel()
+	conn := newDB(t)
+	id := newAlertReceiver(t, conn, "on-call")
+
+	for _, c := range []struct {
+		platform, channel any
+		ok                bool
+	}{
+		{nil, nil, true},
+		{"mattermost", "channel000000000000000000c", true},
+		{"slack", "C0123ABC", true},
+		{"mattermost", nil, false},
+		{nil, "C0123ABC", false},
+		{"teams", "C0123ABC", false},
+		{"slack", "", false},
+	} {
+		_, err := conn.Exec(`UPDATE alert_receivers SET chat_platform = $2, chat_channel_id = $3 WHERE id = $1`,
+			id, c.platform, c.channel)
+		if (err == nil) != c.ok {
+			t.Errorf("platform %v, channel %v: accepted %v, want %v (%v)", c.platform, c.channel, err == nil, c.ok, err)
+		}
+	}
+}

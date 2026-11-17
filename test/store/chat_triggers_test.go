@@ -128,3 +128,34 @@ func TestASlackMessageIsClaimedUnderItsOwnPlatform(t *testing.T) {
 		t.Errorf("a Slack integration could not be saved: %v", err)
 	}
 }
+
+func TestAnAlertRowMayLackAThreadOnlyWhileItHasASearchWindow(t *testing.T) {
+	t.Parallel()
+	conn := newDB(t)
+	f := seed(t, conn)
+
+	insert := func(messageID string, window bool) error {
+		_, err := conn.Exec(`
+			INSERT INTO chat_triggers (platform, message_id, channel_id, thread_id, user_id, username,
+			                           next_attempt_at, alert_fingerprints, thread_search_since,
+			                           thread_search_until, next_search_at)
+			VALUES ('mattermost', $1, 'channel', NULL, 'alert-receiver:x', 'on-call', now(),
+			        '{3f2a9c}', CASE WHEN $2 THEN now() - interval '5 minutes' END,
+			        CASE WHEN $2 THEN now() + interval '10 minutes' END, now())`, messageID, window)
+		return err
+	}
+	if err := insert("alert:"+f.runID, true); err != nil {
+		t.Fatalf("an alert row with a search window and no thread was refused: %v", err)
+	}
+	if err := insert("alert:other", false); err == nil {
+		t.Error("a row with neither a thread nor a search window was accepted")
+	}
+	if _, err := conn.Exec(`UPDATE chat_triggers SET thread_search_until = NULL
+		WHERE message_id = $1`, "alert:"+f.runID); err == nil {
+		t.Error("an alert row lost its window while its thread was still unknown")
+	}
+	if _, err := conn.Exec(`UPDATE chat_triggers SET thread_id = 'post-1', thread_found_at = now()
+		WHERE message_id = $1`, "alert:"+f.runID); err != nil {
+		t.Errorf("an alert row could not be given its thread: %v", err)
+	}
+}

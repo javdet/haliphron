@@ -113,6 +113,78 @@ notification that already started a run is throttled.
 A group that gains an alert starts a run for the new alert only. Its prompt
 says which run is handling the others.
 
+## Reply in a team-chat thread
+
+If the same alerts are also posted to a Mattermost or Slack channel, the
+receiver can post each run's answer in the thread of that channel post, where
+the people on call are already looking. The agent needs no chat access for
+this: the backend finds the post and replies, as it does for a chat-started
+run.
+
+1. Connect the bot ([Mattermost](connect-a-mattermost-bot.md),
+   [Slack](connect-a-slack-bot.md)) and invite it to the channel. It must be a
+   member to read the channel and post in it.
+2. On the receiver, open **Reply in team chat**, choose the platform and paste
+   the channel ID, or set `chat_reply` over the API:
+
+   ```json
+   {"chat_reply": {"platform": "mattermost", "channel_id": "4xp9…"}}
+   ```
+
+   The save is refused if the integration is off, the channel does not exist,
+   or the bot is not in it.
+3. **Required:** make the chat notification print the fingerprints. The answer
+   is matched to the post by Alertmanager's alert fingerprints, and nothing else.
+   Route the alerts to both receivers with `continue: true`, and add a line
+   such as this footer to the chat receiver:
+
+   ```yaml
+   route:
+     routes:
+       - matchers: [ 'env="prod"' ]
+         receiver: chat-prod-alerts
+         continue: true
+       - matchers: [ 'env="prod"' ]
+         receiver: haliphron-prod
+
+   receivers:
+     - name: chat-prod-alerts
+       slack_configs:                 # Mattermost incoming webhooks accept this format
+         - api_url: https://chat.example/hooks/xxxx
+           channel: prod-alerts
+           # Required by Haliphron to find this post. Any field works (title,
+           # text, footer); the footer keeps it out of the way.
+           footer: 'fp:{{ range .Alerts.Firing }} {{ .Fingerprint }}{{ end }}'
+     - name: haliphron-prod
+       webhook_configs:
+         - url: https://haliphron.example/api/v1/alert-receivers/<id>/alerts
+           http_config:
+             authorization:
+               credentials: hla_…
+   ```
+
+   The two routes may group differently: one shared fingerprint is enough.
+
+What happens then:
+
+- The post is looked for every 15 seconds, among the channel's root posts by
+  automation from 5 minutes before the run started, for 10 minutes. The two
+  notifications leave Alertmanager together, but either may arrive first.
+- When it is found, the bot reacts with :eyes: at once, and posts the answer in
+  its thread when the run ends. A run the agent starts from it answers in the
+  same thread.
+- When it is not found in time, the answer is posted as a new post in the
+  channel, beginning *Alert HighLatency: no matching post was found in this
+  channel (the notification must print its fingerprints).* That post becomes
+  the thread for any further answers.
+- When the platform's integration is switched off, notifications still start
+  runs but owe no reply, and the receiver's page warns about it.
+
+The thread does not listen without a mention: to ask the bot something about
+the alert, mention it in the thread.
+`haliphron_chat_alert_threads_24h{outcome="not_found"}` rising means the chat
+notification is not printing the fingerprints.
+
 ## Watch and adjust
 
 The receiver's page shows:

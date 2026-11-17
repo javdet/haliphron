@@ -244,6 +244,10 @@ type wireMessage struct {
 	// Files are attached to a file_share message, and to any message a client
 	// lets a person attach files to.
 	Files []wireFile `json:"files"`
+	// Attachments and Blocks are where an app's message usually says what it
+	// says; text() renders them after Text.
+	Attachments []wireAttachment `json:"attachments"`
+	Blocks      []wireBlock      `json:"blocks"`
 }
 
 // wireFile is a file as a message carries it.
@@ -325,12 +329,15 @@ func (c *Client) Thread(ctx context.Context, rootID string) ([]app.ChatThreadPos
 		p := app.ChatThreadPost{
 			ID:        postID(ch, m.TS),
 			UserID:    m.User,
-			Text:      unescape(m.Text),
+			Text:      m.text(),
 			CreatedAt: parseTS(m.TS),
 			FromSelf:  fromSelf,
 			FromBot:   isBot(m),
 			System:    isSystem(m.Subtype),
 			Files:     m.files(),
+		}
+		if m.ThreadTS != "" && m.ThreadTS != m.TS {
+			p.RootID = postID(ch, m.ThreadTS)
 		}
 		switch {
 		case m.User != "":

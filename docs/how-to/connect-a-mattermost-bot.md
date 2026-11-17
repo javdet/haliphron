@@ -333,6 +333,10 @@ Every new message in a thread is a new run that reads the whole thread again,
 earlier answers included, so the agent needs no memory of its own to carry a
 conversation.
 
+An [alert receiver](route-alertmanager-alerts.md#reply-in-a-team-chat-thread)
+can post its runs' answers in the thread of the alert's channel post through
+this bot. The bot must be a member of that channel.
+
 ## Check that it works
 
 ```sh

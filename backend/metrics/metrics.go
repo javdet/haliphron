@@ -80,6 +80,11 @@ var (
 	descAlertDeliveries = prometheus.NewDesc("haliphron_alert_deliveries_24h",
 		"Alertmanager notifications received in the last 24 hours, by receiver and outcome.",
 		[]string{"receiver", "outcome"}, nil)
+	descChatAlertThreads = prometheus.NewDesc("haliphron_chat_alert_threads_24h",
+		"Alert runs of the last 24 hours that owe a reply in a team-chat channel, by platform and by whether "+
+			"the alert's post was found (found), the search gave up and the answer went out as a new post "+
+			"(not_found), or the search is still running (searching).",
+		[]string{"platform", "outcome"}, nil)
 	descUp = prometheus.NewDesc("haliphron_stats_up",
 		"1 if the run and cluster statistics were read from the database, 0 if not.", nil, nil)
 )
@@ -120,7 +125,7 @@ func (c *Collector) Describe(ch chan<- *prometheus.Desc) {
 	for _, d := range []*prometheus.Desc{descRuns, descDuration, descQueueWait, descActive,
 		descCapacity, descFree, descHeartbeat, descClusterStatus,
 		descNotePartitions, descNoteBytes, descNotes,
-		descAlertReceivers, descAlertSuppressions, descAlertDeliveries, descUp} {
+		descAlertReceivers, descAlertSuppressions, descAlertDeliveries, descChatAlertThreads, descUp} {
 		ch <- d
 	}
 }
@@ -223,6 +228,15 @@ func (c *Collector) series(ctx context.Context) ([]prometheus.Metric, error) {
 	for _, d := range alerts.Deliveries {
 		out = append(out, prometheus.MustNewConstMetric(descAlertDeliveries, prometheus.GaugeValue,
 			float64(d.Count), d.Receiver, d.Outcome))
+	}
+
+	threads, err := c.service.ChatAlertThreadUsage(ctx)
+	if err != nil {
+		return nil, err
+	}
+	for _, t := range threads {
+		out = append(out, prometheus.MustNewConstMetric(descChatAlertThreads, prometheus.GaugeValue,
+			float64(t.Count), t.Platform, t.Outcome))
 	}
 	return out, nil
 }

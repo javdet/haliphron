@@ -1,21 +1,25 @@
 import { useState } from 'react'
 import { Link, useNavigate } from 'react-router-dom'
+import { ApiError } from '../api/client'
 import {
   useAlertReceivers,
+  useChatIntegration,
   useCreateAlertReceiver,
   useDeleteAlertReceiver,
   useRoles,
   useUpdateAlertReceiver,
 } from '../api/hooks'
 import {
+  type AlertChatReply,
   type AlertOutcome,
   type AlertReceiver,
   type AlertReceiverRequest,
   type AlertReceiverWithToken,
+  type ChatPlatform,
   type RunTemplate,
 } from '../api/types'
 import { compact, RunSpecFields } from '../components/RunSpecFields'
-import { Card, CopyButton, Dialog, Empty, ErrorBanner, Field, Spinner, Time } from '../components/ui'
+import { Card, CopyButton, Dialog, Empty, ErrorBanner, Field, Section, Spinner, Time } from '../components/ui'
 
 /**
  * Alert receivers: Prometheus Alertmanager notifications that start runs.
@@ -41,12 +45,29 @@ export function throttleLabel(seconds: number): string {
   return `${seconds} s`
 }
 
+export const PLATFORM_LABEL: Record<ChatPlatform, string> = { mattermost: 'Mattermost', slack: 'Slack' }
+
+/**
+ * The line the chat notification of the same alerts must carry: the backend
+ * finds the alert's post by the fingerprints printed in it.
+ */
+export const FINGERPRINT_FOOTER = "footer: 'fp:{{ range .Alerts.Firing }} {{ .Fingerprint }}{{ end }}'"
+
+const CHANNEL_ID_HINT: Record<ChatPlatform, string> = {
+  mattermost:
+    'In Mattermost: the channel menu → View Info, the ID is at the bottom. The bot must be a member of the channel.',
+  slack:
+    'In Slack: the channel name → About tab, the Channel ID is at the bottom. The bot must be a member of the channel.',
+}
+
 interface ReceiverForm {
   name: string
   description: string
   enabled: boolean
   throttle_seconds: number
   run: RunTemplate
+  chat_platform: ChatPlatform | ''
+  chat_channel_id: string
 }
 
 function formOf(receiver: AlertReceiver | null): ReceiverForm {
@@ -62,6 +83,8 @@ function formOf(receiver: AlertReceiver | null): ReceiverForm {
           'if the cause is in this repository, open a pull request with the fix.',
         agent: 'claude-code',
       },
+      chat_platform: '',
+      chat_channel_id: '',
     }
   }
   return {
@@ -70,6 +93,8 @@ function formOf(receiver: AlertReceiver | null): ReceiverForm {
     enabled: receiver.enabled,
     throttle_seconds: receiver.throttle_seconds,
     run: { agent: 'claude-code', ...receiver.run },
+    chat_platform: receiver.chat_reply?.platform ?? '',
+    chat_channel_id: receiver.chat_reply?.channel_id ?? '',
   }
 }
 
@@ -88,6 +113,7 @@ export function AlertReceiverDialog({
   const update = useUpdateAlertReceiver()
   const [form, setForm] = useState<ReceiverForm>(() => formOf(receiver))
   const saving = create.isPending || update.isPending
+  const saveError = create.error ?? update.error
 
   const set = <K extends keyof ReceiverForm>(key: K, value: ReceiverForm[K]) =>
     setForm((f) => ({ ...f, [key]: value }))
@@ -102,10 +128,23 @@ export function AlertReceiverDialog({
       throttle_seconds: form.throttle_seconds,
       run: compact(form.run),
     }
+    const chatReply = form.chat_platform
+      ? { platform: form.chat_platform, channel_id: form.chat_channel_id.trim() }
+      : null
     if (receiver) {
+      // Sent only when changed: an absent key keeps the stored channel, so a
+      // receiver whose platform has since been disabled can still be edited.
+      const stored = receiver.chat_reply ?? null
+      if (
+        (chatReply?.platform ?? '') !== (stored?.platform ?? '') ||
+        (chatReply?.channel_id ?? '') !== (stored?.channel_id ?? '')
+      ) {
+        body.chat_reply = chatReply
+      }
       update.mutate({ id: receiver.id, patch: body }, { onSuccess: onClose })
       return
     }
+    if (chatReply) body.chat_reply = chatReply
     create.mutate(body, { onSuccess: (created) => onCreated?.(created) })
   }
 
@@ -126,14 +165,20 @@ export function AlertReceiverDialog({
           <button
             className="primary"
             onClick={save}
-            disabled={!form.name.trim() || !form.run.prompt.trim() || !form.run.role || saving}
+            disabled={
+              !form.name.trim() ||
+              !form.run.prompt.trim() ||
+              !form.run.role ||
+              (!!form.chat_platform && !form.chat_channel_id.trim()) ||
+              saving
+            }
           >
             {saving ? 'Saving…' : 'Save receiver'}
           </button>
         </>
       }
     >
-      <ErrorBanner error={create.error ?? update.error} what="save the alert receiver" />
+      <ErrorBanner error={saveError} what="save the alert receiver" />
 
       <div className="grid-2">
         <Field label="Name" hint="Lower-case letters, digits, '-', '_' and '.'.">
@@ -174,7 +219,133 @@ export function AlertReceiverDialog({
         role is required: it decides what a run started by anyone holding this receiver's credential may do.
       </p>
       <RunSpecFields form={form.run} set={setRun} roles={roles} />
+
+      <ChatReplyFields
+        platform={form.chat_platform}
+        channelId={form.chat_channel_id}
+        stored={receiver?.chat_reply ?? null}
+        error={saveError}
+        onPlatform={(platform) => set('chat_platform', platform)}
+        onChannelId={(channelId) => set('chat_channel_id', channelId)}
+      />
     </Dialog>
+  )
+}
+
+const CHAT_PLATFORMS: ChatPlatform[] = ['mattermost', 'slack']
+
+/**
+ * The "Reply in team chat" block of the receiver form. Only enabled
+ * integrations are offered, because a channel on a disconnected platform is a
+ * reply that is never posted.
+ */
+function ChatReplyFields({
+  platform,
+  channelId,
+  stored,
+  error,
+  onPlatform,
+  onChannelId,
+}: {
+  platform: ChatPlatform | ''
+  channelId: string
+  stored: AlertChatReply | null
+  error: unknown
+  onPlatform: (platform: ChatPlatform | '') => void
+  onChannelId: (channelId: string) => void
+}) {
+  const integrations: Record<ChatPlatform, ReturnType<typeof useChatIntegration>> = {
+    mattermost: useChatIntegration('mattermost'),
+    slack: useChatIntegration('slack'),
+  }
+  const loading = CHAT_PLATFORMS.some((p) => integrations[p].isLoading)
+  const loadError = CHAT_PLATFORMS.map((p) => integrations[p].error).find(Boolean)
+  const enabled = CHAT_PLATFORMS.filter((p) => integrations[p].data?.enabled)
+  // A stored platform since disabled stays in the list, so the form shows what
+  // is saved rather than quietly reading as "None".
+  const options = stored && !enabled.includes(stored.platform) ? [...enabled, stored.platform] : enabled
+  const fieldError = (field: string) => (error instanceof ApiError && error.field === field ? error.message : undefined)
+  const unchanged = !!stored && stored.platform === platform && stored.channel_id === channelId.trim()
+
+  return (
+    <Section
+      title="Reply in team chat"
+      hint={
+        platform
+          ? PLATFORM_LABEL[platform]
+          : loading
+            ? undefined
+            : enabled.length === 0
+              ? 'no chat integration is enabled'
+              : 'off'
+      }
+      open={!!stored}
+    >
+      <ErrorBanner error={loadError} what="load the chat integrations" />
+      {loading ? (
+        <Spinner />
+      ) : options.length === 0 ? (
+        <p className="small muted" style={{ margin: 0 }}>
+          No chat integration is enabled, so a run's answer goes nowhere automatically: it stays in the run, here
+          in the UI, and getting it anywhere else is up to the agent's role. Enable Mattermost or Slack on the{' '}
+          <Link to="/integrations">Integrations</Link> page to reply under the alert's post in a channel.
+        </p>
+      ) : (
+        <>
+          <p className="small muted" style={{ margin: 0 }}>
+            When a run this receiver started ends, the backend posts the agent's answer in the thread of the
+            channel post that announced the same alert. The agent itself gets no chat access.
+          </p>
+          <div className="grid-2">
+            <Field
+              label="Platform"
+              error={fieldError('chat_reply.platform')}
+              hint={platform ? undefined : "None: the answer stays in the run; anything else is up to the agent's role."}
+            >
+              <select value={platform} onChange={(e) => onPlatform(e.target.value as ChatPlatform | '')}>
+                <option value="">None</option>
+                {options.map((p) => (
+                  <option key={p} value={p}>
+                    {enabled.includes(p) ? PLATFORM_LABEL[p] : `${PLATFORM_LABEL[p]} (integration disabled)`}
+                  </option>
+                ))}
+              </select>
+            </Field>
+            {platform && (
+              <Field label="Channel ID" error={fieldError('chat_reply.channel_id')} hint={CHANNEL_ID_HINT[platform]}>
+                <input
+                  className="mono"
+                  value={channelId}
+                  placeholder={platform === 'slack' ? 'C0123456789' : '4xp9fdt7pbgium38k5k6p8xxbr'}
+                  onChange={(e) => onChannelId(e.target.value)}
+                />
+              </Field>
+            )}
+          </div>
+          {platform && unchanged && stored.channel_name && (
+            <div className="small muted">
+              Saved channel: {stored.channel_name}.
+            </div>
+          )}
+          {platform && !enabled.includes(platform) && (
+            <div className="banner warn" role="status">
+              <div className="small">
+                The {PLATFORM_LABEL[platform]} integration is not enabled, so nothing is posted until it is enabled
+                again.
+              </div>
+            </div>
+          )}
+          {platform && (
+            <Field
+              label="Required in the chat notification"
+              hint="Add this to the Alertmanager slack_configs entry that posts the same alerts in this channel. The fingerprints are how the alert's post is found; without them the answer is posted as a new message in the channel 10 minutes after the notification instead of under the alert."
+            >
+              <pre className="snippet">{FINGERPRINT_FOOTER}</pre>
+            </Field>
+          )}
+        </>
+      )}
+    </Section>
   )
 }
 
@@ -190,7 +361,15 @@ export function alertmanagerConfig(receiver: AlertReceiver): string {
         http_config:
           authorization:
             type: Bearer
-            credentials_file: /etc/alertmanager/haliphron-${receiver.name}-token`
+            credentials_file: /etc/alertmanager/haliphron-${receiver.name}-token${
+    receiver.chat_reply
+      ? `
+# Required for the reply to land under the alert's post: the slack_configs
+# entry that posts the same alerts in the chat channel must also carry
+#   ${FINGERPRINT_FOOTER}
+# Without it the answer is posted as a new message in the channel after 10 minutes.`
+      : ''
+  }`
 }
 
 /** The credential, shown the one time it exists outside a digest. */

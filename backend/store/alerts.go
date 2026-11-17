@@ -48,6 +48,13 @@ type AlertReceiver struct {
 	ThrottleSeconds int32
 	TokenSHA256     []byte
 
+	// ChatPlatform and ChatChannelID are the one channel the receiver's runs
+	// answer in, both empty when it has none. ChatChannelName is what the
+	// platform called the channel when it was saved, for display only.
+	ChatPlatform    string
+	ChatChannelID   string
+	ChatChannelName string
+
 	LastReceivedAt *time.Time
 	LastOutcome    string
 	LastRunID      runv1.ULID
@@ -115,6 +122,7 @@ func (e *AlertSettledError) Error() string {
 var ErrAlertReceiverNameTaken = errors.New("store: an alert receiver with this name exists")
 
 const alertReceiverFields = `id, name, description, enabled, run, throttle_seconds, token_sha256,
+	       chat_platform, chat_channel_id, chat_channel_name,
 	       last_received_at, last_outcome, last_run_id, last_error,
 	       created_by, created_at, updated_by, updated_at`
 
@@ -128,10 +136,12 @@ func (s *Store) InsertAlertReceiver(ctx context.Context, r AlertReceiver) (Alert
 	}
 	row := s.db.QueryRowContext(ctx, `
 		INSERT INTO alert_receivers (id, name, description, enabled, run, throttle_seconds,
-		                             token_sha256, created_by, updated_by)
-		VALUES ($1, $2, $3, $4, $5::jsonb, $6, $7, $8, $8)
+		                             token_sha256, created_by, updated_by,
+		                             chat_platform, chat_channel_id, chat_channel_name)
+		VALUES ($1, $2, $3, $4, $5::jsonb, $6, $7, $8, $8, $9, $10, $11)
 		RETURNING `+alertReceiverFields,
-		r.ID, r.Name, r.Description, r.Enabled, []byte(r.Run), r.ThrottleSeconds, digest, r.CreatedBy)
+		r.ID, r.Name, r.Description, r.Enabled, []byte(r.Run), r.ThrottleSeconds, digest, r.CreatedBy,
+		nullString(r.ChatPlatform), nullString(r.ChatChannelID), r.ChatChannelName)
 	out, err := scanAlertReceiver(row)
 	if isUniqueViolation(err, "alert_receivers_name_key") {
 		return AlertReceiver{}, "", ErrAlertReceiverNameTaken
@@ -148,16 +158,20 @@ func (s *Store) InsertAlertReceiver(ctx context.Context, r AlertReceiver) (Alert
 func (s *Store) UpdateAlertReceiver(ctx context.Context, r AlertReceiver) (AlertReceiver, error) {
 	row := s.db.QueryRowContext(ctx, `
 		UPDATE alert_receivers SET
-			name             = $2,
-			description      = $3,
-			enabled          = $4,
-			run              = $5::jsonb,
-			throttle_seconds = $6,
-			updated_by       = $7,
-			updated_at       = now()
+			name              = $2,
+			description       = $3,
+			enabled           = $4,
+			run               = $5::jsonb,
+			throttle_seconds  = $6,
+			updated_by        = $7,
+			chat_platform     = $8,
+			chat_channel_id   = $9,
+			chat_channel_name = $10,
+			updated_at        = now()
 		WHERE id = $1
 		RETURNING `+alertReceiverFields,
-		r.ID, r.Name, r.Description, r.Enabled, []byte(r.Run), r.ThrottleSeconds, r.UpdatedBy)
+		r.ID, r.Name, r.Description, r.Enabled, []byte(r.Run), r.ThrottleSeconds, r.UpdatedBy,
+		nullString(r.ChatPlatform), nullString(r.ChatChannelID), r.ChatChannelName)
 	out, err := scanAlertReceiver(row)
 	switch {
 	case errors.Is(err, sql.ErrNoRows):
@@ -607,8 +621,11 @@ func scanAlertReceiver(row rowScanner) (AlertReceiver, error) {
 		outcome  sql.NullString
 		lastRun  sql.NullString
 		lastErr  sql.NullString
+		platform sql.NullString
+		channel  sql.NullString
 	)
 	err := row.Scan(&r.ID, &r.Name, &r.Description, &r.Enabled, &r.Run, &r.ThrottleSeconds, &r.TokenSHA256,
+		&platform, &channel, &r.ChatChannelName,
 		&received, &outcome, &lastRun, &lastErr,
 		&r.CreatedBy, &r.CreatedAt, &r.UpdatedBy, &r.UpdatedAt)
 	if err != nil {
@@ -621,5 +638,6 @@ func scanAlertReceiver(row rowScanner) (AlertReceiver, error) {
 	r.LastOutcome = outcome.String
 	r.LastRunID = runv1.ULID(lastRun.String)
 	r.LastError = lastErr.String
+	r.ChatPlatform, r.ChatChannelID = platform.String, channel.String
 	return r, nil
 }

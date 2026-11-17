@@ -271,6 +271,7 @@ const alertReceivers = [
     enabled: true, throttle_seconds: 3600, webhook_path: '/api/v1/alert-receivers/01JD9V0000ALERTRECEIVER001/alerts',
     run: { prompt: 'Investigate the firing alerts below. Find the likely cause; if it is in this repository, open a pull request.',
       agent: 'claude-code', role: 'coder', repo: 'https://github.com/acme/checkout', max_cost_usd: '3' },
+    chat_reply: { platform: 'mattermost', channel_id: '4xp9fdt7pbgium38k5k6p8xxbr', channel_name: 'prod-alerts' },
     last_received_at: iso(7 * 60000), last_outcome: 'throttled', last_run_id: '01JD8Q7NN9GG8HH7II6JJ5KKLL',
     created_by: 'maria', created_at: iso(5 * 86400000), updated_by: 'maria', updated_at: iso(5 * 86400000),
   },
@@ -295,8 +296,27 @@ const alertSuppressions = {
   ],
 }
 
+// Whether a chat platform's integration is on now, read on every answer so
+// that disabling one on the Integrations page shows its warning at once.
+const chatEnabled = (platform) => (platform === 'slack' ? slack : platform === 'mattermost' ? mattermost : null)?.enabled === true
+const withChat = (r) => ({
+  ...r, chat_reply: r.chat_reply ?? null,
+  chat_reply_platform_enabled: r.chat_reply ? chatEnabled(r.chat_reply.platform) : true,
+})
+
 function saveAlertReceiver(target, payload) {
   const next = { ...target, ...payload, run: payload?.run ?? target.run }
+  // Absent keeps the stored channel, null clears it; the name is the platform's, never the client's.
+  if (payload && 'chat_reply' in payload && payload.chat_reply) {
+    const { platform, channel_id: channelID } = payload.chat_reply
+    if (platform !== 'mattermost' && platform !== 'slack') return invalid('chat_reply.platform', 'the platform is mattermost or slack')
+    if (!chatEnabled(platform)) return invalid('chat_reply.platform', `the ${platform} integration is not enabled`)
+    if (!/^[A-Za-z0-9]+$/.test(channelID ?? '')) return invalid('chat_reply.channel_id', 'a channel ID is letters and digits')
+    if (channelID.toLowerCase().startsWith('x')) return invalid('chat_reply.channel_id', 'the bot is not a member of this channel')
+    next.chat_reply = { platform, channel_id: channelID, channel_name: platform === 'slack' ? 'ops-alerts' : 'prod-alerts' }
+  } else {
+    next.chat_reply = payload && 'chat_reply' in payload ? null : target.chat_reply ?? null
+  }
   if (!/^[a-z0-9]([-a-z0-9_.]*[a-z0-9])?$/.test(next.name ?? '')) {
     return invalid('name', "a name is lower-case letters, digits, '-', '_' and '.'")
   }
@@ -487,9 +507,12 @@ const routes = [
     return d
   }],
   ['GET', /^\/api\/v1\/alert-receivers$/, () => ({
-    alert_receivers: [...alertReceivers].sort((a, b) => a.name.localeCompare(b.name)),
+    alert_receivers: [...alertReceivers].sort((a, b) => a.name.localeCompare(b.name)).map(withChat),
   })],
-  ['GET', /^\/api\/v1\/alert-receivers\/([^/]+)$/, (m) => alertReceivers.find((r) => r.id === m[1]) ?? 404],
+  ['GET', /^\/api\/v1\/alert-receivers\/([^/]+)$/, (m) => {
+    const r = alertReceivers.find((x) => x.id === m[1])
+    return r ? withChat(r) : 404
+  }],
   ['POST', /^\/api\/v1\/alert-receivers$/, (_m, _u, _fx, payload) => {
     const id = `01JD9V0000ALERTRECEIVER${String(++receiverSeq + 1).padStart(3, '0')}`
     const saved = saveAlertReceiver({
@@ -498,14 +521,15 @@ const routes = [
     }, payload)
     if (saved.error) return saved
     alertReceivers.push(saved)
-    return { ...saved, token: mintCredential() }
+    return { ...withChat(saved), token: mintCredential() }
   }],
   ['PATCH', /^\/api\/v1\/alert-receivers\/([^/]+)$/, (m, _u, _fx, payload) => {
     const i = alertReceivers.findIndex((r) => r.id === m[1])
     if (i < 0) return 404
     const saved = saveAlertReceiver(alertReceivers[i], payload)
-    if (!saved.error) alertReceivers[i] = saved
-    return saved
+    if (saved.error) return saved
+    alertReceivers[i] = saved
+    return withChat(saved)
   }],
   ['DELETE', /^\/api\/v1\/alert-receivers\/([^/]+)$/, (m) => {
     const i = alertReceivers.findIndex((r) => r.id === m[1])
@@ -515,7 +539,7 @@ const routes = [
   }],
   ['POST', /^\/api\/v1\/alert-receivers\/([^/]+)\/rotate-token$/, (m) => {
     const r = alertReceivers.find((x) => x.id === m[1])
-    return r ? { ...r, token: mintCredential() } : 404
+    return r ? { ...withChat(r), token: mintCredential() } : 404
   }],
   ['GET', /^\/api\/v1\/alert-receivers\/([^/]+)\/deliveries$/, (m) => ({ deliveries: alertDeliveries[m[1]] ?? [] })],
   ['GET', /^\/api\/v1\/alert-receivers\/([^/]+)\/suppressions$/, (m) => ({ suppressions: alertSuppressions[m[1]] ?? [] })],

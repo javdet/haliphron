@@ -153,6 +153,9 @@ func (s *Supervisor) start(ctx context.Context, cfg app.ResolvedChatIntegration)
 	go func() { defer rt.done.Done(); chat.RunReplier(runCtx, 5*time.Second) }()
 
 	s.current.Store(rt)
+	// A receiver's chat channel is checked through the running bot when it
+	// is saved.
+	s.svc.RegisterChat(chat)
 	api := cfg.URL
 	if api == "" {
 		api = DefaultAPIURL
@@ -168,6 +171,7 @@ func (s *Supervisor) stop() {
 	if rt == nil {
 		return
 	}
+	s.svc.UnregisterChat(rt.chat)
 	rt.stop()
 	rt.done.Wait()
 }

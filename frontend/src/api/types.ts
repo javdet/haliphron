@@ -185,6 +185,10 @@ export interface AlertReceiver {
   throttle_seconds: number
   /** Where Alertmanager delivers, relative to the API's origin. */
   webhook_path: string
+  /** The channel whose alert post each run's answer is replied under. null: none. */
+  chat_reply?: AlertChatReply | null
+  /** False when chat_reply names a platform whose integration is not enabled now: nothing is posted. */
+  chat_reply_platform_enabled?: boolean
 
   last_received_at?: string
   last_outcome?: AlertOutcome
@@ -202,12 +206,26 @@ export interface AlertReceiverWithToken extends AlertReceiver {
   token: string
 }
 
+/**
+ * Where a receiver's runs reply: one channel on one platform. The answer goes
+ * in the thread of the channel post that announced the same alert, matched by
+ * Alertmanager fingerprint.
+ */
+export interface AlertChatReply {
+  platform: ChatPlatform
+  channel_id: string
+  /** Read from the chat platform on save; never sent. */
+  channel_name?: string
+}
+
 export interface AlertReceiverRequest {
   name: string
   description?: string
   enabled?: boolean
   throttle_seconds?: number
   run: RunTemplate
+  /** On patch, null clears it and an absent key keeps it. */
+  chat_reply?: Pick<AlertChatReply, 'platform' | 'channel_id'> | null
 }
 
 export interface AlertDelivery {

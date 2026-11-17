@@ -724,6 +724,55 @@ retention deletes runs in batches. Deleting a run does not lift the
 suppression its alerts claimed: the window is a fact about time, not about the
 run.
 
+**An alert receiver may answer in a team-chat thread** (0021).
+`alert_receivers.chat_platform` and `chat_channel_id` name one channel, both or
+neither (`alert_receivers_chat_pair`); `chat_channel_name` is what the platform
+called it when the receiver was saved, for display only. The channel is
+checked against the running bot when it is set or changed: the integration is
+enabled, the channel exists, and the bot is a member. When a notification is
+admitted and the receiver names a channel whose platform's integration is
+enabled at that moment, the run owes its answer there, in the thread of the
+channel post that announced the same alerts. With the integration off, no reply
+is owed and no row is written. The agent never touches the chat: it gets no
+chat credential, and the backend posts the reply through `chat_triggers` like
+any other.
+
+The reply is a `chat_triggers` row written by `linkChatAlertReply`, right after
+`linkAlertFire` inside `InsertRun`'s transaction, so a run never commits without
+the reply it owes and a reply is never owed for a run that rolled back. Its
+shape: `message_id` `alert:<run id>`, `channel_id` the receiver's, `thread_id`
+NULL, `user_id` `alert-receiver:<receiver id>` (never a chat account, so
+`ChatThreadListening` never matches it and a person must mention the bot to
+continue in the alert's thread), `username` and `channel_name` the receiver's
+name and the stored channel name, `run_id` the run, `alert_fingerprints` and
+`alert_names` the alerts the run carries (not the throttled ones),
+`thread_search_since` / `thread_search_until` admission − 5 minutes / admission +
+10 minutes, and `next_search_at` and `next_attempt_at` `now()`.
+`thread_id` may be NULL only while `thread_search_until` is set
+(`chat_triggers_thread_known`).
+
+The two notifications are matched by Alertmanager's fingerprints, which the
+chat notification must print. Each replica's reply loop runs a search pass
+before its deliver pass. `DueChatThreadSearches` leases due rows (`thread_id IS
+NULL`, not a follow-up, window open, `next_search_at <= now()`) by pushing
+`next_search_at` 15 seconds forward, the same leasing idea as
+`DueChatReplies`. App reads the channel's root posts since
+`thread_search_since` and picks the match: a root post by automation other than
+the bot, holding a fingerprint as a whole token, created nearest admission.
+`ResolveChatThread` sets `thread_id` and `thread_found_at` with `WHERE thread_id
+IS NULL`, and only the replica that changed the row reacts to the post.
+
+`DueChatReplies` holds an alert row, and a follow-up of one, until
+`coalesce(thread_id, origin.thread_id)` is known or `thread_search_until` has
+passed, where `origin` is the row `origin_message_id` names, and returns the
+coalesced thread. A child inserted while the search ran therefore replies in
+the thread its origin found, with no second write to its own row.
+`linkChatFollowUp` copies the NULL thread, the fingerprints, the names and the
+window; follow-ups never search. A row whose window closed with no thread posts
+a new root post in the channel, headed by the alert names, and
+`MarkChatRootPosted` makes that post the thread of the row and, when it has
+none yet, of its origin's row, so the rest of the tree replies under it.
+
 ### Resource locks and deferred runs
 
 **A lock is a registration, not a lock manager** (0015). `resource_locks` holds
@@ -1034,6 +1083,7 @@ real PostgreSQL — generated columns, domains, partial indexes,
 - [x] an alert receiver's window defaults to an hour and is bounded to a week; a name is taken once; a fingerprint is lower-case hex
 - [x] only a submitted alert delivery carries a run
 - [x] deleting an alert receiver keeps its runs, clears their `alert_receiver_id`, and takes its throttle rows and delivery log; deleting a run clears every alert reference to it and keeps the suppression it claimed
+- [x] an alert receiver's chat channel is a platform and an ID or neither; an alert row may lack a thread only while it has a search window
 - [x] a status that becomes terminal deletes the run's locks in the same statement, and a rollback keeps them
 - [x] a requested cancellation and `Unknown` keep the locks; a new attempt after a terminal one does not bring them back and can set them again
 - [x] deleting a run deletes its locks and its deferred runs
@@ -1093,6 +1143,16 @@ listener as Alertmanager would deliver:
 - [x] a zero window suppresses nothing; an expired window lets the next delivery run; clearing a suppression lets the next delivery run
 - [x] no, a wrong, another receiver's, a rotated-away or a platform credential, and an unknown receiver, are all 401; a disabled receiver is 404; an unreadable payload is 400; a notification admission refuses is recorded and answered 200
 - [x] receivers are managed with `admin`, read with `runs:read`, never show the credential when read, and are refused to a run's own token
+
+Alert replies in a team-chat thread are exercised in the same suite
+(`chatalerts_test.go`), against the fake Mattermost server:
+
+- [x] a post that arrives after the notification is found on a later search, reacted to once, and the answer is posted in its thread; a second resolve loses
+- [x] with no matching post (a longer fingerprint does not match), the answer is held until the window closes and then posted as a new post headed by the alert names, which becomes the thread
+- [x] a delegated child started while the search ran replies in the thread its origin found; a child whose origin found nothing makes the first root post, and the parent replies under it
+- [x] with the receiver's platform switched off no row is written and the prompt says nothing about chat; an edit that leaves the channel alone is not refused, and `null` clears it
+- [x] an unknown channel, a channel without the bot, a platform that is not enabled and an unknown platform are refused at save
+- [x] eight concurrent deliveries of one group owe one chat reply, with the run that committed
 
 The Slack adapter is exercised end to end in the same suite
 (`slack_test.go`), against a fake workspace:

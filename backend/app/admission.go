@@ -126,6 +126,9 @@ type submitLinks struct {
 	// answers, and alert the alerts it claims for the receiver's window.
 	alertReceiver runv1.ULID
 	alert         *store.AlertFire
+	// chatAlert is the reply the alert's run owes in the receiver's chat
+	// channel.
+	chatAlert *store.ChatAlertReply
 }
 
 // prepare applies admission's rules to a request and renders its spec,
@@ -236,6 +239,7 @@ func (s *Service) submit(ctx context.Context, req run.SubmitRequest, links submi
 
 		AlertReceiverID: links.alertReceiver,
 		AlertFire:       links.alert,
+		ChatAlertReply:  links.chatAlert,
 
 		Inputs: inputs,
 	}); err != nil {

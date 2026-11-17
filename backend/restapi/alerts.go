@@ -1,6 +1,9 @@
 package restapi
 
 import (
+	"bytes"
+	"context"
+	"encoding/json"
 	"errors"
 	"io"
 	"net/http"
@@ -30,6 +33,31 @@ type alertReceiverRequest struct {
 	ThrottleSeconds *int32 `json:"throttle_seconds,omitempty"`
 
 	Run runFields `json:"run"`
+
+	// ChatReply is the team-chat channel the runs answer in, in the thread of
+	// the post that announced the alerts.
+	ChatReply *chatReplyRequest `json:"chat_reply,omitempty"`
+}
+
+// chatReplyRequest names a receiver's channel. Its name is the platform's,
+// read when it is saved.
+type chatReplyRequest struct {
+	Platform  string `json:"platform"`
+	ChannelID string `json:"channel_id"`
+}
+
+func (c *chatReplyRequest) app() *app.AlertChatReply {
+	if c == nil {
+		return nil
+	}
+	return &app.AlertChatReply{Platform: c.Platform, ChannelID: c.ChannelID}
+}
+
+// chatReplyResponse is a receiver's channel as the API shows it.
+type chatReplyResponse struct {
+	Platform    string `json:"platform"`
+	ChannelID   string `json:"channel_id"`
+	ChannelName string `json:"channel_name"`
 }
 
 // alertReceiverPatch is a partial edit; run, when present, replaces the whole
@@ -41,6 +69,10 @@ type alertReceiverPatch struct {
 	ThrottleSeconds *int32  `json:"throttle_seconds,omitempty"`
 
 	Run *runFields `json:"run,omitempty"`
+
+	// ChatReply is absent to leave the channel alone, null to clear it, or
+	// the new channel. Raw, because absent and null mean different things.
+	ChatReply json.RawMessage `json:"chat_reply,omitempty"`
 }
 
 // alertReceiverResponse is a receiver as the API shows it, without its
@@ -53,6 +85,12 @@ type alertReceiverResponse struct {
 
 	Run             runFields `json:"run"`
 	ThrottleSeconds int32     `json:"throttle_seconds"`
+
+	// ChatReply is the team-chat channel the runs answer in, null for none.
+	// ChatReplyPlatformEnabled is false when one is set and its platform's
+	// integration is switched off: the runs then owe no reply.
+	ChatReply                *chatReplyResponse `json:"chat_reply"`
+	ChatReplyPlatformEnabled bool               `json:"chat_reply_platform_enabled"`
 
 	// WebhookPath is where Alertmanager delivers, relative to the API's
 	// origin.
@@ -100,6 +138,40 @@ type alertSuppressionResponse struct {
 	Suppressed      int64     `json:"suppressed"`
 }
 
+// alertReceiverViews renders receivers, reading each chat platform's state
+// once.
+func (s *Server) alertReceiverViews(ctx context.Context, receivers ...app.AlertReceiver) ([]alertReceiverResponse, error) {
+	enabled := map[string]bool{}
+	out := make([]alertReceiverResponse, 0, len(receivers))
+	for _, rc := range receivers {
+		v := alertReceiverView(rc)
+		if rc.ChatPlatform != "" {
+			on, seen := enabled[rc.ChatPlatform]
+			if !seen {
+				var err error
+				if on, err = s.app.ChatIntegrationEnabled(ctx, rc.ChatPlatform); err != nil {
+					return nil, err
+				}
+				enabled[rc.ChatPlatform] = on
+			}
+			v.ChatReply = &chatReplyResponse{
+				Platform: rc.ChatPlatform, ChannelID: rc.ChatChannelID, ChannelName: rc.ChatChannelName,
+			}
+			v.ChatReplyPlatformEnabled = on
+		}
+		out = append(out, v)
+	}
+	return out, nil
+}
+
+func (s *Server) alertReceiverOne(ctx context.Context, rc app.AlertReceiver) (alertReceiverResponse, error) {
+	views, err := s.alertReceiverViews(ctx, rc)
+	if err != nil {
+		return alertReceiverResponse{}, err
+	}
+	return views[0], nil
+}
+
 func alertReceiverView(r app.AlertReceiver) alertReceiverResponse {
 	return alertReceiverResponse{
 		ID:              string(r.ID),
@@ -126,9 +198,10 @@ func (s *Server) listAlertReceivers(w http.ResponseWriter, r *http.Request, _ ca
 		s.failFor(w, r, err)
 		return
 	}
-	items := make([]alertReceiverResponse, 0, len(receivers))
-	for _, rc := range receivers {
-		items = append(items, alertReceiverView(rc))
+	items, err := s.alertReceiverViews(r.Context(), receivers...)
+	if err != nil {
+		s.failFor(w, r, err)
+		return
 	}
 	s.write(w, http.StatusOK, map[string]any{"alert_receivers": items})
 }
@@ -139,7 +212,7 @@ func (s *Server) getAlertReceiver(w http.ResponseWriter, r *http.Request, _ call
 		s.failFor(w, r, err)
 		return
 	}
-	s.write(w, http.StatusOK, alertReceiverView(rc))
+	s.writeAlertReceiver(w, r, http.StatusOK, rc, "")
 }
 
 func (s *Server) createAlertReceiver(w http.ResponseWriter, r *http.Request, c caller) {
@@ -157,13 +230,14 @@ func (s *Server) createAlertReceiver(w http.ResponseWriter, r *http.Request, c c
 		Enabled:         enabled,
 		ThrottleSeconds: req.ThrottleSeconds,
 		Run:             req.Run.submitRequest(),
+		ChatReply:       req.ChatReply.app(),
 	}, c.Name(), c.Via())
 	if err != nil {
 		s.failFor(w, r, err)
 		return
 	}
 	w.Header().Set("Cache-Control", "no-store")
-	s.write(w, http.StatusCreated, alertReceiverCredential{alertReceiverView(rc), credential})
+	s.writeAlertReceiver(w, r, http.StatusCreated, rc, credential)
 }
 
 func (s *Server) patchAlertReceiver(w http.ResponseWriter, r *http.Request, c caller) {
@@ -181,12 +255,24 @@ func (s *Server) patchAlertReceiver(w http.ResponseWriter, r *http.Request, c ca
 		template := req.Run.submitRequest()
 		patch.Run = &template
 	}
+	if req.ChatReply != nil {
+		patch.ChatReplySet = true
+		if !bytes.Equal(bytes.TrimSpace(req.ChatReply), []byte("null")) {
+			var reply chatReplyRequest
+			if err := json.Unmarshal(req.ChatReply, &reply); err != nil {
+				s.fail(w, http.StatusBadRequest, "invalid_request",
+					"chat_reply is an object with platform and channel_id, or null", "chat_reply")
+				return
+			}
+			patch.ChatReply = reply.app()
+		}
+	}
 	rc, err := s.app.UpdateAlertReceiver(r.Context(), runv1.ULID(r.PathValue("id")), patch, c.Name(), c.Via())
 	if err != nil {
 		s.failFor(w, r, err)
 		return
 	}
-	s.write(w, http.StatusOK, alertReceiverView(rc))
+	s.writeAlertReceiver(w, r, http.StatusOK, rc, "")
 }
 
 func (s *Server) deleteAlertReceiver(w http.ResponseWriter, r *http.Request, c caller) {
@@ -204,7 +290,31 @@ func (s *Server) rotateAlertReceiverToken(w http.ResponseWriter, r *http.Request
 		return
 	}
 	w.Header().Set("Cache-Control", "no-store")
-	s.write(w, http.StatusOK, alertReceiverCredential{alertReceiverView(rc), credential})
+	s.writeAlertReceiver(w, r, http.StatusOK, rc, credential)
+}
+
+// writeAlertReceiver answers with a receiver, and with its credential when one
+// was just minted. The change is made by now, so a failure to read a chat
+// platform's state shows the receiver without it rather than failing.
+func (s *Server) writeAlertReceiver(w http.ResponseWriter, r *http.Request, status int,
+	rc app.AlertReceiver, credential string) {
+
+	view, err := s.alertReceiverOne(r.Context(), rc)
+	if err != nil {
+		s.log.Warn("could not read whether an alert receiver's chat platform is enabled",
+			"receiver", rc.ID, "error", err)
+		view = alertReceiverView(rc)
+		if rc.ChatPlatform != "" {
+			view.ChatReply = &chatReplyResponse{
+				Platform: rc.ChatPlatform, ChannelID: rc.ChatChannelID, ChannelName: rc.ChatChannelName,
+			}
+		}
+	}
+	if credential != "" {
+		s.write(w, status, alertReceiverCredential{view, credential})
+		return
+	}
+	s.write(w, status, view)
 }
 
 func (s *Server) listAlertDeliveries(w http.ResponseWriter, r *http.Request, _ caller) {
