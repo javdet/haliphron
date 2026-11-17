@@ -3,7 +3,7 @@
 All notable changes to Haliphron are recorded here. The version is the content
 of `VERSION`, and it is the tag of the published images.
 
-## Unreleased
+## 0.7.1 — 2026-11-17
 
 ### Added
 

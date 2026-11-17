@@ -6,7 +6,7 @@
 #   install.sh --backend-url https://haliphron.example.com:8082 \
 #              --bootstrap-token-file /root/hlb.token \
 #              --name build-box-1 --dns 10.0.0.53 \
-#              --agent-image javdet/haliphron-agent:0.7.0@sha256:...
+#              --agent-image javdet/haliphron-agent:0.7.1@sha256:...
 #
 #   install.sh --with-control-plane --dns 10.0.0.53 --name all-in-one \
 #              --agent-image ... --public-addr 203.0.113.10
