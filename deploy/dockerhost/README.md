@@ -40,8 +40,8 @@ sudo ./install.sh \
   --bootstrap-token-file /root/hlb.token \
   --name build-box-1 \
   --dns 10.0.0.53 --dns 10.0.0.54 \
-  --agent-image javdet/haliphron-agent:0.7.1@sha256:… \
-  --controller-image javdet/haliphron-dockerhost:0.7.1 \
+  --agent-image javdet/haliphron-agent:0.7.2@sha256:… \
+  --controller-image javdet/haliphron-dockerhost:0.7.2 \
   --capacity 4
 ```
 
@@ -64,7 +64,7 @@ whole range. `--deny` adds destinations to drop even on 80/443.
 ```sh
 sudo ./install.sh --with-control-plane \
   --name all-in-one --dns 10.0.0.53 \
-  --agent-image javdet/haliphron-agent:0.7.1@sha256:… \
+  --agent-image javdet/haliphron-agent:0.7.2@sha256:… \
   --public-addr 203.0.113.10
 ```
 
