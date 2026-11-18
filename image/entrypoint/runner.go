@@ -4,12 +4,13 @@ import (
 	"context"
 	"errors"
 	"runtime/debug"
+	"slices"
 	"time"
 
 	runv1 "github.com/automagicops/haliphron/api/run/v1"
 )
 
-// The twenty phases, in the order the contract fixes.
+// The twenty-one phases, in the order the contract fixes.
 //
 // The order is contract rather than implementation detail, for a reason that
 // only shows up on a retry: the checkpoint's resume rule is "every phase before
@@ -58,6 +59,7 @@ func steps() []step {
 		{runv1.RuntimePhaseCheckpoint, phaseCheckpoint, runv1.ExitStorage, false},
 		{runv1.RuntimePhaseAuth, phaseAuth, runv1.ExitConfig, false},
 		{runv1.RuntimePhaseClone, phaseClone, runv1.ExitGit, false},
+		{runv1.RuntimePhaseCloneExtra, phaseCloneExtra, runv1.ExitGit, false},
 		{runv1.RuntimePhaseInputs, phaseInputs, runv1.ExitStorage, false},
 		{runv1.RuntimePhaseRole, phaseRole, runv1.ExitConfig, false},
 		{runv1.RuntimePhasePlugins, phasePlugins, runv1.ExitConfig, false},
@@ -133,7 +135,13 @@ func (r *Run) Execute(ctx context.Context) int32 {
 			// with one of its symptoms.
 			if r.failure == nil {
 				r.failure = f
-				if !s.epilogue && s.phase != runv1.RuntimePhaseRun {
+				// Only a failure before the agent abandons the rest. From
+				// run onwards every phase still has work to save: a push
+				// refused in one repository leaves the others' pull
+				// requests to open, and with one repository the phases
+				// after a failed one skip on their own — nothing committed
+				// is nothing pushed, and nothing pushed is no pull request.
+				if !s.epilogue && !afterTheAgent(s.phase) {
 					abandoned = true
 				}
 			}
@@ -141,6 +149,11 @@ func (r *Run) Execute(ctx context.Context) int32 {
 	}
 
 	return r.exitCode()
+}
+
+// afterTheAgent is whether a phase is the run phase or comes after it.
+func afterTheAgent(p runv1.RuntimePhase) bool {
+	return slices.Index(runv1.RuntimePhases, p) >= slices.Index(runv1.RuntimePhases, runv1.RuntimePhaseRun)
 }
 
 // runStep runs one phase and turns a panic in it into a failure of it.

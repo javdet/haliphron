@@ -41,9 +41,9 @@ export const TERMINAL_STATUSES: ReadonlySet<string> = new Set<RunStatus>([
 
 export type FailureClass = 'none' | 'infra' | 'agent' | 'git' | 'config' | 'budget'
 
-export type AgentType = 'claude-code' | 'codex'
+export type AgentType = 'claude-code' | 'codex' | 'opencode'
 
-export const AGENT_TYPES: AgentType[] = ['claude-code', 'codex']
+export const AGENT_TYPES: AgentType[] = ['claude-code', 'codex', 'opencode']
 
 export interface Run {
   run_id: string
@@ -71,6 +71,13 @@ export interface Run {
   pr_number?: number
   commit_sha?: string
 
+  /**
+   * Every repository of a run that has more than one, the working repository
+   * first (path /workspace). Absent for a run with one repository or none,
+   * which the single fields above describe completely.
+   */
+  repos?: RunRepo[]
+
   /** Decimal money as a string; never parsed into a float for display. */
   cost_usd: string
   input_tokens: number
@@ -91,6 +98,34 @@ export interface Run {
   finished_at?: string
 }
 
+/** What became of one repository of a run with several. */
+export interface RunRepo {
+  url: string
+  /** /workspace for the working repository, /repos/<name> for the others. */
+  path: string
+  base_branch?: string
+  target_branch?: string
+  pushed: boolean
+  commit_sha?: string
+  pr_url?: string
+  pr_number?: number
+  pr_action?: 'created' | 'updated' | 'none'
+}
+
+/**
+ * One entry of a run request's repos. repos[0] is the working repository,
+ * cloned to /workspace, and carries neither name nor depth; the others are
+ * cloned to /repos/<name>.
+ */
+export interface RepoRequest {
+  url: string
+  base_branch?: string
+  /** The directory under /repos; the URL's basename when absent. */
+  name?: string
+  /** Clone depth: 1 when absent, 0 for a full clone. */
+  depth?: number
+}
+
 export interface RunList {
   runs: Run[]
   next_before?: string
@@ -105,6 +140,13 @@ export interface RunTemplate {
   repo?: string
   base_branch?: string
   target_branch?: string
+  /**
+   * Several repositories, the working one first. Exclusive with repo and
+   * base_branch: a template with one repository uses those instead, and the
+   * backend answers a stored template that way too.
+   */
+  repos?: RepoRequest[]
+  /** Applies to every repository. */
   create_pr?: boolean
   timeout_seconds?: number
   max_cost_usd?: string
@@ -366,6 +408,11 @@ export interface PluginSpec {
   marketplaces?: PluginMarketplace[]
   /** `plugin@marketplace`, one per plugin. */
   enabled?: string[]
+  /**
+   * opencode's own packages — npm (`name@version`) or git (`github:owner/repo#ref`) —
+   * installed with `opencode plugin add`. Read by opencode runs only.
+   */
+  opencode?: string[]
   /** Unset means true: the repository's own settings may choose plugins. */
   trustRepositorySources?: boolean
 }
@@ -605,6 +652,19 @@ export interface TokenRetention {
   /** 0 keeps per-run tokens forever. */
   run_token_retention_seconds: number
   /** default: never saved, so the backend's two weeks apply. */
+  source: 'default' | 'database'
+  updated_by?: string
+  updated_at?: string
+}
+
+/** Installation-wide limits on what one run may ask for. */
+export interface RunLimits {
+  /** How many repositories one run may name, the working one included. */
+  max_repos_per_run: number
+  default_max_repos_per_run: number
+  /** The most max_repos_per_run may be set to. */
+  max_repos_per_run_ceiling: number
+  /** default: never saved, so default_max_repos_per_run applies. */
   source: 'default' | 'database'
   updated_by?: string
   updated_at?: string

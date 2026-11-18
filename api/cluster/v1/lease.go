@@ -19,6 +19,36 @@ type LeaseRequest struct {
 	WaitSeconds int32 `json:"waitSeconds,omitempty"`
 	// +optional
 	CapacitySlots int32 `json:"capacitySlots,omitempty"`
+	// Features are the parts of the lease this controller carries out that an
+	// older one would silently ignore. A run that needs one is issued only to
+	// a poll that declares it: a controller that dropped extraRepos would run
+	// the work in one repository and report success.
+	// +optional
+	Features []Feature `json:"features,omitempty"`
+}
+
+// Feature names a capability a controller declares on every lease poll.
+type Feature string
+
+const (
+	// FeatureExtraRepos is RenderedRunSpec.ExtraRepos: the controller passes
+	// EnvExtraRepos to the pod and mounts MountRepos.
+	FeatureExtraRepos Feature = "extraRepos"
+)
+
+// ControllerFeatures is what this build of both controllers carries out. One
+// list, so the Kubernetes and the Docker host controllers cannot declare
+// different sets.
+var ControllerFeatures = []Feature{FeatureExtraRepos}
+
+// HasFeature reports whether a poll declared f.
+func (r LeaseRequest) HasFeature(f Feature) bool {
+	for _, have := range r.Features {
+		if have == f {
+			return true
+		}
+	}
+	return false
 }
 
 // LeaseResponse carries the issued work. An empty response is not sent: no work

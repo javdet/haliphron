@@ -224,12 +224,17 @@ func (s *Server) createAlertReceiver(w http.ResponseWriter, r *http.Request, c c
 	if req.Enabled != nil {
 		enabled = *req.Enabled
 	}
+	template, err := req.Run.submitRequest()
+	if err != nil {
+		s.failFor(w, r, err)
+		return
+	}
 	rc, credential, err := s.app.CreateAlertReceiver(r.Context(), app.AlertReceiverInput{
 		Name:            req.Name,
 		Description:     req.Description,
 		Enabled:         enabled,
 		ThrottleSeconds: req.ThrottleSeconds,
-		Run:             req.Run.submitRequest(),
+		Run:             template,
 		ChatReply:       req.ChatReply.app(),
 	}, c.Name(), c.Via())
 	if err != nil {
@@ -252,7 +257,11 @@ func (s *Server) patchAlertReceiver(w http.ResponseWriter, r *http.Request, c ca
 		ThrottleSeconds: req.ThrottleSeconds,
 	}
 	if req.Run != nil {
-		template := req.Run.submitRequest()
+		template, err := req.Run.submitRequest()
+		if err != nil {
+			s.failFor(w, r, err)
+			return
+		}
 		patch.Run = &template
 	}
 	if req.ChatReply != nil {

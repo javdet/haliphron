@@ -85,12 +85,13 @@ spec:
             properties:
               agent:
                 description: |-
-                  AgentType selects the runtime inside the agent image. One image serves both;
-                  the variable switches authentication, MCP config rendering, the command line
-                  and the output parser.
+                  AgentType selects the runtime inside the agent image. One image serves all
+                  three; the variable switches authentication, MCP config rendering, the
+                  command line and the output parser.
                 enum:
                 - claude-code
                 - codex
+                - opencode
                 maxLength: 32
                 type: string
               artifactMode:
@@ -127,6 +128,67 @@ spec:
                 maxLength: 512
                 pattern: ^https?://
                 type: string
+              extraRepos:
+                description: |-
+                  ExtraRepos are cloned beside the workspace, under MountRepos/<path>,
+                  before the agent starts. Repo stays the working repository; these are
+                  the others the task spans. Each one with changes is committed, pushed to
+                  Repo.TargetBranch and proposed for review exactly like Repo — the branch,
+                  createPR, submodules and LFS are Repo's and apply to all of them.
+
+                  A list beside Repo rather than Repo turned into a list: the field is
+                  additive, so every stored spec and every existing CR stays valid, and
+                  everything that describes "the run's repository" keeps describing the
+                  same one. MaxItems is the schema's ceiling; the limit in force is the
+                  installation's, set in the UI and never above it.
+                items:
+                  description: |-
+                    ExtraRepoSpec is one repository a run works in beside the working one.
+
+                    The same value reaches the pod as one element of the JSON in EnvExtraRepos,
+                    which is why it carries no secret: the token for its host travels in
+                    SecretKeyGitTokens, like the working repository's.
+                  properties:
+                    baseBranch:
+                      description: BaseBranch empty is the remote's default branch,
+                        origin/HEAD.
+                      maxLength: 255
+                      type: string
+                    cloneDepth:
+                      description: |-
+                        CloneDepth 0 means a full clone. Admission renders 1 unless the request
+                        asked otherwise: ten full clones are what fills ephemeral storage.
+                      format: int32
+                      minimum: 0
+                      type: integer
+                    path:
+                      description: |-
+                        Path is the directory under MountRepos the repository is cloned into,
+                        unique within the run. ExtraRepoPath is the rule both sides apply.
+                      maxLength: 64
+                      minLength: 1
+                      pattern: ^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$
+                      type: string
+                    provider:
+                      description: |-
+                        GitProvider selects the hosting API used for the pull request. "none" is a
+                        legitimate case: a run without a repository.
+                      enum:
+                      - github
+                      - gitlab
+                      - none
+                      maxLength: 16
+                      type: string
+                    url:
+                      maxLength: 2048
+                      minLength: 1
+                      type: string
+                  required:
+                  - path
+                  - url
+                  type: object
+                maxItems: 31
+                type: array
               image:
                 description: |-
                   Image should be pinned by digest: reproducing attempt 2 matters more
@@ -562,6 +624,7 @@ spec:
                   - checkpoint
                   - auth
                   - clone
+                  - clone-extra
                   - inputs
                   - role
                   - plugins

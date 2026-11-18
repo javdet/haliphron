@@ -110,6 +110,20 @@ func systemPrompt(r *Run) string {
 			"do not create or rename branches, and do not push — that is done for you.\n",
 			r.layout.Workspace, r.cfg.TargetBranch)
 	}
+	if r.cfg.HasRepo() && len(r.cfg.ExtraRepos) > 0 {
+		b.WriteString("Additional repositories are checked out next to your working directory:\n")
+		for _, extra := range r.cfg.ExtraRepos {
+			fmt.Fprintf(&b, "- %s — %s", filepath.Join(r.layout.Repos, extra.Path), extra.URL)
+			if extra.BaseBranch != "" {
+				fmt.Fprintf(&b, " (base branch %s)", extra.BaseBranch)
+			}
+			b.WriteString("\n")
+		}
+		fmt.Fprintf(&b, "The branch %s already exists and is checked out in every one of them. "+
+			"Change any of them as the task requires; do not create or rename branches and do not push — "+
+			"the changes in each repository are committed, pushed and proposed for review for you.\n",
+			r.cfg.TargetBranch)
+	}
 	if len(r.nodeSchema) > 0 {
 		fmt.Fprintf(&b, "The output object must satisfy this JSON Schema:\n%s\n", r.nodeSchema)
 	}
@@ -127,6 +141,19 @@ func systemPrompt(r *Run) string {
 		b.WriteString("\n")
 	}
 	return b.String()
+}
+
+// extraRepoDirs are the directories of the extra repositories, which each CLI is
+// told it may work in beside its working directory.
+func (r *Run) extraRepoDirs() []string {
+	if !r.cfg.HasRepo() {
+		return nil
+	}
+	dirs := make([]string, 0, len(r.cfg.ExtraRepos))
+	for _, extra := range r.cfg.ExtraRepos {
+		dirs = append(dirs, filepath.Join(r.layout.Repos, extra.Path))
+	}
+	return dirs
 }
 
 // ---------------------------------------------------------------------------
@@ -330,6 +357,12 @@ func (claudeCode) Launch(r *Run) Command {
 	if r.hasMCPServers() {
 		args = append(args, "--mcp-config", r.mcpConfigPath())
 	}
+	// Outside the working directory a write needs approval, and under -p there
+	// is nobody to give it: without this the agent can read the extra
+	// repositories and change none of them.
+	for _, dir := range r.extraRepoDirs() {
+		args = append(args, "--add-dir", dir)
+	}
 	return Command{Path: "claude", Args: args, Dir: r.layout.Workspace, Env: r.agentEnv,
 		Stdin: bytes.NewReader(r.prompt)}
 }
@@ -512,6 +545,11 @@ func (codex) Launch(r *Run) Command {
 	}
 	args = append(args, "--json")
 	args = append(args, sandboxFor(r.cfg.PermissionMode)...)
+	// workspace-write is the working directory; the extra repositories are
+	// writable only when named.
+	for _, dir := range r.extraRepoDirs() {
+		args = append(args, "--add-dir", dir)
+	}
 	args = append(args, codexGatewayArgs(r.gateway())...)
 	if model := r.modelID(); model != "" {
 		args = append(args, "-m", model)

@@ -7,6 +7,7 @@ import (
 
 	runv1 "github.com/automagicops/haliphron/api/run/v1"
 	"github.com/automagicops/haliphron/backend/app"
+	"github.com/automagicops/haliphron/backend/run"
 	"github.com/automagicops/haliphron/backend/store"
 )
 
@@ -564,6 +565,58 @@ func tokenRetentionBody(keep app.TokenRetention) map[string]any {
 	if keep.UpdatedAt != nil {
 		body["updated_by"] = keep.UpdatedBy
 		body["updated_at"] = keep.UpdatedAt
+	}
+	return body
+}
+
+// ---------------------------------------------------------------------------
+// run limits
+// ---------------------------------------------------------------------------
+
+type runLimitsRequest struct {
+	// A pointer so that a body without it is refused rather than read as zero.
+	MaxReposPerRun *int `json:"max_repos_per_run"`
+}
+
+// getRunLimits needs only runs:read: the forms that build a run — a schedule's,
+// an alert receiver's — have to know the limit to enforce it as the user types.
+func (s *Server) getRunLimits(w http.ResponseWriter, r *http.Request, _ caller) {
+	limits, err := s.app.RunLimits(r.Context())
+	if err != nil {
+		s.failFor(w, r, err)
+		return
+	}
+	s.write(w, http.StatusOK, runLimitsBody(limits))
+}
+
+func (s *Server) putRunLimits(w http.ResponseWriter, r *http.Request, c caller) {
+	var req runLimitsRequest
+	if _, ok := s.decode(w, r, &req); !ok {
+		return
+	}
+	if req.MaxReposPerRun == nil {
+		s.fail(w, http.StatusUnprocessableEntity, "invalid_request",
+			"max_repos_per_run is required", "max_repos_per_run")
+		return
+	}
+	limits, err := s.app.PutRunLimits(r.Context(), *req.MaxReposPerRun, c.Name())
+	if err != nil {
+		s.failFor(w, r, err)
+		return
+	}
+	s.write(w, http.StatusOK, runLimitsBody(limits))
+}
+
+func runLimitsBody(limits app.RunLimits) map[string]any {
+	body := map[string]any{
+		"max_repos_per_run":         limits.MaxReposPerRun,
+		"default_max_repos_per_run": run.DefaultMaxRepos,
+		"max_repos_per_run_ceiling": run.MaxReposCeiling,
+		"source":                    limits.Source,
+	}
+	if limits.UpdatedAt != nil {
+		body["updated_by"] = limits.UpdatedBy
+		body["updated_at"] = limits.UpdatedAt
 	}
 	return body
 }

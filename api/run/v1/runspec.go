@@ -1,17 +1,36 @@
 package v1
 
-// AgentType selects the runtime inside the agent image. One image serves both;
-// the variable switches authentication, MCP config rendering, the command line
-// and the output parser.
+import "fmt"
+
+// AgentType selects the runtime inside the agent image. One image serves all
+// three; the variable switches authentication, MCP config rendering, the
+// command line and the output parser.
 //
-// +kubebuilder:validation:Enum=claude-code;codex
+// +kubebuilder:validation:Enum=claude-code;codex;opencode
 // +kubebuilder:validation:MaxLength=32
 type AgentType string
 
 const (
 	AgentClaudeCode AgentType = "claude-code"
 	AgentCodex      AgentType = "codex"
+	AgentOpenCode   AgentType = "opencode"
 )
+
+// AgentTypes is every runtime this contract defines, in the order the UI and
+// the error messages list them. One list, so that the backend's admission, the
+// lease's "no restriction" and the image's own check cannot disagree about
+// which runtimes exist.
+var AgentTypes = []AgentType{AgentClaudeCode, AgentCodex, AgentOpenCode}
+
+// Known reports whether a is one of AgentTypes.
+func (a AgentType) Known() bool {
+	for _, known := range AgentTypes {
+		if a == known {
+			return true
+		}
+	}
+	return false
+}
 
 // GitProvider selects the hosting API used for the pull request. "none" is a
 // legitimate case: a run without a repository.
@@ -140,7 +159,23 @@ type RenderedRunSpec struct {
 	// +kubebuilder:validation:items:MaxLength=253
 	ImagePullSecrets []string `json:"imagePullSecrets,omitempty"`
 
-	Repo    RepoSpec    `json:"repo"`
+	Repo RepoSpec `json:"repo"`
+
+	// ExtraRepos are cloned beside the workspace, under MountRepos/<path>,
+	// before the agent starts. Repo stays the working repository; these are
+	// the others the task spans. Each one with changes is committed, pushed to
+	// Repo.TargetBranch and proposed for review exactly like Repo — the branch,
+	// createPR, submodules and LFS are Repo's and apply to all of them.
+	//
+	// A list beside Repo rather than Repo turned into a list: the field is
+	// additive, so every stored spec and every existing CR stays valid, and
+	// everything that describes "the run's repository" keeps describing the
+	// same one. MaxItems is the schema's ceiling; the limit in force is the
+	// installation's, set in the UI and never above it.
+	// +optional
+	// +kubebuilder:validation:MaxItems=31
+	ExtraRepos []ExtraRepoSpec `json:"extraRepos,omitempty"`
+
 	Runtime RuntimeSpec `json:"runtime"`
 
 	// +optional
@@ -192,6 +227,60 @@ type RepoSpec struct {
 	// +optional
 	// +kubebuilder:default=true
 	CreatePR *bool `json:"createPR,omitempty"`
+}
+
+// MaxExtraRepos is the schema's ceiling on RenderedRunSpec.ExtraRepos: 32
+// repositories with the working one. The installation's own limit is set in the
+// UI, defaults lower and can never be raised above this.
+const MaxExtraRepos = 31
+
+// ExtraRepoSpec is one repository a run works in beside the working one.
+//
+// The same value reaches the pod as one element of the JSON in EnvExtraRepos,
+// which is why it carries no secret: the token for its host travels in
+// SecretKeyGitTokens, like the working repository's.
+type ExtraRepoSpec struct {
+	// +kubebuilder:validation:MinLength=1
+	// +kubebuilder:validation:MaxLength=2048
+	URL string `json:"url"`
+	// +optional
+	Provider GitProvider `json:"provider,omitempty"`
+	// BaseBranch empty is the remote's default branch, origin/HEAD.
+	// +optional
+	// +kubebuilder:validation:MaxLength=255
+	BaseBranch string `json:"baseBranch,omitempty"`
+	// Path is the directory under MountRepos the repository is cloned into,
+	// unique within the run. ExtraRepoPath is the rule both sides apply.
+	// +kubebuilder:validation:MinLength=1
+	// +kubebuilder:validation:MaxLength=64
+	// +kubebuilder:validation:Pattern=`^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$`
+	Path string `json:"path"`
+	// CloneDepth 0 means a full clone. Admission renders 1 unless the request
+	// asked otherwise: ten full clones are what fills ephemeral storage.
+	// +optional
+	// +kubebuilder:validation:Minimum=0
+	CloneDepth int32 `json:"cloneDepth,omitempty"`
+}
+
+// ExtraRepoPath checks a directory name for MountRepos. Refused, never
+// sanitised, by the rule artifact keys follow: a name one side repairs and the
+// other does not is a repository cloned somewhere the other side does not
+// look. "." and ".." start with a dot, which the pattern does not allow, and a
+// slash is not in its alphabet.
+func ExtraRepoPath(name string) error {
+	if len(name) == 0 || len(name) > 64 {
+		return fmt.Errorf("repository name %q must be 1 to 64 characters", name)
+	}
+	for i, c := range name {
+		alnum := c >= 'A' && c <= 'Z' || c >= 'a' && c <= 'z' || c >= '0' && c <= '9'
+		if i == 0 && !alnum {
+			return fmt.Errorf("repository name %q must start with a letter or a digit", name)
+		}
+		if !alnum && c != '.' && c != '_' && c != '-' {
+			return fmt.Errorf("repository name %q may contain only letters, digits, '.', '_' and '-'", name)
+		}
+	}
+	return nil
 }
 
 // RuntimeSpec is everything that shapes the pod.

@@ -22,7 +22,10 @@ import (
 // An entrypoint with a test-only switch in it is an entrypoint whose tested
 // path and shipped path are not the same path.
 type Layout struct {
-	Workspace  string
+	Workspace string
+	// Repos holds the extra repositories, one directory each. Beside the
+	// workspace, never inside it.
+	Repos      string
 	RunIO      string
 	Output     string
 	Inputs     string
@@ -40,6 +43,7 @@ type Layout struct {
 func DefaultLayout() Layout {
 	return Layout{
 		Workspace:    runv1.MountWorkspace,
+		Repos:        runv1.MountRepos,
 		RunIO:        runv1.DirRunIO,
 		Output:       runv1.FileOutput,
 		Inputs:       runv1.DirInputs,
@@ -59,6 +63,7 @@ func LayoutUnder(root string) Layout {
 	under := func(p string) string { return filepath.Join(root, p) }
 	return Layout{
 		Workspace:    under(runv1.MountWorkspace),
+		Repos:        under(runv1.MountRepos),
 		RunIO:        under(runv1.DirRunIO),
 		Output:       under(runv1.FileOutput),
 		Inputs:       under(runv1.DirInputs),
@@ -102,6 +107,10 @@ type Config struct {
 	Submodules   bool
 	LFS          bool
 	CreatePR     bool
+	// ExtraRepos are the repositories beside the working one, from
+	// HALIPHRON_EXTRA_REPOS, already checked: every path is one
+	// runv1.ExtraRepoPath accepts and no two are the same.
+	ExtraRepos []runv1.ExtraRepoSpec
 
 	// Prompt is the task, from HALIPHRON_PROMPT, which the controller sourced
 	// from one key of the per-run Secret. It is the one value in this struct
@@ -201,14 +210,15 @@ func LoadConfig(env func(string) string) (*Config, error) {
 			"required variables are not set: %s", strings.Join(missing, ", "))
 	}
 
-	switch runv1.AgentType(agent) {
-	case runv1.AgentClaudeCode, runv1.AgentCodex:
-		c.Agent = runv1.AgentType(agent)
-	default:
+	if !runv1.AgentType(agent).Known() {
+		known := make([]string, len(runv1.AgentTypes))
+		for i, a := range runv1.AgentTypes {
+			known[i] = string(a)
+		}
 		return nil, fail(runv1.ExitConfig, "UnknownAgent",
-			"%s=%q: this image implements %s and %s",
-			runv1.EnvAgent, agent, runv1.AgentClaudeCode, runv1.AgentCodex)
+			"%s=%q: this image implements %s", runv1.EnvAgent, agent, strings.Join(known, ", "))
 	}
+	c.Agent = runv1.AgentType(agent)
 
 	n, err := strconv.Atoi(attempt)
 	if err != nil || n < 1 {
@@ -235,6 +245,9 @@ func LoadConfig(env func(string) string) (*Config, error) {
 	c.Submodules = truthy(env(runv1.EnvSubmodules))
 	c.LFS = truthy(env(runv1.EnvLFS))
 	c.CreatePR = truthy(env(runv1.EnvCreatePR))
+	if c.ExtraRepos, err = parseExtraRepos(env(runv1.EnvExtraRepos)); err != nil {
+		return nil, err
+	}
 	c.OTLPEndpoint = env(runv1.EnvOTLPEndpoint)
 	c.Traceparent = env(runv1.EnvTraceparent)
 	c.StoragePrefix = env(runv1.EnvStoragePrefix)
@@ -288,8 +301,62 @@ func LoadConfig(env func(string) string) (*Config, error) {
 			"%s is set but %s is not: the branch name is the backend's to generate, not the pod's",
 			runv1.EnvRepoURL, runv1.EnvTargetBranch)
 	}
+	if len(c.ExtraRepos) > 0 && !c.HasRepo() {
+		return nil, fail(runv1.ExitConfig, "MalformedConfiguration",
+			"%s is set but %s is not: extra repositories sit beside a working repository",
+			runv1.EnvExtraRepos, runv1.EnvRepoURL)
+	}
 
 	return c, nil
+}
+
+// parseExtraRepos reads HALIPHRON_EXTRA_REPOS and refuses anything the git
+// phases could not act on safely. Refused rather than repaired, by the rule the
+// input manifest follows: the controller rendered this from a spec the backend
+// checked, so a path that escapes /repos or a provider nobody knows is a
+// defect upstream that a retry reproduces exactly.
+func parseExtraRepos(raw string) ([]runv1.ExtraRepoSpec, error) {
+	if strings.TrimSpace(raw) == "" {
+		return nil, nil
+	}
+	var repos []runv1.ExtraRepoSpec
+	if err := json.Unmarshal([]byte(raw), &repos); err != nil {
+		return nil, failWrap(runv1.ExitConfig, "MalformedConfiguration", err,
+			"%s is not a JSON array of repositories", runv1.EnvExtraRepos)
+	}
+	if len(repos) > runv1.MaxExtraRepos {
+		return nil, fail(runv1.ExitConfig, "MalformedConfiguration",
+			"%s names %d repositories; the contract allows %d", runv1.EnvExtraRepos, len(repos), runv1.MaxExtraRepos)
+	}
+	seen := make(map[string]bool, len(repos))
+	for i, repo := range repos {
+		if strings.TrimSpace(repo.URL) == "" {
+			return nil, fail(runv1.ExitConfig, "MalformedConfiguration",
+				"%s: entry %d has no url", runv1.EnvExtraRepos, i+1)
+		}
+		if err := runv1.ExtraRepoPath(repo.Path); err != nil {
+			return nil, fail(runv1.ExitConfig, "MalformedConfiguration",
+				"%s: entry %d: %s", runv1.EnvExtraRepos, i+1, err)
+		}
+		if seen[repo.Path] {
+			return nil, fail(runv1.ExitConfig, "MalformedConfiguration",
+				"%s: entry %d repeats the path %q", runv1.EnvExtraRepos, i+1, repo.Path)
+		}
+		seen[repo.Path] = true
+		switch repo.Provider {
+		case "":
+			repos[i].Provider = runv1.GitProviderNone
+		case runv1.GitProviderNone, runv1.GitProviderGitHub, runv1.GitProviderGitLab:
+		default:
+			return nil, fail(runv1.ExitConfig, "MalformedConfiguration",
+				"%s: entry %d has the unknown provider %q", runv1.EnvExtraRepos, i+1, repo.Provider)
+		}
+		if repo.CloneDepth < 0 {
+			return nil, fail(runv1.ExitConfig, "MalformedConfiguration",
+				"%s: entry %d has a negative clone depth", runv1.EnvExtraRepos, i+1)
+		}
+	}
+	return repos, nil
 }
 
 // LoadConfigFromEnv reads the process environment.
@@ -348,7 +415,11 @@ func splitList(raw string) []string {
 // every child process, and the agent is the one process here explicitly assumed
 // capable of exfiltrating whatever it can read.
 type Secrets struct {
-	GitToken  string
+	GitToken string
+	// GitTokens are the tokens of a run with extra repositories, by host,
+	// from SecretKeyGitTokens. Nil when the key is absent: a run with one
+	// repository, or one whose backend predates the key.
+	GitTokens runv1.GitHostTokens
 	LLMAPIKey string
 	// LLMBaseURL is the gateway the key belongs to, normalised, or empty for
 	// the CLIs' own providers. Not a secret, and so not in Values: the log
@@ -457,6 +528,27 @@ func LoadSecrets(dir string, c *Config) (*Secrets, error) {
 	}
 	s.GitToken = strings.TrimSpace(string(gitToken))
 
+	gitTokens, err := read(runv1.SecretKeyGitTokens, false)
+	if err != nil {
+		return nil, err
+	}
+	if gitTokens != nil {
+		if err := json.Unmarshal(gitTokens, &s.GitTokens); err != nil {
+			return nil, failWrap(runv1.ExitConfig, "MalformedSecret", err,
+				"%s is not an object of hosts to tokens", runv1.SecretKeyGitTokens)
+		}
+		for host, entry := range s.GitTokens {
+			// The host becomes a case pattern in the credential helper, in
+			// single quotes. Refused rather than escaped, like gitHost.
+			if host == "" || strings.ContainsAny(host, "'\n/") {
+				return nil, fail(runv1.ExitConfig, "MalformedSecret",
+					"%s names an unusable host", runv1.SecretKeyGitTokens)
+			}
+			entry.Token = strings.TrimSpace(entry.Token)
+			s.GitTokens[host] = entry
+		}
+	}
+
 	if s.MCPConfig, err = read(runv1.SecretKeyMCPConfig, false); err != nil {
 		return nil, err
 	}
@@ -556,6 +648,9 @@ func isSHA256Hex(s string) bool {
 // what the agent was asked to do, and it is going into result.md anyway.
 func (s *Secrets) Values() []string {
 	values := []string{s.GitToken, s.LLMAPIKey, s.CallbackToken}
+	for _, entry := range s.GitTokens {
+		values = append(values, entry.Token)
+	}
 	for _, v := range s.AgentEnv {
 		values = append(values, v)
 	}

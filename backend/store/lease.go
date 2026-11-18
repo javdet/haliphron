@@ -97,8 +97,11 @@ func (e *OwnershipError) Error() string {
 // an empty array hands out nothing. The caller resolves "no restriction" into
 // the full set, because what the full set is belongs to the contract and not
 // to a SQL default.
+//
+// extraRepos is whether the poll declared clusterv1.FeatureExtraRepos; without
+// it a run whose spec has extraRepos is left in the queue.
 func (s *Store) Lease(ctx context.Context, clusterID runv1.ULID, runtimes []runv1.AgentType,
-	limit int, ackTimeout, leaseTTL time.Duration) ([]Leased, error) {
+	extraRepos bool, limit int, ackTimeout, leaseTTL time.Duration) ([]Leased, error) {
 
 	if limit <= 0 || len(runtimes) == 0 {
 		return nil, nil
@@ -119,7 +122,7 @@ func (s *Store) Lease(ctx context.Context, clusterID runv1.ULID, runtimes []runv
 
 		rows, err := tx.QueryContext(ctx, db.Query("lease"),
 			clusterID, agentTypeArray(runtimes), limit,
-			ackTimeout.Seconds(), leaseTTL.Seconds())
+			ackTimeout.Seconds(), leaseTTL.Seconds(), extraRepos)
 		if err != nil {
 			return fmt.Errorf("store: lease for %s: %w", clusterID, err)
 		}

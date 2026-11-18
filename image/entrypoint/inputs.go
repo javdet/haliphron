@@ -242,9 +242,11 @@ func (r *Run) imageInputs() []string {
 // may or may not cover these. The run goes ahead — refusing it would be
 // deciding for the role — and the log says why the answer may not mention the
 // screenshot. codex is given its images on the command line and reads the rest
-// through its shell, so there is no single tool to lose.
+// through its shell, so there is no single tool to lose. opencode is given its
+// images too, but reads a PDF or a text file with its read tool, and the deny
+// list is translated onto that tool.
 func (r *Run) warnIfInputsUnreadable() {
-	if r.cfg.Agent != runv1.AgentClaudeCode {
+	if r.cfg.Agent == runv1.AgentCodex {
 		return
 	}
 	for _, denied := range r.cfg.DeniedTools {

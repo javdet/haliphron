@@ -147,6 +147,7 @@ func (l *Loop) PollOnce(ctx context.Context) (int, error) {
 		FreeSlots:     free,
 		CapacitySlots: l.Capacity,
 		Runtimes:      l.Runtimes,
+		Features:      clusterv1.ControllerFeatures,
 		WaitSeconds:   l.Timings.Get().MaxWaitSeconds,
 	})
 	if err != nil {

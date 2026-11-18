@@ -3,6 +3,72 @@
 All notable changes to Haliphron are recorded here. The version is the content
 of `VERSION`, and it is the tag of the published images.
 
+## Unreleased
+
+### Added
+
+- **opencode, the third runtime.** `agent: opencode` on a run, a role or a
+  schedule starts OpenCode 2.x (`@opencode/cli` 2.3.0,
+  pinned in the agent image) headless, as `opencode run --standalone --format
+  json`, with the prompt on stdin.
+  - **Model and key.** The run's `provider/model` is passed as written — it is
+    how opencode picks the provider — and the stored key reaches it in one
+    variable, `HALIPHRON_LLM_API_KEY`. Behind a gateway (`base_url`) it is a
+    provider of its own speaking chat completions at the root plus `/v1`. A
+    Claude subscription token is refused, as for codex.
+  - **Permissions.** opencode has no permission flags, so the permission mode
+    and the tool policy, written in claude-code's names, are translated into its
+    ordered rules and delivered in `OPENCODE_CONFIG_CONTENT`, above anything a
+    repository's `opencode.json` says. The rules decide as claude-code under
+    `-p` would; the equivalence is a test. The table is section 8 of the agent
+    runtime contract.
+  - **Plugins from marketplaces.** opencode has no marketplaces. A role's
+    `plugin@marketplace` entries reach it by import: the pod clones the
+    catalogue as before and copies each plugin's skills, agents (as subagents),
+    commands and MCP servers to where opencode looks. Hooks are not carried
+    over. `plugins.opencode` is a new list of opencode's own packages (npm or
+    `github:`), installed with `opencode plugin add`; the other runtimes ignore
+    it. In the role form: **Plugins → OpenCode packages**.
+  - **Repository trust.** `trustRepositorySources: false` also keeps an opencode
+    run from loading the repository's `opencode.json` and `.opencode/`.
+  - **Contract.** `AgentType` gains `opencode` in the Cluster API, the CRD and
+    the runtime API; migration `0022` widens the `agent_type` domain. The
+    runtime chart's `cluster.runtimes` lists it by default; a controller whose
+    values pin the list needs it added. `OPENCODE_` joins the environment
+    prefixes a role may not set.
+- **Several repositories on one run.** `repos` on `POST /runs`, on schedule and
+  alert receiver templates, and on MCP `run_agent` — a list of `{url,
+  base_branch, name, depth}` in place of `repo` and `base_branch`. The first is
+  the working repository in `/workspace`, as `repo` always was; the others are
+  cloned beside it under `/repos/<name>` (default: the URL's last segment,
+  depth 1) by a new `clone-extra` phase, on the same run branch. Every
+  repository the agent changes is committed, pushed and gets its own pull
+  request; the extras' pull requests are opened first and the working
+  repository's lists them. A refused push in one repository does not stop the
+  others, and the run fails with exit 30 only if every refusal was permanent.
+  - **Limit.** How many repositories a run may name (the working one included)
+    is set only on the UI's **Settings → Run limits**, default 10, at most 32:
+    `GET/PUT /run-limits`, table `run_limits`. A request over it is a 422 that
+    names the limit.
+  - **Results.** `GET /runs/{id}` gains `repos`, each with its branch, commit and
+    pull request; `get_run_result` names every pull request. The run list shows
+    "+N". Stored in `runs.extra_repo_results`, merged across attempts so a later
+    attempt never erases an earlier pull request.
+  - **Credentials.** A token is minted per host the run clones from and travels
+    as `git-tokens.json` beside `git-token`; the pod's credential helper answers
+    only the hosts of the run's own repositories. A repository URL carrying
+    credentials is refused at admission.
+  - **Compatibility.** A run with extra repositories is leased only to a
+    controller that declares the `extraRepos` feature on its lease poll; on a
+    cluster whose controller is older it waits in Queued until that controller
+    is upgraded. Upgrade the runtime chart before using `repos`. A role pinned
+    to an older agent image ignores `HALIPHRON_EXTRA_REPOS` and works in the
+    working repository only — pin a release with this change. Migration `0023`;
+    the agent image creates `/repos`.
+  - **Pipeline.** After the agent has run, a failed phase no longer stops the
+    git phases after it; with one repository nothing changes, since those
+    phases skip when there is nothing to push.
+
 ## 0.7.1 — 2026-11-17
 
 ### Added

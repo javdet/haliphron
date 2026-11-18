@@ -58,7 +58,7 @@ func main() {
 
 		prepare = flag.String("prepare", "", "stage a run into this directory, then keep serving its links")
 		prompt  = flag.String("prompt", "say hello", "the prompt for the staged run")
-		agent   = flag.String("agent", string(runv1.AgentClaudeCode), "claude-code or codex")
+		agent   = flag.String("agent", string(runv1.AgentClaudeCode), "claude-code, codex or opencode")
 		repo    = flag.String("repo", "", "repository URL, empty for a run without one")
 		role    = flag.String("role", "", "role name")
 		schema  = flag.String("output-schema", "", "file holding the node's output schema")

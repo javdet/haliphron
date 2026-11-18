@@ -29,7 +29,7 @@ import (
 // cluster restricts issuance. The lease statement filters with agent = ANY($2),
 // so "no restriction" has to be spelled out as every value rather than as an
 // empty array.
-var knownAgents = []runv1.AgentType{runv1.AgentClaudeCode, runv1.AgentCodex}
+var knownAgents = runv1.AgentTypes
 
 // Register exchanges a bootstrap token for a cluster identity.
 func (s *Service) Register(ctx context.Context, token string, req clusterv1.RegisterRequest) (clusterv1.RegisterResponse, error) {
@@ -144,6 +144,10 @@ func (s *Service) Lease(ctx context.Context, cluster store.Cluster, req clusterv
 		limit = max
 	}
 	runtimes := effectiveRuntimes(req.Runtimes, cluster.Runtimes)
+	// A run with extraRepos goes only to a poll that says it carries them
+	// out. An older controller would drop the field and push one repository
+	// of a change that spans several.
+	extraRepos := req.HasFeature(clusterv1.FeatureExtraRepos)
 
 	for {
 		// Taken before the query, so a broadcast that lands between the two is
@@ -151,7 +155,7 @@ func (s *Service) Lease(ctx context.Context, cluster store.Cluster, req clusterv
 		// interval while work sits in the queue.
 		wake := s.work.wait()
 
-		leases, err := s.issue(ctx, cluster, runtimes, limit)
+		leases, err := s.issue(ctx, cluster, runtimes, extraRepos, limit)
 		if err != nil {
 			return nil, err
 		}
@@ -169,7 +173,8 @@ func (s *Service) Lease(ctx context.Context, cluster store.Cluster, req clusterv
 	}
 }
 
-func (s *Service) issue(ctx context.Context, cluster store.Cluster, runtimes []runv1.AgentType, limit int) ([]clusterv1.Lease, error) {
+func (s *Service) issue(ctx context.Context, cluster store.Cluster, runtimes []runv1.AgentType,
+	extraRepos bool, limit int) ([]clusterv1.Lease, error) {
 	if limit <= 0 || cluster.QuotaExhausted || cluster.Status != "Active" {
 		// An exhausted ResourceQuota is declared by the controller. Not
 		// issuing into it is the whole value of the flag: otherwise the fact
@@ -178,7 +183,7 @@ func (s *Service) issue(ctx context.Context, cluster store.Cluster, runtimes []r
 		return nil, nil
 	}
 
-	leased, err := s.store.Lease(ctx, cluster.ID, runtimes, limit, s.ackTimeout(), s.leaseTTL())
+	leased, err := s.store.Lease(ctx, cluster.ID, runtimes, extraRepos, limit, s.ackTimeout(), s.leaseTTL())
 	if err != nil || len(leased) == 0 {
 		return nil, err
 	}

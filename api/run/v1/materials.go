@@ -14,6 +14,16 @@ const (
 	// of this run. The entrypoint re-exports it under GH_TOKEN and GL_TOKEN as
 	// well, because gh and glab each insist on their own name.
 	SecretKeyGitToken = "git-token"
+	// SecretKeyGitTokens holds a token for every host the run clones from,
+	// GitHostTokens as JSON, and is absent for a run without extraRepos.
+	// SecretKeyGitToken is still written beside it with the working
+	// repository's token, so an image that predates this key keeps working on
+	// the repository it knows about.
+	//
+	// Keyed by host, which is what git names when it asks the credential
+	// helper: the helper answers each host from its own entry and every other
+	// host not at all.
+	SecretKeyGitTokens = "git-tokens.json"
 	// SecretKeyLLMAPIKey authenticates the agent CLI to the model provider.
 	// It holds either a provider API key or a Claude subscription OAuth
 	// token; IsClaudeOAuthToken tells them apart.
@@ -86,6 +96,17 @@ const (
 	// endpoint checks a requested key against this copy, not against memory.
 	SecretKeyInputs = "inputs.json"
 )
+
+// GitHostTokens is SecretKeyGitTokens: host[:port], as git spells it to a
+// credential helper, to the token for that host and the forge it belongs to.
+type GitHostTokens map[string]GitHostToken
+
+// GitHostToken is one entry of GitHostTokens. Provider is what the forge CLI
+// of a pull request on that host is told the token is for.
+type GitHostToken struct {
+	Provider GitProvider `json:"provider,omitempty"`
+	Token    string      `json:"token"`
+}
 
 // PlatformMCPServer is the name the backend gives its own MCP server in
 // SecretKeyMCPConfig, the one that carries the per-run token for run_agent

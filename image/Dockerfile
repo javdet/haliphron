@@ -1,9 +1,9 @@
 # The haliphron agent image.
 #
-# One image, two runtimes. Git, pull requests, uploads, notification, the
-# checkpoint and log redaction are the same work either way; what differs is
+# One image, three runtimes. Git, pull requests, uploads, notification, the
+# checkpoint and log redaction are the same work every way; what differs is
 # authentication, the MCP configuration, the launch command and the output
-# parser, and all four live in the entrypoint rather than in a second image.
+# parser, and all four live in the entrypoint rather than in another image.
 #
 # Debian slim and not Alpine: Claude Code needs Node, and a glibc curl and GNU
 # coreutils are required. The saving from musl is not worth discovering that in
@@ -37,6 +37,9 @@ ARG GH_VERSION=2.63.2
 ARG GLAB_VERSION=1.51.0
 ARG CLAUDE_CODE_VERSION=2.1.274
 ARG CODEX_VERSION=0.154.0
+# OpenCode 2.x. The 1.x line (npm opencode-ai) has a different configuration
+# shape and plugin API, and the entrypoint writes the 2.x one.
+ARG OPENCODE_VERSION=2.3.0
 ARG TARGETARCH
 
 # git-lfs and the two forge CLIs are here rather than installed at runtime for
@@ -63,17 +66,27 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 # uncontrolled are versions nobody can reproduce on the second attempt. It
 # matters more here than it did, because the plugins phase depends on specific
 # subcommands — `plugin marketplace add`, `plugin install`, `plugin add` — whose
-# spelling and flags have changed between releases.
+# spelling and flags have changed between releases. For opencode it matters
+# most: the entrypoint writes its configuration and reads its JSON events, and
+# both changed shape between majors.
+#
+# opencode is a single compiled binary; npm is only how its platform build is
+# chosen. It needs no Node or Bun at runtime, and ripgrep above is what keeps
+# it from downloading its own on first use.
 RUN npm install -g --no-fund --no-audit \
       @anthropic-ai/claude-code@${CLAUDE_CODE_VERSION} \
       @openai/codex@${CODEX_VERSION} \
+      @opencode/cli@${OPENCODE_VERSION} \
  && npm cache clean --force \
  && rm -rf /root/.npm
 
-# Non-root, and the image requires no write outside the four emptyDirs.
+# Non-root, and the image requires no write outside the four emptyDirs — and
+# /repos, the fifth, mounted only for a run with extra repositories. It is
+# created and owned here so that a Docker host's named volume, which starts as
+# a copy of the image's directory, is writable by uid 1000 too.
 RUN useradd --uid 1000 --create-home --home-dir /home/agent --shell /bin/bash agent \
- && mkdir -p /workspace /haliphron/run /haliphron/role /haliphron/secrets \
- && chown -R 1000:1000 /workspace /haliphron/run /home/agent
+ && mkdir -p /workspace /repos /haliphron/run /haliphron/role /haliphron/secrets \
+ && chown -R 1000:1000 /workspace /repos /haliphron/run /home/agent
 
 COPY --from=build /out/haliphron-entrypoint /usr/local/bin/haliphron-entrypoint
 
@@ -89,6 +102,8 @@ ENV HOME=/home/agent \
     npm_config_cache=/home/agent/.npm \
     CLAUDE_CONFIG_DIR=/home/agent/.claude \
     CODEX_HOME=/home/agent/.codex \
+    OPENCODE_CONFIG_DIR=/home/agent/.config/opencode \
+    OPENCODE_DISABLE_AUTOUPDATE=1 \
     GIT_CONFIG_NOSYSTEM=1 \
     GIT_TERMINAL_PROMPT=0
 

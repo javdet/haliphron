@@ -60,7 +60,7 @@ func (r *Run) buildReport() *runv1.CompletionReport {
 		// that is assembling it, nor of the one that will send it, and the
 		// alternative — sending the report before it is complete — trades a
 		// fact nobody needs for the one thing the report exists to deliver.
-		// The checkpoint, written a few lines later, does have all twenty.
+		// The checkpoint, written a few lines later, does have all of them.
 		PhaseTimings: r.timings,
 	}
 	report.FailureClass = runv1.FailureClassForExitCode(report.ExitCode)
@@ -82,6 +82,15 @@ func (r *Run) buildReport() *runv1.CompletionReport {
 	if r.cfg.HasRepo() {
 		repo := r.repo
 		report.Repo = &repo
+	}
+	// Every extra repository this attempt cloned, whatever became of it, so a
+	// pull request opened in one is in the report of a run that failed to push
+	// another. One never cloned has nothing to say.
+	for _, w := range r.extraRepos() {
+		if w.cloned {
+			report.ExtraRepos = append(report.ExtraRepos,
+				runv1.ExtraRepoResult{Path: w.Path, RepoResult: *w.Result})
+		}
 	}
 	if r.agent.Usage != nil {
 		report.Usage = r.agent.Usage

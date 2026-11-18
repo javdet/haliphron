@@ -20,7 +20,7 @@ The contracts worked out (normative; this document is their rationale):
 | Workflow engine | Our own, a durable state machine on PostgreSQL | **No additional CRDs.** The DAG is a product domain object, editable from the UI |
 | Interaction with clusters | **Pull model** | The backend assigns a cluster and the controller fetches the work itself. The backend stores no cluster credentials and initiates no connections inward |
 | Agent image | Written from scratch for the haliphron contract | Section 11 pins the requirements and the pitfalls collected from the production `nib/agent-runner/universal-agent` |
-| Agent runtimes | claude-code, codex | opencode deferred |
+| Agent runtimes | claude-code, codex, opencode | opencode built ahead of its phase (see section 19) |
 | MVP | `run_agent` end to end | A vertical slice through every layer |
 
 ### Closed questions
@@ -32,7 +32,7 @@ The contracts worked out (normative; this document is their rationale):
 | 3 | Egress filtering by domain | Not doing it. NetworkPolicy by CIDR/port, with no requirement for FQDN policies and no egress proxy. A deliberate deferred risk (section 18) |
 | 4 | Multi-cluster behind NAT | A pull model for every control plane ↔ cluster interaction |
 | 5 | Live logs in a multi-cluster setup | The latency is acceptable. We do not proxy `kubectl logs -f`, only chunks relayed through the controller |
-| 6 | opencode | Not in v1 |
+| 6 | opencode | Not in v1; since built ahead of phase 5 as the third runtime (section 11) |
 | 7 | CRD versioning | `v1alpha1` → `v1` through a conversion webhook |
 | 8 | Repository cache | Not doing it |
 | 9 | Where results and logs live | Two modes behind one port (section 9.2). The default relays them through the controller into the backend, which writes them to a PVC. Object storage is the second mode and an optimisation — **never a required dependency** |
@@ -867,9 +867,9 @@ An important consequence: **codex has no direct analogue of `--allowedTools` for
 
 The image is written for haliphron from scratch. Below are the requirements and the list of pitfalls collected from the production `nib/agent-runner/universal-agent` (a 1225-line entrypoint): it is cheaper to account for them in the design than to discover them in production.
 
-### One image, two runtimes
+### One image, three runtimes
 
-Not two images. The git/PR/upload/notification logic is identical; what differs is authentication, preparing the MCP config, the launch command and parsing the output. `AGENT_TYPE` is the runtime switch, and it is also the extension point when opencode's turn comes.
+Not three images. The git/PR/upload/notification logic is identical; what differs is authentication, preparing the MCP config, the launch command and parsing the output. `AGENT_TYPE` is the runtime switch, and it was the extension point opencode came in through: its column of the translation table, its permission rules and the import of marketplace plugins into a CLI that has none are in section 8 and 7a of the [agent runtime contract](contracts/agent-runtime.md).
 
 A role may declare **its own image** (`role.image`), built on top of the base one: a team whose agents work with terraform and kubectl needs those binaries inside. A base image plus overlays, not a universal monster.
 
@@ -1500,7 +1500,6 @@ There are no open questions blocking the system design. Below is what has been d
 | **Log latency** of the order of the chunk upload interval | The latency is shown explicitly in the UI | If users complain — shorten the interval, it is a parameter |
 | **There is no repository cache.** Cloning a monorepo on every run costs minutes and traffic | — | When clone time becomes a noticeable share of a run's duration. The solution: a PVC with a bare mirror and `--reference` on clone |
 | **`Unknown` requires manual triage.** A run lost together with its cluster is not reassigned automatically | The `haliphron_runs_unknown` metric and explicit display in the UI | If such cases become frequent — then the problem is the stability of the connection, and that is what needs treating |
-| **opencode is not supported** | `AGENT_TYPE` is a ready-made extension point | When there is demand. It will require research into its configuration and a row in the role translation table |
 | **RBAC is coarse** (`admin`/`operator`/`viewer`) | Single-tenant delivery, a trusted perimeter | When several teams appear in one installation |
 | **There is no cluster key rotation.** A compromised private key is cured by revocation and reinstalling the chart | The key never leaves the cluster; revocation takes effect within ≤ 5 minutes | A rotation endpoint is an additive contract change and breaks nothing. Introduce it on the request of a customer with a key rotation policy |
 | **There is no explicit cluster deregistration.** `helm uninstall` leaves a record that will go to `Unreachable` | The status is visible in the UI and the operator deletes it by hand | A `pre-delete` hook on release deletion is unreliable; if manual cleanup becomes annoying, add a call |
@@ -1525,7 +1524,9 @@ The engine, the dispatcher, a static DAG, joining, dynamic fan-out, the `writes`
 **Phase 4 — schedules and operations.**
 The scheduler (shipped early, targeting runs; workflow targets follow phase 3), multi-cluster assignment by labels and capacity, tracing, dashboards, budgets, RBAC, auditing, the `haliphron-runtime` chart as a separate release.
 
-**Phase 5 — opencode, approval steps, `run_agent(wait=true)`, parallel code editing with a conflict resolver.**
+**Phase 5 — approval steps, `run_agent(wait=true)`, parallel code editing with a conflict resolver.** (opencode, originally here, is built ahead of its phase — below.)
+
+**Built ahead of its phase — opencode as the third runtime.** One more column of the role translation table, rules for a CLI whose permissions are configuration rather than flags, and marketplace plugins imported as skills, agents, commands and MCP servers, since opencode has no marketplaces of its own. The contract is section 8 of [agent-runtime.md](contracts/agent-runtime.md).
 
 **Built ahead of its phase — a single Docker host as a runtime.**
 `haliphron-dockerhost` (module `dockerhost/`) runs agents as containers on one Linux host with Docker, for installations without Kubernetes. It is a controller in the sense of section 7, not a `DockerLauncher` behind the Kubernetes one: it registers as a cluster with `runtimeKind: docker`, leases and reports over the unchanged Cluster API, and runs the unchanged image under contract 3. Its durable state is a SQLite row per run in place of the `AgentRun`, and its isolation is a bridge network with inter-container traffic off plus an installed firewall that the controller verifies behaviourally, in place of the NetworkPolicy (section 14). The Kubernetes controller is untouched; the backend change is the additive `runtimeKind`. Contract: [docker-host.md](contracts/docker-host.md).

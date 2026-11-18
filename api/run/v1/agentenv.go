@@ -22,7 +22,7 @@ var agentEnvNamePattern = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_]*$`)
 // not set in the agent's environment.
 var (
 	reservedAgentEnvPrefixes = []string{
-		"ANTHROPIC_", "CLAUDE_", "CODEX_", "OPENAI_", "HALIPHRON_", "GIT_",
+		"ANTHROPIC_", "CLAUDE_", "CODEX_", "OPENAI_", "OPENCODE_", "HALIPHRON_", "GIT_",
 	}
 	reservedAgentEnvNames = []string{
 		"PATH", "HOME", "USER", "SHELL", "TMPDIR", "GH_TOKEN", "GL_TOKEN", "GITHUB_TOKEN",

@@ -17,7 +17,7 @@ import {
   type ScheduleOutcome,
   type ScheduleRequest,
 } from '../api/types'
-import { compact, RunSpecFields } from '../components/RunSpecFields'
+import { compact, extraRepoCount, RunSpecFields, workingRepo } from '../components/RunSpecFields'
 import { Card, Dialog, Empty, ErrorBanner, Field, Spinner, Time } from '../components/ui'
 
 /**
@@ -369,7 +369,10 @@ export function SchedulesPage() {
                     </td>
                     <td>
                       {schedule.run.role || <span className="faint">default role</span>}
-                      <div className="small muted trunc trunc-sm">{schedule.run.repo || 'no repository'}</div>
+                      <div className="small muted trunc trunc-sm">
+                        {workingRepo(schedule.run) || 'no repository'}
+                        {extraRepoCount(schedule.run) > 0 && ` +${extraRepoCount(schedule.run)}`}
+                      </div>
                     </td>
                     <td className="nowrap small muted">{schedule.concurrency_policy}</td>
                     <td className="small nowrap">

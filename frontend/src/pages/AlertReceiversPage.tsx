@@ -18,7 +18,7 @@ import {
   type ChatPlatform,
   type RunTemplate,
 } from '../api/types'
-import { compact, RunSpecFields } from '../components/RunSpecFields'
+import { compact, extraRepoCount, RunSpecFields, workingRepo } from '../components/RunSpecFields'
 import { Card, CopyButton, Dialog, Empty, ErrorBanner, Field, Section, Spinner, Time } from '../components/ui'
 
 /**
@@ -545,7 +545,10 @@ export function AlertReceiversPage() {
                     </td>
                     <td>
                       {receiver.run.role}
-                      <div className="small muted trunc trunc-sm">{receiver.run.repo || 'no repository'}</div>
+                      <div className="small muted trunc trunc-sm">
+                        {workingRepo(receiver.run) || 'no repository'}
+                        {extraRepoCount(receiver.run) > 0 && ` +${extraRepoCount(receiver.run)}`}
+                      </div>
                     </td>
                     <td className="nowrap small">{throttleLabel(receiver.throttle_seconds)}</td>
                     <td>

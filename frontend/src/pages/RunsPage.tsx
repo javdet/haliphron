@@ -217,6 +217,15 @@ export function RunsPage() {
                     </td>
                     <td className="small muted">
                       <span className="trunc">{run.repo || '—'}</span>
+                      {run.repos && run.repos.length > 1 && (
+                        <span
+                          className="badge"
+                          style={{ marginLeft: 6 }}
+                          title={run.repos.slice(1).map((r) => r.url).join('\n')}
+                        >
+                          +{run.repos.length - 1}
+                        </span>
+                      )}
                     </td>
                     <td className="num nowrap">{money(run.cost_usd)}</td>
                     <td className="num nowrap">{elapsed(run.started_at, run.finished_at)}</td>

@@ -101,6 +101,8 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("PUT "+BasePath+"/run-retention", s.scoped(store.ScopeAdmin, s.putRunRetention))
 	mux.HandleFunc("GET "+BasePath+"/token-retention", s.scoped(store.ScopeRunsRead, s.getTokenRetention))
 	mux.HandleFunc("PUT "+BasePath+"/token-retention", s.scoped(store.ScopeAdmin, s.putTokenRetention))
+	mux.HandleFunc("GET "+BasePath+"/run-limits", s.scoped(store.ScopeRunsRead, s.getRunLimits))
+	mux.HandleFunc("PUT "+BasePath+"/run-limits", s.scoped(store.ScopeAdmin, s.putRunLimits))
 
 	// runs:write, like starting a run, and refused to a run's own token in
 	// app: a schedule outlives the run that would have created it.

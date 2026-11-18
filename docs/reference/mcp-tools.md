@@ -89,11 +89,12 @@ Scope: `runs:write`.
 | Argument | Type | Required | Default | Notes |
 |---|---|---|---|---|
 | `prompt` | string | yes | — | what the agent should do |
-| `agent` | string | no | installation default | `claude-code` or `codex` |
+| `agent` | string | no | installation default | `claude-code`, `codex` or `opencode` |
 | `model` | string | no | installation default | |
 | `role` | string | no | none | a configured role: its tools, model and files |
 | `repo` | string | no | none | clone URL; omit for a run without a repository |
 | `base_branch` | string | no | repository default | |
+| `repos` | array | no | none | several repositories instead of `repo` and `base_branch`: objects `{url, base_branch?, name?, depth?}`, the first the working directory, the others cloned under `/repos/<name>`. Same rules and limit as [`repos` on `POST /runs`](rest-api.md#post-apiv1runs) |
 | `timeout_seconds` | integer | no | installation default | 60 to 86400 |
 | `max_cost_usd` | string | no | none | ceiling for this run, as a decimal |
 | `async` | boolean | no | `true` | `false` waits for the run to finish |
@@ -112,6 +113,10 @@ Scope: `runs:read`.
 |---|---|---|---|
 | `run_id` | string | yes | |
 | `wait_seconds` | integer | no | wait this long for the run to finish before answering |
+
+The text names the run's pull request, and for a run with several repositories
+the pull request of every repository that has one. A deferred run started with
+`schedule_agent` works in the same repositories as the run that deferred it.
 
 ## `cancel_run`
 

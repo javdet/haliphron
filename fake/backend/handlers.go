@@ -178,7 +178,7 @@ func (b *Backend) handleLeases(w http.ResponseWriter, r *http.Request) {
 		if headroom := b.headroom(c); limit > headroom {
 			limit = headroom
 		}
-		leases := b.issue(c, limit, req.Runtimes)
+		leases := b.issue(c, limit, req.Runtimes, req.Features)
 		b.mu.Unlock()
 
 		if len(leases) > 0 {

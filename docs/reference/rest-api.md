@@ -106,13 +106,14 @@ Request fields:
 | Field | Type | Required | Default | Notes |
 |---|---|---|---|---|
 | `prompt` | string | yes | — | maximum 512 KiB |
-| `agent` | string | no | installation default | `claude-code` or `codex` |
+| `agent` | string | no | installation default | `claude-code`, `codex` or `opencode` |
 | `model` | string | no | installation default | |
 | `role` | string | no | none | a configured role name |
 | `repo` | string | no | none | clone URL; omitted means a run with no repository |
 | `base_branch` | string | no | repository default | |
 | `target_branch` | string | no | generated | must match `^[A-Za-z0-9][A-Za-z0-9._/-]{0,254}$` |
 | `create_pr` | boolean | no | installation default | |
+| `repos` | array | no | none | several repositories instead of `repo` and `base_branch`; see below |
 | `timeout_seconds` | integer | no | installation default | 60 to 86400 |
 | `max_cost_usd` | string | no | none | decimal, `^[0-9]{1,12}(\.[0-9]{1,6})?$` |
 | `max_turns` | integer | no | role or none | |
@@ -121,6 +122,28 @@ Request fields:
 | `wait_seconds` | integer | no | — | bounds a synchronous call |
 
 Returns a [run object](#the-run-object).
+
+**Several repositories.** `repos` lists the repositories of a run that works in
+more than one. `repos[0]` is the working repository — the one `repo` names, cloned
+to `/workspace` — and the rest are cloned beside it under `/repos/<name>` before
+the agent starts. `target_branch` and `create_pr` apply to all of them: every
+repository the agent changes is pushed to the run's branch and gets its own pull
+request. `repos` cannot be combined with `repo` or `base_branch`.
+
+| Entry field | Type | Required | Default | Notes |
+|---|---|---|---|---|
+| `url` | string | yes | — | `http(s)` clone URL without credentials, at most 2048 characters; no repository twice |
+| `base_branch` | string | no | `main` for the first, the remote's default for the others | |
+| `name` | string | no | the URL's last segment, without `.git`, made unique with `-2`, `-3` | directory under `/repos`, `^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$`; not allowed on `repos[0]` |
+| `depth` | integer | no | `1` | clone depth, `0` for a full clone; not allowed on `repos[0]` |
+
+The number of entries is bounded by [`max_repos_per_run`](#get-apiv1run-limits)
+(default 10). A request over it is refused with `422 invalid_request`, `field:
+"repos"`, naming the limit. A repository URL that carries credentials is
+refused for `repo` as well as for `repos`.
+
+A run with extra repositories is leased only to a controller that declares the
+`extraRepos` feature; on a cluster with an older controller it stays `Queued`.
 
 | Status | When |
 |---|---|
@@ -272,7 +295,8 @@ when it is set.
 | `status_reason`, `status_message` | string | |
 | `exit_code` | integer | omitted until the pod reports one |
 | `result_summary` | string | |
-| `pr_url`, `pr_number`, `commit_sha` | string, integer, string | |
+| `pr_url`, `pr_number`, `commit_sha` | string, integer, string | the working repository's |
+| `repos` | array | only for a run with more than one repository: the working one first, then the others, each `{url, path, base_branch, target_branch, pushed, commit_sha, pr_url, pr_number, pr_action}`. `path` is `/workspace` or `/repos/<name>` |
 | `cost_usd` | string | decimal |
 | `input_tokens`, `output_tokens`, `num_turns` | integer | |
 | `parent_run_id` | ULID | omitted when the run has no parent |
@@ -834,6 +858,36 @@ required. `0` keeps per-run tokens forever; any other value must be between
 `422 invalid_request`. Returns the object `GET` returns. Every save appends a
 `token_retention.saved` audit record.
 
+### `GET /api/v1/run-limits`
+
+Scope: `runs:read` — the forms that build a run need the limit.
+
+```json
+{
+  "max_repos_per_run": 10,
+  "default_max_repos_per_run": 10,
+  "max_repos_per_run_ceiling": 32,
+  "source": "default"
+}
+```
+
+| Field | Meaning |
+|---|---|
+| `max_repos_per_run` | how many repositories one run may name, the working one included |
+| `default_max_repos_per_run` | what applies while nothing is saved |
+| `max_repos_per_run_ceiling` | the most that may be saved |
+| `source` | `default` (never saved) or `database` |
+| `updated_by`, `updated_at` | who saved it last, and when; absent while `source` is `default` |
+
+### `PUT /api/v1/run-limits`
+
+Scope: `admin`. Body: `{"max_repos_per_run": 5}`. The field is required and must
+be between `1` and `32`, or the request is refused with `422 invalid_request`.
+It applies to the next admission on every replica; runs already admitted are
+not affected. Returns the object `GET` returns. Every save appends a
+`run_limits.saved` audit record. This is the only place the limit is set — there
+is no environment variable or Helm value for it.
+
 ---
 
 ## Statistics
@@ -945,8 +999,8 @@ refused with `422`: an `oauth_token` starts with `sk-ant-oat`, and an
 clears the stored endpoint, and so does a `PUT /api/v1/secrets/{name}` of the
 same secret. It must be an `http` or `https` URL with no credentials, query or
 fragment, and it is the gateway's root — a value ending in `/v1` is refused
-with `422`, because claude-code appends `/v1/messages` itself and codex is
-given the root plus `/v1`. A trailing slash is dropped. An `oauth_token` with a
+with `422`, because claude-code appends `/v1/messages` itself and codex and
+opencode are given the root plus `/v1`. A trailing slash is dropped. An `oauth_token` with a
 `base_url` is refused with `422`: a subscription token authenticates to
 Anthropic only.
 

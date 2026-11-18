@@ -65,6 +65,27 @@ const runs = [
     created_at: iso(6 * 3600000), started_at: iso(6 * 3600000 - 20000), finished_at: iso(5.6 * 3600000),
   },
   {
+    // Several repositories: the working one first, the rest cloned beside it.
+    run_id: '01JD8PM5RR1SS2TT3UU4VV5WWX', status: 'Succeeded', agent: 'claude-code',
+    model: 'claude-opus-5', role: 'coder', repo: 'https://github.com/acme/checkout',
+    base_branch: 'main', target_branch: 'agent/bump-sdk',
+    cluster_id: '01JD7A0000CLUSTEREUWEST1', epoch: 1, attempt: 1, observed_phase: 'Succeeded',
+    exit_code: 0, result_summary: 'Bumped the payments SDK in checkout and the shared client; docs untouched.',
+    pr_url: 'https://github.com/acme/checkout/pull/4830', pr_number: 4830, commit_sha: '3be81f09c2d4a7e1',
+    cost_usd: '2.1150', input_tokens: 201877, output_tokens: 23001, num_turns: 19, depth: 0,
+    repos: [
+      { url: 'https://github.com/acme/checkout', path: '/workspace', base_branch: 'main',
+        target_branch: 'agent/bump-sdk', pushed: true, commit_sha: '3be81f09c2d4a7e1',
+        pr_url: 'https://github.com/acme/checkout/pull/4830', pr_number: 4830, pr_action: 'created' },
+      { url: 'https://github.com/acme/payments-client', path: '/repos/payments-client', base_branch: 'develop',
+        target_branch: 'agent/bump-sdk', pushed: true, commit_sha: 'c0ffee12ab34cd56', pr_action: 'none' },
+      { url: 'https://github.com/acme/docs.git', path: '/repos/docs',
+        target_branch: 'agent/bump-sdk', pushed: false },
+    ],
+    created_by: 'maria', created_via: 'ui', created_at: iso(2 * 3600000),
+    started_at: iso(2 * 3600000 - 40000), finished_at: iso(1.7 * 3600000),
+  },
+  {
     run_id: '01JD8PQQHH1JJ2KK3LL4MM5NNP', status: 'Queued', agent: 'claude-code',
     model: 'claude-opus-5', role: 'coder', repo: 'https://github.com/acme/billing',
     epoch: 0, attempt: 0, status_reason: 'NoEligibleCluster', cost_usd: '0.0000',
@@ -144,7 +165,7 @@ const clusters = [
   { cluster_id: '01JD7A0000CLUSTEREUWEST1', name: 'prod-eu-west-1', status: 'Active',
     agent_namespace: 'haliphron-agents', controller_version: '0.1.0', runtime_kind: 'kubernetes',
     k8s_version: '1.31.4',
-    runtimes: ['claude-code', 'codex'], capacity_slots: 12, free_slots: 9,
+    runtimes: ['claude-code', 'codex', 'opencode'], capacity_slots: 12, free_slots: 9,
     quota_exhausted: false, registered_at: iso(31 * 86400000), last_heartbeat_at: iso(4000) },
   { cluster_id: '01JD7A0000CLUSTERUSEAST1', name: 'prod-us-east-1', status: 'Active',
     agent_namespace: 'haliphron-agents', controller_version: '0.1.0', runtime_kind: 'kubernetes',
@@ -191,6 +212,32 @@ let slack = {
 // Never saved: the backend's default of three days for failed runs, and no
 // retention for the rest.
 let runRetention = { failed_retention_seconds: 3 * 86400, retention_seconds: 0, source: 'default' }
+
+// Never saved: the backend's default of ten repositories per run.
+let runLimits = { max_repos_per_run: 10, default_max_repos_per_run: 10, max_repos_per_run_ceiling: 32, source: 'default' }
+
+// The rules runFields applies to a run template's repositories, and the shape a
+// stored template comes back in: repos only when there are several.
+function checkRepos(run) {
+  if (!run?.repos) return null
+  if (run.repo || run.base_branch) return invalid('run.repos', 'repos is exclusive with repo and base_branch')
+  if (run.repos.length > runLimits.max_repos_per_run) {
+    return invalid('run.repos', `a run names at most ${runLimits.max_repos_per_run} repositories, the working one included`)
+  }
+  for (const [i, r] of run.repos.entries()) {
+    if (!r?.url?.trim()) return invalid(`run.repos[${i}].url`, 'a repository needs a url')
+    if (i === 0 && (r.name !== undefined || r.depth !== undefined)) {
+      return invalid('run.repos[0]', 'the working repository is /workspace: it takes no name or depth')
+    }
+  }
+  if (run.repos.length === 1) {
+    const [only] = run.repos
+    delete run.repos
+    run.repo = only.url
+    if (only.base_branch) run.base_branch = only.base_branch
+  }
+  return null
+}
 
 // Starts empty, so the prompt to set one is what the mock shows first.
 const apiTokens = [
@@ -244,8 +291,11 @@ const schedules = [
     cron: '0 3 * * *', timezone: 'Europe/Berlin', enabled: true, concurrency_policy: 'Forbid',
     starting_deadline_seconds: 3600,
     run: { prompt: 'Update outdated dependencies, run the tests, and open a pull request.',
-      agent: 'claude-code', role: 'coder', repo: 'https://github.com/acme/checkout', create_pr: true,
-      max_cost_usd: '5' },
+      agent: 'claude-code', role: 'coder', create_pr: true, max_cost_usd: '5',
+      repos: [
+        { url: 'https://github.com/acme/checkout', base_branch: 'main' },
+        { url: 'https://github.com/acme/payments-client', base_branch: 'develop', depth: 0 },
+      ] },
     next_run_at: nextHour(), last_fired_at: iso(21 * 3600000), last_run_id: '01JD8Q7NN9GG8HH7II6JJ5KKLL',
     last_outcome: 'submitted', created_by: 'maria', created_at: iso(10 * 86400000),
     updated_by: 'maria', updated_at: iso(2 * 86400000),
@@ -306,6 +356,8 @@ const withChat = (r) => ({
 
 function saveAlertReceiver(target, payload) {
   const next = { ...target, ...payload, run: payload?.run ?? target.run }
+  const badRepos = checkRepos(next.run)
+  if (badRepos) return badRepos
   // Absent keeps the stored channel, null clears it; the name is the platform's, never the client's.
   if (payload && 'chat_reply' in payload && payload.chat_reply) {
     const { platform, channel_id: channelID } = payload.chat_reply
@@ -353,6 +405,8 @@ const deferredRuns = [
 
 function saveSchedule(target, payload) {
   const next = { ...target, ...payload, run: payload?.run ?? target.run }
+  const badRepos = checkRepos(next.run)
+  if (badRepos) return badRepos
   if (!/^[a-z0-9]([-a-z0-9_.]*[a-z0-9])?$/.test(next.name ?? '')) {
     return invalid('name', "a name is lower-case letters, digits, '-', '_' and '.'")
   }
@@ -579,7 +633,7 @@ const routes = [
     const run = {
       run_id: `01JD9R${String(Date.now()).slice(-20).padStart(20, '0')}`, status: 'Queued',
       agent: schedule.run.agent ?? 'claude-code', model: schedule.run.model ?? 'claude-opus-5',
-      role: schedule.run.role, repo: schedule.run.repo, epoch: 0, attempt: 0, cost_usd: '0.0000',
+      role: schedule.run.role, repo: schedule.run.repos?.[0]?.url ?? schedule.run.repo, epoch: 0, attempt: 0, cost_usd: '0.0000',
       input_tokens: 0, output_tokens: 0, num_turns: 0, depth: 0, schedule_id: schedule.id,
       created_by: 'maria-admin', created_via: 'api', created_at: iso(0),
     }
@@ -654,6 +708,15 @@ const routes = [
       updated_by: 'maria-admin', updated_at: iso(0),
     }
     return runRetention
+  }],
+  ['GET', /^\/api\/v1\/run-limits$/, () => runLimits],
+  ['PUT', /^\/api\/v1\/run-limits$/, (_m, _url, _fx, payload) => {
+    const n = payload?.max_repos_per_run
+    if (!Number.isInteger(n) || n < 1 || n > runLimits.max_repos_per_run_ceiling) {
+      return invalid('max_repos_per_run', `max_repos_per_run is a whole number from 1 to ${runLimits.max_repos_per_run_ceiling}`)
+    }
+    runLimits = { ...runLimits, max_repos_per_run: n, source: 'database', updated_by: 'maria-admin', updated_at: iso(0) }
+    return runLimits
   }],
   ['GET', /^\/api\/v1\/integrations\/mattermost$/, () => mattermost],
   ['PUT', /^\/api\/v1\/integrations\/mattermost$/, (_m, _url, _fx, payload) => {

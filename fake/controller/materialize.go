@@ -329,6 +329,12 @@ func (c *Controller) containerEnv(state *runState) []corev1.EnvVar {
 	if spec.Repo.CloneDepth > 0 {
 		vals[runv1.EnvCloneDepth] = strconv.Itoa(int(spec.Repo.CloneDepth))
 	}
+	if hasExtraRepos(spec) {
+		encoded, err := json.Marshal(spec.ExtraRepos)
+		if err == nil {
+			vals[runv1.EnvExtraRepos] = string(encoded)
+		}
+	}
 	if len(state.lease.CompletedPhases) > 0 {
 		names := make([]string, 0, len(state.lease.CompletedPhases))
 		for _, phase := range state.lease.CompletedPhases {
@@ -395,6 +401,12 @@ func artifactMode(lease clusterv1.Lease) runv1.ArtifactMode {
 	return runv1.ArtifactModeRelay
 }
 
+// hasExtraRepos is whether a run gets EnvExtraRepos and the volume at
+// MountRepos, by the rule the real launcher applies.
+func hasExtraRepos(spec runv1.RenderedRunSpec) bool {
+	return spec.Repo.URL != "" && len(spec.ExtraRepos) > 0
+}
+
 func volumeMounts(lease clusterv1.Lease) []corev1.VolumeMount {
 	mounts := []corev1.VolumeMount{
 		{Name: "workspace", MountPath: runv1.MountWorkspace},
@@ -402,6 +414,9 @@ func volumeMounts(lease clusterv1.Lease) []corev1.VolumeMount {
 		{Name: "home", MountPath: runv1.HomeDir},
 		{Name: "tmp", MountPath: "/tmp"},
 		{Name: "secrets", MountPath: runv1.MountSecrets, ReadOnly: true},
+	}
+	if hasExtraRepos(lease.Spec) {
+		mounts = append(mounts, corev1.VolumeMount{Name: "repos", MountPath: runv1.MountRepos})
 	}
 	if len(lease.RoleConfig) > 0 {
 		mounts = append(mounts, corev1.VolumeMount{
@@ -423,6 +438,10 @@ func (c *Controller) volumes(state *runState, secretMode int32) []corev1.Volume 
 			SecretName:  agentrunv1alpha1.SecretName(state.runID),
 			DefaultMode: &secretMode,
 		}}},
+	}
+	if hasExtraRepos(state.lease.Spec) {
+		vols = append(vols, corev1.Volume{Name: "repos",
+			VolumeSource: corev1.VolumeSource{EmptyDir: &corev1.EmptyDirVolumeSource{}}})
 	}
 	if len(state.lease.RoleConfig) > 0 {
 		vols = append(vols, corev1.Volume{Name: "role", VolumeSource: corev1.VolumeSource{

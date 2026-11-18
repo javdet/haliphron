@@ -10,6 +10,7 @@
 package launcher
 
 import (
+	"encoding/json"
 	"fmt"
 	"sort"
 	"strconv"
@@ -60,6 +61,7 @@ const (
 // cannot desynchronise the two halves.
 const (
 	volWorkspace  = "workspace"
+	volRepos      = "repos"
 	volRunPrivate = "run-private"
 	volHome       = "home"
 	volTmp        = "tmp"
@@ -257,6 +259,11 @@ func (b Builder) env(cr *agentrunv1alpha1.AgentRun, attempt int32, completedPhas
 		if spec.Repo.CloneDepth > 0 {
 			vals[runv1.EnvCloneDepth] = strconv.Itoa(int(spec.Repo.CloneDepth))
 		}
+		// One variable for the whole list, as the spec has it: the image
+		// parses one document rather than reassembling numbered variables.
+		if extras := ExtraReposEnv(spec); extras != "" {
+			vals[runv1.EnvExtraRepos] = extras
+		}
 	}
 	if o := spec.Observability; o != nil {
 		setIf(vals, runv1.EnvOTLPEndpoint, o.OTLPEndpoint)
@@ -339,7 +346,28 @@ func setIf(vals map[string]string, key, value string) {
 	}
 }
 
-// volumeMounts: four writable emptyDirs and two read-only mounts. The Secret is
+// ExtraReposEnv is EnvExtraRepos for a spec: its extraRepos as JSON, or empty
+// for a run without them. Exported for the Docker host controller, which sets
+// the same variable from the same spec.
+func ExtraReposEnv(spec runv1.RenderedRunSpec) string {
+	if len(spec.ExtraRepos) == 0 {
+		return ""
+	}
+	encoded, err := json.Marshal(spec.ExtraRepos)
+	if err != nil {
+		// A slice of plain structs does not fail to encode.
+		return ""
+	}
+	return string(encoded)
+}
+
+// HasExtraRepos is whether a spec needs runv1.MountRepos.
+func HasExtraRepos(spec runv1.RenderedRunSpec) bool {
+	return spec.Repo.URL != "" && len(spec.ExtraRepos) > 0
+}
+
+// volumeMounts: four writable emptyDirs and two read-only mounts, and a fifth
+// emptyDir at MountRepos for a run with extraRepos. The Secret is
 // a volume rather than envFrom because its keys — git-token, mcp.json,
 // presigned.json — are not valid environment variable names, and envFrom skips
 // such keys silently. The pod would start with no token, no MCP configuration
@@ -356,6 +384,12 @@ func volumeMounts(cr *agentrunv1alpha1.AgentRun) []corev1.VolumeMount {
 		{Name: volHome, MountPath: runv1.HomeDir},
 		{Name: volTmp, MountPath: "/tmp"},
 		{Name: volSecrets, MountPath: runv1.MountSecrets, ReadOnly: true},
+	}
+	if HasExtraRepos(cr.Spec.RenderedRunSpec) {
+		// Only when there is something to clone into it: every other pod
+		// keeps the spec it always had, and a run with nothing under /repos
+		// has no writable directory there for anything to put things in.
+		mounts = append(mounts, corev1.VolumeMount{Name: volRepos, MountPath: runv1.MountRepos})
 	}
 	if cr.Spec.Materials.ConfigMapName != "" {
 		mounts = append(mounts, corev1.VolumeMount{
@@ -378,6 +412,9 @@ func volumes(cr *agentrunv1alpha1.AgentRun) []corev1.Volume {
 				DefaultMode: &mode,
 			},
 		}},
+	}
+	if HasExtraRepos(cr.Spec.RenderedRunSpec) {
+		vols = append(vols, emptyDir(volRepos))
 	}
 	if name := cr.Spec.Materials.ConfigMapName; name != "" {
 		vols = append(vols, corev1.Volume{Name: volRole, VolumeSource: corev1.VolumeSource{

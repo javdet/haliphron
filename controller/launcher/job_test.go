@@ -1,6 +1,7 @@
 package launcher
 
 import (
+	"encoding/json"
 	"strings"
 	"testing"
 
@@ -404,4 +405,69 @@ func errorAs(err error, target **InvalidFieldError) bool {
 		err = u.Unwrap()
 	}
 	return false
+}
+
+// TestExtraRepositoriesReachThePodAsOneVariable. The image parses one document
+// rather than reassembling numbered variables, and the extra repositories need
+// a writable directory beside the workspace that no other pod is given.
+func TestExtraRepositoriesReachThePodAsOneVariable(t *testing.T) {
+	plain := build(t, testRun(), 1)
+	for _, v := range plain.Containers[0].Env {
+		if v.Name == runv1.EnvExtraRepos {
+			t.Fatal("a run without extra repositories was given the variable")
+		}
+	}
+	for _, m := range plain.Containers[0].VolumeMounts {
+		if m.MountPath == runv1.MountRepos {
+			t.Fatal("a run without extra repositories was given the repos volume")
+		}
+	}
+
+	cr := testRun()
+	cr.Spec.ExtraRepos = []runv1.ExtraRepoSpec{
+		{URL: "https://github.com/acme/lib", Provider: runv1.GitProviderGitHub, Path: "lib", CloneDepth: 1},
+		{URL: "https://gitlab.example.com/ops/infra", Provider: runv1.GitProviderGitLab, BaseBranch: "release", Path: "infra"},
+	}
+	spec := build(t, cr, 1)
+	container := spec.Containers[0]
+
+	var value string
+	count := 0
+	for _, v := range container.Env {
+		if v.Name == runv1.EnvExtraRepos {
+			value, count = v.Value, count+1
+			if v.ValueFrom != nil {
+				t.Error("the variable is not a literal; nothing in it is secret")
+			}
+		}
+	}
+	if count != 1 {
+		t.Fatalf("%s set %d times, want once", runv1.EnvExtraRepos, count)
+	}
+	var decoded []runv1.ExtraRepoSpec
+	if err := json.Unmarshal([]byte(value), &decoded); err != nil {
+		t.Fatalf("the variable is not the JSON array the image reads: %v (%s)", err, value)
+	}
+	if len(decoded) != 2 || decoded[1].Path != "infra" || decoded[1].BaseBranch != "release" || decoded[0].CloneDepth != 1 {
+		t.Errorf("the variable lost something: %+v", decoded)
+	}
+
+	var mount *corev1.VolumeMount
+	for i := range container.VolumeMounts {
+		if container.VolumeMounts[i].MountPath == runv1.MountRepos {
+			mount = &container.VolumeMounts[i]
+		}
+	}
+	if mount == nil || mount.ReadOnly {
+		t.Fatalf("%s is not mounted writable", runv1.MountRepos)
+	}
+	for _, vol := range spec.Volumes {
+		if vol.Name == mount.Name {
+			if vol.EmptyDir == nil {
+				t.Errorf("the repos volume is not an emptyDir: %+v", vol)
+			}
+			return
+		}
+	}
+	t.Fatal("the repos mount has no volume")
 }

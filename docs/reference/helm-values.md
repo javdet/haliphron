@@ -415,7 +415,7 @@ is met.
 | `cluster.name` | `""` | required |
 | `cluster.labels` | `{}` | placement facts, matched by a role's `clusterSelector` |
 | `cluster.capacitySlots` | `8` | concurrent runs; maximum 256 |
-| `cluster.runtimes` | `[claude-code, codex]` | |
+| `cluster.runtimes` | `[claude-code, codex, opencode]` | |
 | `identity.secretName` | `haliphron-cluster-identity` | holds the Ed25519 pair |
 
 ### Backend connection

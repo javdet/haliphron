@@ -410,6 +410,10 @@ Requirements, mandatory to check in code review on both sides:
    never logged at any level, never a metric label, never a span attribute, and
    the names stay out of the CR — the manifest goes into the per-run Secret.
 
+A run with `spec.extraRepos` also carries `git-tokens.json` in `secrets`: one
+token per host its repositories are on, keyed by host, beside `git-token` for
+the working repository. It is handled exactly like `git-token`.
+
 The git token is hour-long and scoped to one repository (section 14 of the
 architecture). It is the main compensating control in the absence of egress
 filtering, and it is also what makes points 1–3 acceptable: the cost of a logging
@@ -474,6 +478,28 @@ The rules:
 
 Points 2 and 3 cost one line of code each and remove a whole class of upgrade
 failures. They are skipped just as regularly.
+
+### Features: what an older controller would silently drop
+
+Point 2 has a cost on the controller's side: a lease field an older controller
+does not know is a field it ignores, and some fields cannot be ignored without
+doing the wrong work while reporting success. Those are gated. A controller
+lists, on **every** `LeaseRequest`, the `features` it carries out, and the
+backend issues a run that needs one only to a poll that declares it. A run on a
+cluster whose controller does not declare it **waits in Queued** until one does
+(an upgrade of that cluster's controller); nothing fails.
+
+| Feature | Needed by | What the controller does |
+|---|---|---|
+| `extraRepos` | a run with `spec.extraRepos` | sets `HALIPHRON_EXTRA_REPOS` from it and mounts a writable `/repos` (agent runtime contract §2) |
+
+A capability list rather than a version comparison: development builds report a
+placeholder version, and a feature is the one thing the backend actually needs
+to know. Unknown feature names are ignored by the backend.
+
+The report side needs no gate. `extraRepos` in a `CompletionReport` is an
+additive field: the backend merges it into the run by `path`, field by field, so
+a later attempt without a pull request keeps the one an earlier attempt opened.
 
 ### One protocol, two runtimes: `runtimeKind`
 

@@ -264,3 +264,70 @@ func TestTheCeilingsBoundWhatOneRunWillFetch(t *testing.T) {
 		t.Errorf("%d plugins were accepted", len(lots.Enabled))
 	}
 }
+
+func TestAnOpenCodePluginIsARegistryOrGitPackageAndNothingElse(t *testing.T) {
+	t.Parallel()
+
+	good := []string{
+		"opencode-wakatime",
+		"opencode-wakatime@1.2.0",
+		"@acme/opencode-plugin",
+		"@acme/opencode-plugin@^2.1",
+		"github:acme/opencode-plugin",
+		"github:acme/opencode-plugin#v1.0.0",
+		"git+https://gitlab.example.com/group/sub/plugin#main",
+	}
+	for _, spec := range good {
+		if _, err := runv1.OpenCodePlugin(spec); err != nil {
+			t.Errorf("OpenCodePlugin(%q) = %v, want accepted", spec, err)
+		}
+	}
+
+	bad := map[string]string{
+		"":                                 "the empty spec",
+		"./plugins/mine":                   "a local path, which only this process may name",
+		"/opt/plugin":                      "an absolute path",
+		"file:../x":                        "a file: spec",
+		"https://example.com/plugin.tgz":   "a tarball fetched from anywhere",
+		"git+ssh://git@github.com/a/b":     "ssh, which the pod has no key for",
+		"--registry=https://evil.example":  "a spec that reads as a flag",
+		"Opencode-Plugin":                  "an upper-case npm name, which npm refuses",
+		"opencode-plugin@":                 "an @ with no version",
+		"opencode plugin":                  "a space, which splits the argument",
+		"github:acme/../etc":               "a traversal",
+		"github:acme/opencode-plugin#..":   "a ref that means something else",
+		"opencode-plugin@1.0.0 || rm -rf /": "whitespace in the version",
+	}
+	for spec, why := range bad {
+		if got, err := runv1.OpenCodePlugin(spec); err == nil {
+			t.Errorf("OpenCodePlugin(%q) = %q, want refused: %s", spec, got, why)
+		}
+	}
+}
+
+func TestARolesOpenCodeListIsValidatedAndNeedsNoMarketplace(t *testing.T) {
+	t.Parallel()
+
+	spec := runv1.PluginSpec{OpenCode: []string{" opencode-wakatime@1.2.0 "}}
+	if field, err := runv1.ValidatePluginSpec(&spec); err != nil {
+		t.Fatalf("ValidatePluginSpec = %s: %v, want accepted", field, err)
+	}
+	if spec.OpenCode[0] != "opencode-wakatime@1.2.0" {
+		t.Errorf("the entry was not trimmed: %q", spec.OpenCode[0])
+	}
+	if spec.IsEmpty() {
+		t.Error("a spec with only opencode packages reports itself empty, and the plugins phase would skip it")
+	}
+
+	dup := runv1.PluginSpec{OpenCode: []string{"a-plugin", "a-plugin"}}
+	if field, err := runv1.ValidatePluginSpec(&dup); err == nil || field != "plugins.opencode[1]" {
+		t.Errorf("a package named twice: field %q, err %v; want plugins.opencode[1] refused", field, err)
+	}
+	many := runv1.PluginSpec{}
+	for i := 0; i <= runv1.MaxOpenCodePlugins; i++ {
+		many.OpenCode = append(many.OpenCode, fmt.Sprintf("plugin-%d", i))
+	}
+	if field, err := runv1.ValidatePluginSpec(&many); err == nil || field != "plugins.opencode" {
+		t.Errorf("%d packages: field %q, err %v; want plugins.opencode refused", len(many.OpenCode), field, err)
+	}
+}

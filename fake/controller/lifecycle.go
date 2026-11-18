@@ -53,6 +53,7 @@ func (c *Controller) Poll(ctx context.Context) ([]clusterv1.Lease, error) {
 	}
 	req := clusterv1.LeaseRequest{
 		FreeSlots: free, Runtimes: c.runtimes, WaitSeconds: 1, CapacitySlots: c.capacity,
+		Features: clusterv1.ControllerFeatures,
 	}
 	auth := c.authed()
 	cluster := c.clusterID

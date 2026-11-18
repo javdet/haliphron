@@ -76,6 +76,13 @@ type CompletionReport struct {
 
 	// +optional
 	Repo *RepoResult `json:"repo,omitempty"`
+	// ExtraRepos is what happened to each of the spec's extraRepos that got as
+	// far as being cloned, keyed by path. Repo stays the working repository's.
+	// Reported whatever the outcome, so a pull request opened in one
+	// repository is visible even on a run that failed to push another.
+	// +optional
+	// +kubebuilder:validation:MaxItems=31
+	ExtraRepos []ExtraRepoResult `json:"extraRepos,omitempty"`
 	// +optional
 	Usage *Usage `json:"usage,omitempty"`
 
@@ -139,6 +146,14 @@ type RepoResult struct {
 	// is one of the converging side effects that make a retry safe.
 	// +optional
 	PRAction PRAction `json:"prAction,omitempty"`
+}
+
+// ExtraRepoResult is RepoResult for one of the spec's extraRepos, named by the
+// path it was cloned into.
+type ExtraRepoResult struct {
+	// +kubebuilder:validation:MaxLength=64
+	Path       string `json:"path"`
+	RepoResult `json:",inline"`
 }
 
 // +kubebuilder:validation:Enum=created;updated;none

@@ -43,6 +43,7 @@ export interface RoleFormState {
   deny: string[]
   marketplaces: MarketplaceRow[]
   plugins: string[]
+  openCodePlugins: string[]
   trustRepositorySources: boolean
   mcpServers: McpServer[]
   env: { name: string; value: string }[]
@@ -60,7 +61,7 @@ export interface RoleFormState {
 
 /** The sub-keys the form renders, per nested object. */
 const KNOWN_TOOL_POLICY = ['allow', 'deny']
-const KNOWN_PLUGINS = ['marketplaces', 'enabled', 'trustRepositorySources']
+const KNOWN_PLUGINS = ['marketplaces', 'enabled', 'opencode', 'trustRepositorySources']
 
 function others(value: unknown, known: string[]): Record<string, unknown> {
   if (typeof value !== 'object' || value === null || Array.isArray(value)) return {}
@@ -85,6 +86,7 @@ export function split(spec: RoleSpec | undefined): RoleFormState {
     deny: s.toolPolicy?.deny ?? [],
     marketplaces: (s.plugins?.marketplaces ?? []).map(marketplaceIn),
     plugins: s.plugins?.enabled ?? [],
+    openCodePlugins: s.plugins?.opencode ?? [],
     // Unset means true. The default is the product decision and the form must
     // not turn "the role never said" into "the role said no".
     trustRepositorySources: s.plugins?.trustRepositorySources ?? true,
@@ -137,6 +139,7 @@ export function merge(form: RoleFormState): RoleSpec {
     ...form.restPlugins,
     ...(marketplaces.length ? { marketplaces } : {}),
     ...(form.plugins.length ? { enabled: form.plugins } : {}),
+    ...(form.openCodePlugins.length ? { opencode: form.openCodePlugins } : {}),
     // Only sent when it is not the default, so a role that never had an opinion
     // does not acquire one by being opened in this form.
     ...(form.trustRepositorySources ? {} : { trustRepositorySources: false }),
@@ -186,11 +189,23 @@ function systemPromptError(prompt: string): string | undefined {
  * Mirrors api/run/v1.AgentEnvName: the names the entrypoint sets itself, which a
  * role may not replace in the agent's environment.
  */
-const RESERVED_ENV_PREFIXES = ['ANTHROPIC_', 'CLAUDE_', 'CODEX_', 'OPENAI_', 'HALIPHRON_', 'GIT_']
+const RESERVED_ENV_PREFIXES = ['ANTHROPIC_', 'CLAUDE_', 'CODEX_', 'OPENAI_', 'OPENCODE_', 'HALIPHRON_', 'GIT_']
 const RESERVED_ENV_NAMES = [
   'PATH', 'HOME', 'USER', 'SHELL', 'TMPDIR', 'GH_TOKEN', 'GL_TOKEN', 'GITHUB_TOKEN', 'GITLAB_TOKEN',
   'LD_PRELOAD', 'LD_LIBRARY_PATH', 'NODE_OPTIONS',
 ]
+
+// A mirror of runv1.OpenCodePlugin, so a package that could not be saved is not
+// sent: an npm name with an optional version, or a github: or git+https: package.
+const OPENCODE_NPM = /^(@[a-z0-9][a-z0-9._-]*\/)?[a-z0-9][a-z0-9._-]*(@[A-Za-z0-9.^~<>=*+|-]+)?$/
+const OPENCODE_GIT = /^(github:|git\+https:\/\/[A-Za-z0-9]([A-Za-z0-9.-]*[A-Za-z0-9])?(:[0-9]{1,5})?\/)[A-Za-z0-9][A-Za-z0-9._-]*(\/[A-Za-z0-9][A-Za-z0-9._-]*)+(#[A-Za-z0-9][A-Za-z0-9._/-]*)?$/
+
+function openCodePackageError(entry: string): string | undefined {
+  if (entry.startsWith('-')) return 'a package cannot start with a dash'
+  if (entry.includes('..')) return `${entry} is not a usable package`
+  if (OPENCODE_NPM.test(entry) || OPENCODE_GIT.test(entry)) return undefined
+  return 'an npm package (name, @scope/name, optionally @version) or github:owner/repo#ref'
+}
 
 export function agentEnvNameError(name: string): string | undefined {
   const n = name.trim()
@@ -290,6 +305,18 @@ export function RoleForm({
           update={updatePlugins}
         />
 
+        <Field
+          label="OpenCode packages"
+          hint="opencode runs only. Its own plugins, installed with opencode plugin add; the marketplace plugins above reach opencode too, as skills, agents, commands and MCP servers."
+        >
+          <StringList
+            value={form.openCodePlugins}
+            onChange={(openCodePlugins) => set({ openCodePlugins })}
+            placeholder="opencode-wakatime@1.2.0, github:owner/repo#v1…"
+            validate={openCodePackageError}
+          />
+        </Field>
+
         <label className={form.trustRepositorySources ? 'check on' : 'check'}>
           <input
             type="checkbox"
@@ -300,8 +327,10 @@ export function RoleForm({
         </label>
         <span className="hint">
           When on, a repository's own <span className="mono">.claude/settings.&lt;role&gt;.json</span>{' '}
-          overrides the list above. That is convenient, and it lets a repository decide which code
-          runs beside the agent — turn it off for roles that run against code you do not control.
+          overrides the list above, and an opencode run loads the repository's{' '}
+          <span className="mono">opencode.json</span> and <span className="mono">.opencode/</span>. That
+          is convenient, and it lets a repository decide which code runs beside the agent — turn it off
+          for roles that run against code you do not control.
         </span>
       </Section>
 

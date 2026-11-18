@@ -1,13 +1,20 @@
 import { useEffect, useState } from 'react'
-import { usePutRunRetention, usePutTokenRetention, useRunRetention, useTokenRetention } from '../api/hooks'
+import {
+  usePutRunLimits,
+  usePutRunRetention,
+  usePutTokenRetention,
+  useRunLimits,
+  useRunRetention,
+  useTokenRetention,
+} from '../api/hooks'
 import { Card, ErrorBanner, Field, Spinner, Time } from '../components/ui'
 import type { RunRetention, TokenRetention } from '../api/types'
 import { ApiTokensCard } from '../components/ApiTokens'
 
 /**
  * Installation-wide settings an operator changes from here rather than from the
- * deployment: how long failed runs are kept, and how long ended per-run tokens
- * are.
+ * deployment: how long failed runs are kept, how long ended per-run tokens
+ * are, and how many repositories one run may name.
  */
 
 const HOUR = 3600
@@ -269,6 +276,95 @@ function TokenRetentionCard() {
   )
 }
 
+function RunLimitsCard() {
+  const current = useRunLimits()
+  const put = usePutRunLimits()
+  const [amount, setAmount] = useState<string | undefined>()
+  const [saved, setSaved] = useState(false)
+
+  useEffect(() => {
+    if (current.data && amount === undefined) setAmount(String(current.data.max_repos_per_run))
+  }, [current.data, amount])
+
+  const l = current.data
+  if (!l || amount === undefined) {
+    return (
+      <Card title="Run limits">
+        <ErrorBanner error={current.error} what="read the run limits" />
+        {current.isLoading && <Spinner />}
+      </Card>
+    )
+  }
+
+  const value = Number(amount)
+  const ceiling = l.max_repos_per_run_ceiling
+  const problem =
+    !amount.trim() || !Number.isInteger(value) || value < 1 || value > ceiling
+      ? `A whole number from 1 to ${ceiling}.`
+      : undefined
+  const changed = value !== l.max_repos_per_run
+
+  const save = () =>
+    put.mutate(value, {
+      onSuccess: (next) => {
+        setAmount(String(next.max_repos_per_run))
+        setSaved(true)
+      },
+    })
+
+  return (
+    <Card title="Run limits" actions={<span className="badge">{l.source === 'default' ? 'default' : 'saved'}</span>}>
+      <div className="stack">
+        <ErrorBanner error={put.error} what="save the run limits" />
+        {saved && !put.error && (
+          <div className="banner good" role="status">
+            <div className="small">Saved. Runs submitted from now on are held to it; runs already admitted are not.</div>
+          </div>
+        )}
+
+        <Field
+          label="Max repositories per run"
+          error={problem}
+          hint={`How many repositories one run, schedule or alert receiver may name, the working repository included. 1 allows only the working repository. At most ${ceiling}.`}
+        >
+          <input
+            type="number"
+            min={1}
+            max={ceiling}
+            step={1}
+            value={amount}
+            style={{ maxWidth: 120 }}
+            onChange={(e) => {
+              setSaved(false)
+              setAmount(e.target.value)
+            }}
+          />
+        </Field>
+
+        <div className="row" style={{ justifyContent: 'space-between' }}>
+          <span className="small muted">
+            {l.updated_at ? (
+              <>
+                Last saved by {l.updated_by} <Time at={l.updated_at} />
+              </>
+            ) : (
+              `Never saved: the default of ${l.default_max_repos_per_run} applies.`
+            )}
+          </span>
+          <button
+            className="primary"
+            onClick={save}
+            // The default can be saved unchanged, to pin it.
+            disabled={!!problem || (!changed && l.source === 'database') || put.isPending}
+          >
+            {put.isPending ? 'Saving…' : 'Save'}
+          </button>
+        </div>
+      </div>
+    </Card>
+  )
+}
+
 export function SettingsPage() {
   return (
     <>
@@ -281,6 +377,7 @@ export function SettingsPage() {
         <ApiTokensCard />
         <RunRetentionCard />
         <TokenRetentionCard />
+        <RunLimitsCard />
       </div>
     </>
   )

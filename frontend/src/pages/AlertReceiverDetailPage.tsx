@@ -12,6 +12,7 @@ import {
 } from '../api/hooks'
 import type { AlertReceiverWithToken } from '../api/types'
 import { StatusBadge } from '../components/StatusBadge'
+import { extraRepoCount, TemplateRepos } from '../components/RunSpecFields'
 import { Card, Dialog, Empty, ErrorBanner, Spinner, Time, elapsed, money } from '../components/ui'
 import {
   AlertReceiverDialog,
@@ -160,8 +161,10 @@ export function AlertReceiverDetailPage() {
                   {r.run.agent || <span className="faint">default</span>}{' '}
                   {r.run.model && <span className="faint">{r.run.model}</span>}
                 </dd>
-                <dt>Repository</dt>
-                <dd className="small">{r.run.repo || <span className="faint">none</span>}</dd>
+                <dt>{extraRepoCount(r.run) > 0 ? 'Repositories' : 'Repository'}</dt>
+                <dd className="small">
+                  <TemplateRepos template={r.run} />
+                </dd>
                 <dt>Pull request</dt>
                 <dd>{r.run.create_pr ? 'opened when it finishes' : <span className="faint">no</span>}</dd>
                 {r.run.max_cost_usd && (

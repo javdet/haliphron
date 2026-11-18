@@ -303,7 +303,7 @@ curl -s localhost:8080/api/v1/clusters -H "Authorization: Bearer $TOKEN"
       "status": "Active",
       "agent_namespace": "haliphron-agents",
       "controller_version": "0.1.0",
-      "runtimes": ["claude-code", "codex"],
+      "runtimes": ["claude-code", "codex", "opencode"],
       "capacity_slots": 8,
       "free_slots": 8,
       "quota_exhausted": false,

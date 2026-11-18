@@ -64,6 +64,10 @@ type RunRequest struct {
 	TargetBranch string
 	CreatePR     bool
 	CloneDepth   int32
+	// ExtraRepos become HALIPHRON_EXTRA_REPOS, as the controller renders
+	// them from the spec. The tokens for their hosts are the test's to put in
+	// Secrets under SecretKeyGitTokens, as the backend would.
+	ExtraRepos []runv1.ExtraRepoSpec
 
 	TimeoutSeconds  int32
 	GraceSeconds    int32
@@ -420,6 +424,13 @@ func (c *ControlPlane) renderEnv(req RunRequest, p *Prepared, promptDigest strin
 	}
 	if req.CloneDepth > 0 {
 		env[runv1.EnvCloneDepth] = strconv.Itoa(int(req.CloneDepth))
+	}
+	if len(req.ExtraRepos) > 0 && req.RepoURL != "" {
+		encoded, err := json.Marshal(req.ExtraRepos)
+		if err != nil {
+			panic("controlplane: extra repositories do not marshal: " + err.Error())
+		}
+		env[runv1.EnvExtraRepos] = string(encoded)
 	}
 	if req.CreatePR {
 		env[runv1.EnvCreatePR] = "true"

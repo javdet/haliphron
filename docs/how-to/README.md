@@ -32,6 +32,9 @@ What callers do, whether that caller is a person, a script or another agent.
   over REST.
 - [Call Haliphron from another agent over MCP](call-haliphron-over-mcp.md) —
   for IDEs, agents and automation platforms, including runs that start runs.
+- [Run an agent across several repositories](run-across-several-repositories.md)
+  — one run, a working repository and others beside it, a pull request in
+  each.
 - [Define a role](define-a-role.md) — reusable configuration, so the same
   settings stop travelling with every request.
 - [Give runs a git token and a model key](provide-run-credentials.md) — the

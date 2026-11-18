@@ -51,6 +51,7 @@ cluster:
   runtimes:
     - claude-code
     - codex
+    - opencode
 
 # -----------------------------------------------------------------------------
 # The control plane

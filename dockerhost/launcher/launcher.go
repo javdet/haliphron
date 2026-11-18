@@ -93,13 +93,19 @@ var volumes = []struct{ suffix, target string }{
 	{"tmp", mountTmp},
 }
 
-// VolumeNames lists the four volumes of one attempt.
+// reposVolume is the fifth volume, at MountRepos, created only for a run with
+// extraRepos.
+const reposVolume = "repos"
+
+// VolumeNames lists every volume one attempt may have: the four every attempt
+// mounts, and the repos volume an attempt with extraRepos adds. Cleanup removes
+// them all and treats the one that was never created as already gone.
 func VolumeNames(runID runv1.ULID, epoch int64, attempt int32) []string {
-	out := make([]string, 0, len(volumes))
+	out := make([]string, 0, len(volumes)+1)
 	for _, v := range volumes {
 		out = append(out, VolumeName(runID, epoch, attempt, v.suffix))
 	}
-	return out
+	return append(out, VolumeName(runID, epoch, attempt, reposVolume))
 }
 
 // Labels is the label set of one attempt's container and volumes.
@@ -234,8 +240,13 @@ func Container(r *state.Run, attempt int32, completedPhases []runv1.RuntimePhase
 		pids = 4096
 	}
 
-	mounts := make([]docker.Mount, 0, len(volumes)+2)
-	for _, v := range volumes {
+	attemptVolumes := volumes
+	if k8slauncher.HasExtraRepos(r.Spec) {
+		attemptVolumes = append(append(attemptVolumes[:0:0], volumes...),
+			struct{ suffix, target string }{reposVolume, runv1.MountRepos})
+	}
+	mounts := make([]docker.Mount, 0, len(attemptVolumes)+2)
+	for _, v := range attemptVolumes {
 		mounts = append(mounts, docker.Mount{
 			Type:   "volume",
 			Source: VolumeName(r.RunID, r.Epoch, attempt, v.suffix),

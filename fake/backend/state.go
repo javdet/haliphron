@@ -130,7 +130,11 @@ func (b *Backend) headroom(c *cluster) int {
 	return capacity
 }
 
-func (b *Backend) issue(c *cluster, limit int, runtimes []runv1.AgentType) []clusterv1.Lease {
+// issue hands out queued work. features is what the poll declared: a run with
+// extraRepos goes only to a poll that declared clusterv1.FeatureExtraRepos, as
+// the real backend's lease statement has it.
+func (b *Backend) issue(c *cluster, limit int, runtimes []runv1.AgentType, features []clusterv1.Feature) []clusterv1.Lease {
+	extraRepos := clusterv1.LeaseRequest{Features: features}.HasFeature(clusterv1.FeatureExtraRepos)
 	if limit <= 0 || c.quotaExhausted {
 		return nil
 	}
@@ -143,7 +147,8 @@ func (b *Backend) issue(c *cluster, limit int, runtimes []runv1.AgentType) []clu
 		if !ok || r.status != clusterv1.StatusQueued {
 			continue
 		}
-		if len(out) >= limit || r.excluded[c.id] || !runtimeAllowed(r.spec.Agent, runtimes, c.runtimes) {
+		if len(out) >= limit || r.excluded[c.id] || !runtimeAllowed(r.spec.Agent, runtimes, c.runtimes) ||
+			(len(r.spec.ExtraRepos) > 0 && !extraRepos) {
 			remaining = append(remaining, id)
 			continue
 		}

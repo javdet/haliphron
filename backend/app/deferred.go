@@ -117,12 +117,21 @@ func (s *Service) ScheduleAgent(ctx context.Context, parent *store.Run, in Defer
 		waits = live
 	}
 
+	var spec runv1.RenderedRunSpec
+	if err := json.Unmarshal(current.Spec, &spec); err != nil {
+		return DeferredRun{}, fmt.Errorf("decode the spec of %s: %w", current.ID, err)
+	}
+	extras := run.ExtraReposOf(spec.ExtraRepos)
+
 	req := run.SubmitRequest{
 		Prompt:         in.Prompt,
 		Model:          in.Model,
 		TimeoutSeconds: in.TimeoutSeconds,
 		Role:           current.Role,
 		RepoURL:        current.RepoURL,
+		// The same repositories as the run it continues: a continuation
+		// that lost them would finish the work in one of several.
+		ExtraRepos: extras,
 		// A continuation inherits its parent's ceiling, as any child does: an
 		// agent that could defer with a fresh budget would have none.
 		MaxCostUSD:  current.MaxCostUSD,

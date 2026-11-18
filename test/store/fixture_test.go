@@ -109,7 +109,7 @@ const minimalSpec = `{
 // got anything.
 func leaseOne(t *testing.T, conn *sql.DB, clusterID string, ackSecs, ttlSecs int) (runID string, epoch int64, ok bool) {
 	t.Helper()
-	rows, err := conn.Query(leaseSQL(t), clusterID, []string{"claude-code"}, 1, ackSecs, ttlSecs)
+	rows, err := conn.Query(leaseSQL(t), clusterID, []string{"claude-code"}, 1, ackSecs, ttlSecs, true)
 	if err != nil {
 		t.Fatalf("lease: %v", err)
 	}

@@ -155,7 +155,16 @@ func (s *Service) prepare(ctx context.Context, req run.SubmitRequest) (runv1.ULI
 		return "", runv1.RenderedRunSpec{}, err
 	}
 
-	spec, err := run.Render(id, req, role, s.defaults)
+	// Read only for a request that names extra repositories: every other
+	// admission is unaffected by the limit, and should not take a store read
+	// it does not need, nor fail on one.
+	def := s.defaults
+	if len(req.ExtraRepos) > 0 {
+		if def, err = s.admissionDefaults(ctx); err != nil {
+			return "", runv1.RenderedRunSpec{}, err
+		}
+	}
+	spec, err := run.Render(id, req, role, def)
 	if err != nil {
 		return "", runv1.RenderedRunSpec{}, err
 	}
@@ -264,7 +273,7 @@ func (s *Service) submit(ctx context.Context, req run.SubmitRequest, links submi
 		RunID: id, ClusterID: cluster,
 		Payload: map[string]any{
 			"agent": spec.Agent, "model": spec.Model, "role": req.Role,
-			"repo": spec.Repo.URL, "via": req.CreatedVia, "parent": string(req.ParentRunID),
+			"repo": spec.Repo.URL, "extra_repos": len(spec.ExtraRepos), "via": req.CreatedVia, "parent": string(req.ParentRunID),
 			"schedule": string(links.schedule), "deferred": string(links.deferred),
 			"alert_receiver": string(links.alertReceiver), "inputs": len(inputs),
 		},

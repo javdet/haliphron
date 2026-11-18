@@ -90,7 +90,7 @@ are inherited by every child process, including the agent itself.
 | `HALIPHRON_CLUSTER_ID` | no | controller | For logs and for investigating incidents across several clusters |
 | `HALIPHRON_CALLBACK_URL` | yes | controller | Where to send the report. Cluster-local; the backend cannot know it |
 | `HALIPHRON_GRACE_SECONDS` | yes | controller | The pod's `terminationGracePeriodSeconds`. Provided so the entrypoint can plan its shutdown rather than guess how long it has between SIGTERM and SIGKILL |
-| `HALIPHRON_AGENT` | yes | `spec.agent` | `claude-code` or `codex`; the runtime switch |
+| `HALIPHRON_AGENT` | yes | `spec.agent` | `claude-code`, `codex` or `opencode`; the runtime switch |
 | `HALIPHRON_MODEL` | yes | `spec.model` | A provider-qualified identifier |
 | `HALIPHRON_ROLE` | no | `spec.role` | The role name; determines which files the chain in section 7 looks for |
 | `HALIPHRON_TIMEOUT_SECONDS` | yes | `spec.runtime.timeoutSeconds` | The budget for the **`run` phase**, not for the whole pod |
@@ -106,6 +106,7 @@ are inherited by every child process, including the agent itself.
 | `HALIPHRON_SUBMODULES` | no | `spec.repo.submodules` | |
 | `HALIPHRON_LFS` | no | `spec.repo.lfs` | |
 | `HALIPHRON_CREATE_PR` | no | `spec.repo.createPR` | |
+| `HALIPHRON_EXTRA_REPOS` | no | `spec.extraRepos` | A JSON array of `{url, provider, baseBranch, path, cloneDepth}`, absent for a run with one repository or none. Each is cloned to `/repos/<path>` by the `clone-extra` phase and goes through commit, push and pr like the working repository (section 12). Set only with `HALIPHRON_REPO_URL`. An entry with no url, a path outside `[A-Za-z0-9][A-Za-z0-9._-]{0,63}`, a repeated path or an unknown provider is exit 30, `MalformedConfiguration` |
 | `HALIPHRON_PROMPT` | yes | the per-run Secret, key `prompt` | **The task.** Set through `valueFrom.secretKeyRef`, never as a literal: prompts carry customer context, and a secretKeyRef keeps the text out of the Job's spec and out of `kubectl describe pod`. Bounded at 512 KiB by the backend at admission |
 | `HALIPHRON_PROMPT_SHA256` | yes | `spec.promptSHA256` | The digest of the value above. A mismatch means exit 30 |
 | `HALIPHRON_COMPLETED_PHASES` | no | `.status.completedPhases` | Comma-separated phases an earlier attempt of this run got through. Absent on a first attempt, which is a normal answer and not a failure |
@@ -123,11 +124,12 @@ Documentation that can drift from the code is not documentation, it is a
 hypothesis.
 
 Runtime-specific variables (`ANTHROPIC_*`, `OPENAI_*`, `CLAUDE_CONFIG_DIR`,
-`CODEX_HOME`) are set **by the entrypoint, not the controller** — from the
-secrets and from `HALIPHRON_MODEL`. Their names belong to the agent's CLI, and
-the controller has no business knowing that for codex the key is called
-`OPENAI_API_KEY`: tomorrow a third runtime with a fourth name appears, and what
-would have to change is the controller rather than the image.
+`CODEX_HOME`, `OPENCODE_*`) are set **by the entrypoint, not the controller** —
+from the secrets and from `HALIPHRON_MODEL`. Their names belong to the agent's
+CLI, and the controller has no business knowing that for codex the key is
+called `OPENAI_API_KEY`: when opencode arrived as the third runtime, with its
+configuration in a variable of its own, what changed was the image and not the
+controller.
 
 ### 2.2 Secret material as files, not variables
 
@@ -140,9 +142,10 @@ independent reasons, either of which would have sufficed.
 **Mechanical.** The Secret's keys are fixed by contract 1: `prompt`,
 `git-token`, `llm-api-key`, `llm-base-url` when the key belongs to a gateway,
 `mcp.json`, `callback-token`, `presigned.json` in object-store mode,
-`agent-env.json` when the role adds variables to the agent's environment, and
-`inputs.json` when files were sent with the request (section 2.4). All but the
-first are invalid environment variable names.
+`agent-env.json` when the role adds variables to the agent's environment,
+`inputs.json` when files were sent with the request (section 2.4), and
+`git-tokens.json` when the run has extra repositories. All but the first are
+invalid environment variable names.
 `envFrom` silently skips such keys, leaving an Event in the namespace — which
 means the pod starts with no git token, no MCP configuration and no credentials
 at all, and the first intelligible message about it is a clone that failed to
@@ -182,7 +185,7 @@ the variables come from the role and never from a run request.
 Two rules keep the exception from reaching anything else:
 
 - **Reserved names are refused on both sides.** A name starting `ANTHROPIC_`,
-  `CLAUDE_`, `CODEX_`, `OPENAI_`, `HALIPHRON_` or `GIT_`, or one of `PATH`,
+  `CLAUDE_`, `CODEX_`, `OPENAI_`, `OPENCODE_`, `HALIPHRON_` or `GIT_`, or one of `PATH`,
   `HOME`, `USER`, `SHELL`, `TMPDIR`, `GH_TOKEN`, `GL_TOKEN`, `GITHUB_TOKEN`,
   `GITLAB_TOKEN`, `LD_PRELOAD`, `LD_LIBRARY_PATH` and `NODE_OPTIONS`, is refused
   when the role is saved, and a file carrying one fails the pod with exit 30,
@@ -197,6 +200,20 @@ Two rules keep the exception from reaching anything else:
 
 The variables are appended after the runtime's own, and the log names them
 without their values.
+
+**`git-tokens.json`** is the git credential of a run with extra repositories: a
+JSON object of host (as git names it to a credential helper, `host[:port]`) to
+`{"provider", "token"}`, one entry per host of `HALIPHRON_REPO_URL` and
+`HALIPHRON_EXTRA_REPOS` the backend holds a token for. `git-token` is still
+written beside it with the working repository's token. The `auth` phase writes
+each token to a file of its own under `/haliphron/run/git-tokens/` (0400), and
+the credential helper answers **only the hosts of the run's own repositories**,
+each from its own file; a host in the file that no repository of the run is on
+gets no answer, and neither does anything else. The forge CLI of a pull request
+is given the token of its repository's host. Every token is redacted. A file
+that is not such an object, or that names a host with a quote, a newline or a
+slash in it, is exit 30, `MalformedSecret`. Two repositories on one host that
+need different tokens are not supported: git asks by host.
 
 ### 2.3 The prompt is the one exception, and it is a deliberate one
 
@@ -233,6 +250,7 @@ exchange for a system that starts a run without an object store.
 /workspace/.haliphron/output.json      ← written by the agent: the payload only
 /workspace/.haliphron/artifacts/       ← written by the agent: files that must be kept
 /workspace/.haliphron/inputs/          → written by the inputs phase: files sent with the request, 0444
+/repos/<path>/                       an extra repository, one per HALIPHRON_EXTRA_REPOS entry
 /haliphron/role/                     the role ConfigMap, read-only
 /haliphron/secrets/                  the run Secret, read-only, 0400
 /haliphron/run/                      the entrypoint's private state
@@ -254,11 +272,20 @@ is pointed at.** That is where the downloaded prompt, the accumulating log and
 the checkpoint live. A prompt injection that talks the agent into "rewriting its
 instructions" will rewrite a file nobody else reads.
 
+**The extra repositories are beside the workspace, never inside it.** A
+repository nested in the working tree is a second `src/main.go` for the agent
+to confuse with the first, a tree every recursive search walks, and a directory
+no CLI can be told is separately writable. `/repos` is a fifth emptyDir (a fifth
+named volume on a Docker host), mounted only when `HALIPHRON_EXTRA_REPOS` is
+set, so every other pod keeps the spec it always had.
+
 **There are exactly four writable directories** — `/workspace`,
-`/haliphron/run`, `/home/agent`, `/tmp` — and all four are emptyDir. The
+`/haliphron/run`, `/home/agent`, `/tmp` — and all four are emptyDir; a run with
+extra repositories has `/repos` as a fifth. The
 container root is **read-only** (R6). That is achievable rather than a pious
 wish, under one condition: every CLI cache is redirected into `$HOME` through
-`CLAUDE_CONFIG_DIR`, `CODEX_HOME`, `XDG_CACHE_HOME`, `npm_config_cache`. This is
+`CLAUDE_CONFIG_DIR`, `CODEX_HOME`, `OPENCODE_CONFIG_DIR`, `XDG_CACHE_HOME`,
+`XDG_DATA_HOME`, `npm_config_cache`. This is
 verified by running the image under `docker run --read-only` with three tmpfs
 mounts, not by argument — see the checklist in section 19.
 
@@ -326,7 +353,9 @@ agent cannot read, a download that failed — is still named, as *not
 available* with the reason, so the agent says it cannot see it instead of
 guessing what it showed. claude-code opens images and PDFs with its `Read`
 tool, and the block says so when the role denies it; codex is given each image
-with `--image` at start, and reads PDFs and text as files.
+with `--image` at start, and reads PDFs and text as files; opencode is given
+each image with `--file`, and reads PDFs and text with its `read` tool, which
+the role's `Read` denial reaches.
 
 ---
 
@@ -344,24 +373,31 @@ not logging.
 | 4 | `checkpoint` | Read `HALIPHRON_COMPLETED_PHASES`; absent is a normal answer | — |
 | 5 | `auth` | Model credentials, git credential helper, `gh`/`glab` | 30 |
 | 6 | `clone` | Clone, checkout base, create the target branch | 20 / 30 |
-| 7 | `inputs` | Fetch the files sent with the request from the controller into `.haliphron/inputs/`; absent manifest, or a resumed attempt that will not run the model, is a skip | 21 / 30 |
-| 8 | `role` | The resolution chain, intersected with the policy ceiling | 30 |
-| 9 | `plugins` | Register the role's marketplaces and install its plugins; best effort | — |
-| 10 | `mcp-prepare` | Render the MCP configuration for the runtime, secrets by reference | 30 |
-| 11 | `mcp-verify` | Check that the servers came up | 30 |
-| 12 | `run` | The agent CLI under a timeout, tee'd to the log and chunked upstream | 10 / 11 |
-| 13 | `parse` | Normalize the runtime's output into `result.md` and `usage` | 10 |
-| 14 | `output` | Wrap the agent's output in the envelope, validate against the node schema | 12 |
-| 15 | `persist` | Upload `result.md`, `output.json` and the log so far | 21 |
-| 16 | `commit` | Commit any leftover changes | 20 |
-| 17 | `push` | `push --force-with-lease` to the deterministic branch | 20 |
-| 18 | `pr` | create-or-update the PR/MR | 20 |
-| 19 | `finalize` | Upload the final log and `completion.json` | 21 |
-| 20 | `notify` | POST the report to the controller | — |
+| 7 | `clone-extra` | Clone each extra repository into `/repos/<path>` — at its depth, from its base branch or the remote's default — with the working repository's submodules and LFS, and check out the target branch in it; a run without extra repositories skips it | 20 / 30 |
+| 8 | `inputs` | Fetch the files sent with the request from the controller into `.haliphron/inputs/`; absent manifest, or a resumed attempt that will not run the model, is a skip | 21 / 30 |
+| 9 | `role` | The resolution chain, intersected with the policy ceiling | 30 |
+| 10 | `plugins` | Register the role's marketplaces and install its plugins; best effort | — |
+| 11 | `mcp-prepare` | Render the MCP configuration for the runtime, secrets by reference | 30 |
+| 12 | `mcp-verify` | Check that the servers came up | 30 |
+| 13 | `run` | The agent CLI under a timeout, tee'd to the log and chunked upstream | 10 / 11 |
+| 14 | `parse` | Normalize the runtime's output into `result.md` and `usage` | 10 |
+| 15 | `output` | Wrap the agent's output in the envelope, validate against the node schema | 12 |
+| 16 | `persist` | Upload `result.md`, `output.json` and the log so far | 21 |
+| 17 | `commit` | Commit any leftover changes, in every repository | 20 |
+| 18 | `push` | `push --force-with-lease` to the deterministic branch, from every repository with changes | 20 / 30 |
+| 19 | `pr` | create-or-update the PR/MR of every pushed repository | 20 / 30 |
+| 20 | `finalize` | Upload the final log and `completion.json` | 21 |
+| 21 | `notify` | POST the report to the controller | — |
 
 `inputs` comes after `clone` because the clone owns the whole workspace and
 cannot clone into a directory that already holds files, and before `role` and
 the agent because the agent is told the files are there (section 2.4).
+
+`clone-extra` is a phase of its own rather than the tail of `clone` so that the
+timeline says which clone failed and took the time. A failure there abandons the
+run like a failed `clone`: nothing has been paid for, and an agent started
+without a repository its task spans would do part of the work and report
+success.
 
 ### Why `persist` comes before git rather than after
 
@@ -403,11 +439,21 @@ digest mismatch is still 30, and an absent checkpoint is a skip.
 ### Skips are a normal outcome
 
 `skipped` is a full-fledged `outcome`, not a synonym for failure. A run without
-a repository skips `clone`, `commit`, `push` and `pr`, and a run without input
-files skips `inputs`. A resumed attempt skips
+a repository skips `clone`, `clone-extra`, `commit`, `push` and `pr`, a run with
+one repository skips `clone-extra`, and a run without input files skips
+`inputs`. A resumed attempt skips
 everything up to and including `run`. A run with no declared node schema passes
 `output` in a single step. A phase missing from `phaseTimings` and a phase
 marked `skipped` are two different messages, and the second is more useful.
+
+**What a failure stops.** A failure before `run` abandons every later phase
+except the epilogue (`finalize`, `notify`): nothing has been produced, and git
+against a repository that was never cloned would only add a second, misleading
+failure. A failure from `run` onwards abandons nothing — every later phase still
+runs, and the first failure is the one reported. With one repository the later
+git phases then skip on their own (nothing committed is nothing pushed, nothing
+pushed is no pull request); with several, a push refused in one repository
+still leaves the pull requests of the others to be opened.
 
 ---
 
@@ -613,16 +659,25 @@ introduced in phase 3, once nodes begin declaring schemas in earnest.
 as the first: rendered by the backend from the role, mounted read-only, consumed
 once, and lost to a role that ships a file under that name. It is a
 haliphron-owned document rather than a rendered `settings.<role>.json` because
-both runtimes read it and neither one's configuration format would survive the
-other.
+every runtime reads it and no one runtime's configuration format would survive
+the others.
 
 ```json
 {
   "marketplaces": [{"name": "playneta", "url": "playneta/claude-plugin", "ref": "main"}],
   "enabled": ["playneta-infra-coder@playneta"],
+  "opencode": ["opencode-wakatime@1.2.0"],
   "trustRepositorySources": true
 }
 ```
+
+`opencode` is opencode's own package list — see [opencode](#opencode-no-marketplaces)
+below. It is read by opencode runs only; a claude-code or codex run logs that it
+ignored it. Each entry is an npm package (`name`, `@scope/name`, either with
+`@version`) or a git package (`github:owner/repo#ref`, `git+https://host/path#ref`),
+at most `MaxOpenCodePlugins` (32), checked by `OpenCodePlugin` in
+[api/run/v1/plugins.go](../../api/run/v1/plugins.go) on both sides. Not a local
+path and not a tarball URL.
 
 `url` is `owner/repo` or an `https://` git URL; nothing else is admitted, because
 the pod holds an https token and no key. `enabled` is always
@@ -662,9 +717,11 @@ operator did not.
 4. nothing: the agent starts with whatever the image already has
 
 Steps 1 and 3 are **claude-code only**. Those files are that CLI's own format
-and say nothing about what codex should load; a codex run takes its plugins from
-the role and nowhere else, rather than issuing `codex plugin add` for a list
-written for the other runtime.
+and say nothing about what codex or opencode should load; a codex or opencode
+run takes its plugins from the role and nowhere else, rather than issuing
+commands for a list written for another runtime. (An opencode run that trusts
+the repository still loads the repository's own `opencode.json` and
+`.opencode/` — opencode does that itself; see below.)
 
 A settings file that enables plugins without declaring the marketplaces they
 come from — an ordinary thing to find, since the catalogues were added once by
@@ -716,11 +773,12 @@ router is the case — could never run without a repository to clone. A run with
 neither a repository nor a marketplace gets no git token, and a token that
 arrives anyway is not used.
 
-| haliphron concept | claude-code | codex |
-|---|---|---|
-| register a catalogue | `claude plugin marketplace add <dir> --scope user` | `codex plugin marketplace add <dir> --json` |
-| install a plugin | `claude plugin install <p>@<m> --scope user --json` | `codex plugin add <p>@<m> --json` |
-| where the state lands | `$CLAUDE_CONFIG_DIR/settings.json` | `$CODEX_HOME/config.toml` |
+| haliphron concept | claude-code | codex | opencode |
+|---|---|---|---|
+| register a catalogue | `claude plugin marketplace add <dir> --scope user` | `codex plugin marketplace add <dir> --json` | the entrypoint reads its manifest |
+| install a plugin | `claude plugin install <p>@<m> --scope user --json` | `codex plugin add <p>@<m> --json` | the entrypoint copies it — see below |
+| install a package of its own | — | — | `opencode plugin add <spec>`, run in `$HOME` |
+| where the state lands | `$CLAUDE_CONFIG_DIR/settings.json` | `$CODEX_HOME/config.toml` | `$OPENCODE_CONFIG_DIR/opencode.json` |
 
 `--scope user` rather than `project`: project scope writes into the cloned
 repository, which would put the marketplace in the pull request.
@@ -734,8 +792,9 @@ Any other refusal fails the run, because retrying by source would ask the CLI to
 fetch a private catalogue with a credential it does not have and report that
 instead of the real problem.
 
-Both runtimes run with `DISABLE_AUTOUPDATER=1`, so a run keeps the plugin
-versions this phase resolved. Without it the CLIs refresh catalogues and upgrade
+Every runtime runs with its updater off (`DISABLE_AUTOUPDATER=1`, and
+`OPENCODE_DISABLE_AUTOUPDATE=1` with `update: "disable"` for opencode), so a run
+keeps the plugin versions this phase resolved. Without it the CLIs refresh catalogues and upgrade
 plugins in the background, and the same role could run different code on two
 attempts of one run — reaching the network from inside the model's turn, which
 is the one place this image cannot report a failure from.
@@ -755,6 +814,46 @@ each marketplace and plugin that could not be set up, with a short cause, and
 asks the agent to say so when its answer is incomplete because of one. The CLI's
 and git's output is not included — it stays in the log, out of the model's
 context. A run with every plugin installed gets no such text.
+
+### opencode: no marketplaces
+
+opencode 2.x has no catalogues, no `plugin marketplace add` and no reading of
+`.claude-plugin/marketplace.json`; what it installs natively is npm and git
+packages, and a skill, an agent or a command is a file it finds in a directory.
+So the same `plugin@marketplace` reaches it by **import**: the entrypoint
+clones the catalogue exactly as above — same credential helper, same
+`/haliphron/run/marketplaces` — reads its manifest itself
+(`.claude-plugin/marketplace.json`, then codex's `.agents/plugins/marketplace.json`),
+and copies each enabled plugin to
+`$HOME/.local/share/haliphron/plugins/<marketplace>/<plugin>`:
+
+| a plugin's | becomes, for opencode |
+|---|---|
+| `skills/` (and the manifest's `skills` paths) | an entry of `skills` in `opencode.json`, pointing at the copy |
+| `agents/*.md` | `$OPENCODE_CONFIG_DIR/agents/<plugin>/<name>.md`, `mode: subagent`, description and body kept; claude-code's `tools` and `model` dropped |
+| `commands/*.md` | `$OPENCODE_CONFIG_DIR/commands/<plugin>/<name>.md`, description and body kept |
+| `.mcp.json` (and the manifest's `mcpServers`) | `mcp.servers.plugin_<plugin>_<server>` — claude-code's own name for a plugin's server, so `mcp__plugin_<p>_<s>__<tool>` in a tool policy means the same tool on both |
+| `${CLAUDE_PLUGIN_ROOT}` | the copy's path, in markdown and MCP configuration |
+| `${VAR}`, `${VAR:-default}` | `{env:VAR}`; the default is dropped |
+| hooks | **not carried over**: opencode does not run claude-code hooks. Logged |
+
+A plugin's source is a path inside the catalogue's checkout, or a `github` or
+`url` repository cloned the same way as a catalogue; every source came out of a
+repository and is held to the role's own allow-lists — a path that leaves the
+checkout, before or after symbolic links, is refused, and so is a URL a role
+could not name. The copy follows no links and carries at most 4000 files and
+64 MiB. Whatever cannot be imported costs that plugin, and the agent is told,
+exactly as above.
+
+The role's `opencode` packages are installed first, each with
+`opencode plugin add <spec>` in `$HOME` — not the work tree, whose `.npmrc`
+would choose the registry.
+
+**The repository's own opencode configuration** — `opencode.json`,
+`.opencode/` with its plugins (JavaScript run inside the CLI), agents and MCP
+servers — is loaded by opencode itself, not by this phase. `trustRepositorySources:
+false` therefore also sets `OPENCODE_DISABLE_PROJECT_CONFIG=1`, which drops all
+of it, and the repository's `AGENTS.md` with it.
 
 ### What a plugin can do
 
@@ -800,7 +899,10 @@ and the order is fixed:
 claude-code receives 2 and 3 as one `--append-system-prompt` argument, and is
 never launched with `--system-prompt`, which would discard 1 and the tool
 instructions in it. codex receives 2 and 3 as a prefix of the prompt, in the
-same order, followed by the task.
+same order, followed by the task. opencode receives them as a file,
+`/haliphron/run/opencode-instructions.md`, named in `instructions` — never as an
+agent's `system`, which replaces opencode's own prompt; if the file cannot be
+written, as a prefix of the prompt instead.
 
 A role that could replace 2 could turn off the rules the git phases rely on,
 and the run would still exit 0. That is why the role gets the last word in the
@@ -812,26 +914,27 @@ a single argument at 128 KiB.
 
 ---
 
-## 8. Two runtimes, one image
+## 8. Three runtimes, one image
 
-Not two images. Git, PRs, uploads, notification, the checkpoint, log redaction —
-all shared. Four things differ: authentication, preparing the MCP configuration,
-the launch command and the output parser.
+Not three images. Git, PRs, uploads, notification, the checkpoint, log
+redaction — all shared. Four things differ: authentication, preparing the MCP
+configuration, the launch command and the output parser.
 
-| haliphron concept | claude-code | codex |
-|---|---|---|
-| model key | `ANTHROPIC_API_KEY` / `ANTHROPIC_AUTH_TOKEN`; a Claude subscription token (`sk-ant-oat…`) as `CLAUDE_CODE_OAUTH_TOKEN` alone | `OPENAI_API_KEY`; a subscription token is refused with `CredentialMismatch` |
-| model | `ANTHROPIC_MODEL` | `OPENAI_MODEL` |
-| model gateway (`llm-base-url`) | `ANTHROPIC_BASE_URL` = the root, the key as `ANTHROPIC_AUTH_TOKEN` only, `ANTHROPIC_API_KEY` set empty, every `ANTHROPIC_DEFAULT_*_MODEL` and `ANTHROPIC_SMALL_FAST_MODEL` pinned to the run's model; a subscription token is refused with `CredentialMismatch` | `-c model_provider=…` declaring a provider at the root + `/v1`, `wire_api = "responses"`, `env_key = "OPENAI_API_KEY"` |
-| model name | `provider/` stripped; passed as written when there is a gateway, which routes by it | the same |
-| `toolPolicy.allow` | `--allowedTools` | `enabled_tools` on the MCP server + the sandbox mode |
-| `toolPolicy.deny` | `--disallowedTools` | `disabled_tools` on the server |
-| `permissionMode: plan` | `--permission-mode plan` | `-s read-only` |
-| `permissionMode: acceptEdits` | `--permission-mode acceptEdits` | `-s workspace-write` |
-| `permissionMode: bypassPermissions` | `--permission-mode bypassPermissions` | `--dangerously-bypass-approvals-and-sandbox` |
-| `mcpServers` | `--mcp-config` (JSON) | `[mcp_servers.*]` in `config.toml` |
-| system prompt | `--append-system-prompt` | a prompt prefix |
-| cost in the output | `total_cost_usd` | `input_tokens` / `output_tokens` |
+| haliphron concept | claude-code | codex | opencode (2.x) |
+|---|---|---|---|
+| model key | `ANTHROPIC_API_KEY` / `ANTHROPIC_AUTH_TOKEN`; a Claude subscription token (`sk-ant-oat…`) as `CLAUDE_CODE_OAUTH_TOKEN` alone | `OPENAI_API_KEY`; a subscription token is refused with `CredentialMismatch` | `HALIPHRON_LLM_API_KEY`, named in the provider's `env`; a subscription token is refused with `CredentialMismatch` |
+| model | `ANTHROPIC_MODEL` | `OPENAI_MODEL` | `--model <provider>/<model>` |
+| model gateway (`llm-base-url`) | `ANTHROPIC_BASE_URL` = the root, the key as `ANTHROPIC_AUTH_TOKEN` only, `ANTHROPIC_API_KEY` set empty, every `ANTHROPIC_DEFAULT_*_MODEL` and `ANTHROPIC_SMALL_FAST_MODEL` pinned to the run's model; a subscription token is refused with `CredentialMismatch` | `-c model_provider=…` declaring a provider at the root + `/v1`, `wire_api = "responses"`, `env_key = "OPENAI_API_KEY"` | a provider `haliphron-gateway`, package `@opencode/ai/providers/openai-compatible`, `baseURL` = the root + `/v1`, the run's model declared on it |
+| model name | `provider/` stripped; passed as written when there is a gateway, which routes by it | the same | passed as written — the qualifier is how opencode picks the provider; a bare `claude-*`, `gpt-*`/`o*`, `gemini-*` is qualified for it; behind a gateway, `haliphron-gateway/<as written>` |
+| `toolPolicy.allow` | `--allowedTools` | `enabled_tools` on the MCP server + the sandbox mode | `allow` rules — see below |
+| `toolPolicy.deny` | `--disallowedTools` | `disabled_tools` on the server | `deny` rules, last |
+| `permissionMode: plan` | `--permission-mode plan` | `-s read-only` | edits and the shell denied, and the allow list cannot lift either |
+| `permissionMode: acceptEdits` | `--permission-mode acceptEdits` | `-s workspace-write` | edits allowed, the shell denied |
+| `permissionMode: bypassPermissions` | `--permission-mode bypassPermissions` | `--dangerously-bypass-approvals-and-sandbox` | `{"action":"*","resource":"*","effect":"allow"}` |
+| `maxTurns` | `--max-turns` | — | `steps` on the run's agent |
+| `mcpServers` | `--mcp-config` (JSON) | `[mcp_servers.*]` in `config.toml` | `mcp.servers` in `opencode.json`, `codemode: false`, `oauth: false` |
+| system prompt | `--append-system-prompt` | a prompt prefix | an `instructions` file |
+| cost in the output | `total_cost_usd` | `input_tokens` / `output_tokens` | `cost` and `tokens` of each `step_finish`, summed |
 
 **The main trap is the asymmetry.** codex has no analogue of `--allowedTools`
 for built-in tools: file and shell access is set wholesale by the sandbox mode.
@@ -840,7 +943,58 @@ and on codex as `-s read-only`. This means the same role on the two runtimes can
 grant **different powers**, and that is a security hole, not a cosmetic
 discrepancy. The table above is normative, and an equivalence test against it is
 mandatory: for every role in the fixture, compare the effective set of permitted
-operations on both runtimes.
+operations on every runtime.
+
+### opencode's rules
+
+opencode has no permission flags. What a run may do is an ordered list of
+`{action, resource, effect}` rules in its configuration; the last match wins,
+and no match means *ask*, which `opencode run` refuses. Every configuration
+layer adds to the list — the repository's `opencode.json` included — so the
+entrypoint's rules travel in `OPENCODE_CONFIG_CONTENT`, the one layer that loads
+after every project file, and are attached by name to the agents a run can use,
+because an agent's own rules are applied after the global list. The run starts
+`build` with `--agent build` and `default_agent: build`, so a repository cannot
+substitute an agent of its own.
+
+The model is claude-code under `-p`, where whatever would need approval is
+refused. Outside `bypassPermissions`, the rules for `build` and `general` are,
+in order:
+
+1. deny `shell`, `webfetch`, `websearch`, `execute` (Code Mode) and
+   `external_directory`, then allow `external_directory` under the imported
+   plugins' directory, where a skill reads its own files;
+2. deny `<server>_*` for every MCP server of the role and of the imported
+   plugins — claude-code refuses an MCP tool the allow list does not name;
+3. deny `subagent`, then allow `general`, `explore` and each imported plugin
+   agent — an agent nobody attached these rules to is not an agent the run may
+   hand work to;
+4. deny `edit`, or allow it under `acceptEdits`;
+5. the role's allow list, translated (in `plan`, without edits or the shell);
+6. allow `haliphron_*` when the platform's server is present;
+7. the role's deny list, translated — last, so it wins.
+
+`explore`, opencode's read-only subagent, gets 1–4 with edits denied and 7, and
+none of the grants: its own rules include the shell and the web, and a role that
+denies either must not have it through `explore`. Under `bypassPermissions`,
+`build` and `general` get allow-all, then 6 and 7; `explore` gets 7.
+
+A tool policy is written in claude-code's names. The translation:
+
+| claude-code | opencode action, resource |
+|---|---|
+| `Bash`, `Bash(git push:*)`, `Bash(make test)` | `shell` `*`, `git push *`, `make test` |
+| `Edit`, `Write`, `MultiEdit`, `NotebookEdit` (with a path) | `edit`, the path made absolute against the work tree |
+| `Read`, `LS`, `NotebookRead` (with a path) | `read`, likewise |
+| `Glob`, `Grep`, `WebSearch` | `glob`, `grep`, `websearch` |
+| `WebFetch`, `WebFetch(domain:d)` | `webfetch` `*`; for an allow `*://d` and `*://d/*`, for a deny `*d*` |
+| `Task(name)`, `Agent(name)` | `subagent` `name` |
+| `Skill(name)` | `skill` `name` |
+| `mcp__s`, `mcp__s__*`, `mcp__s__t` | `s_*`, `s_t` (characters outside `[A-Za-z0-9_-]` as `_`) |
+| `*` | `*` |
+
+An allowed tool with no equivalent grants nothing and is logged; a denied tool
+with no equivalent is logged to stderr as unenforceable.
 
 **The platform's own MCP server is always allowed.** When `mcp.json` carries
 the server named `haliphron` (`runv1.PlatformMCPServer`), claude-code is launched
@@ -856,7 +1010,7 @@ depth, children and budget are enforced behind the server.
 **Secrets in the MCP configuration.** Header values do not land in the file in
 plaintext: they are exported into the child process's environment variables and
 substituted by reference (`env_http_headers` in codex, `${VAR}` substitution in
-claude-code). The configuration file outlives the pod in log chunks and in
+claude-code, `{env:VAR}` in opencode). The configuration file outlives the pod in log chunks and in
 dumps; the child process's env does not.
 
 **One token under several names.** The credential arrives as a single `git-token`
@@ -1061,6 +1215,37 @@ secret — it protects against all the other ways, and those are the majority.
   changes is a PR. This is also the main control against prompt injection from
   the repository: whatever the agent does, a reviewer will see it.
 
+### Several repositories
+
+A run with `HALIPHRON_EXTRA_REPOS` has more than one work tree: the working
+repository in `/workspace` and each extra one in `/repos/<path>`, all on the same
+target branch. The agent is told where they are in the system prompt, and each
+runtime is told it may write there — `--add-dir` for claude-code and codex, an
+`external_directory` allow rule for opencode. Plugins, settings and MCP
+configuration come from the working repository only; an extra repository is
+content, like the working one, and adds no plugin and no server.
+
+- **`commit`, `push` and `pr` go through every repository**, the working one
+  first for commit and push. A repository with nothing different from its base
+  is not pushed and gets no pull request; the commit phase is skipped only when
+  no repository has anything to push.
+- **The extra repositories' pull requests are opened first**, each saying which
+  change it belongs to (the working repository and the branch), so that the
+  working repository's pull request — the one a person is pointed at — can list
+  every other one. A repository whose provider is `none` is pushed and gets no
+  pull request.
+- **A failure in one repository does not stop the others.** A 403 in one must
+  not leave the work in the rest unpushed, so the phase goes through all of them
+  and fails after the last. One failure keeps its own code and reason; several
+  are one failure whose code is **30 only if every one of them is a permanent
+  refusal** and 20 otherwise, so the controller retries whenever a retry could
+  help any of them.
+- **The report carries every repository it cloned** (section 13), whatever the
+  outcome: a pull request opened in one repository is visible on a run that
+  failed to push another.
+- A retry behaves as it does for one repository: when it resumes past `run`
+  the clones are fresh, there is nothing to commit, and nothing is pushed.
+
 ---
 
 ## 13. The completion report
@@ -1084,6 +1269,11 @@ envelope, and a report that cannot name its own run is not a backup copy;
 `failedPhase`, `reason`, `message` — section 4; `runtime` with the versions of
 the image, the contract and the CLI — without them a behavior change across a
 fleet of clusters on different tags is diagnosed by guesswork.
+
+`repo` is the working repository's result. `extraRepos` is one entry per extra
+repository the attempt cloned, named by its `path`, with the same fields as
+`repo`; an extra repository whose clone never happened is absent rather than
+reported empty.
 
 **Delivery.** At-least-once, with the receiver idempotent on
 (`runID`, `attempt`). Authentication is the `callback-token`, minted by the
@@ -1144,7 +1334,7 @@ responsible for.
 
 | Control | How |
 |---|---|
-| non-root | `runAsUser 1000`; the image requires no writes outside the four emptyDirs |
+| non-root | `runAsUser 1000`; the image requires no writes outside the four emptyDirs, and `/repos` for a run with extra repositories |
 | read-only root | CLI caches redirected into `$HOME` (section 2.3) |
 | no ServiceAccount token | `automountServiceAccountToken: false`; the image never reaches the cluster API with anything |
 | no storage credentials | presigned links to its own prefix only |
@@ -1191,6 +1381,11 @@ tag, our own tests.
 
 **The base is Debian slim, not Alpine.** Claude Code needs Node, and a full
 glibc `curl` and GNU coreutils are required.
+
+**The CLIs are pinned** in the Dockerfile, opencode to a 2.x release
+(`@opencode/cli`). Its 1.x line (`opencode-ai`) has a different configuration
+shape, permission format and plugin API; the entrypoint writes the 2.x ones, and
+an image built with 1.x would start an agent with none of the role's rules.
 
 ---
 
@@ -1345,7 +1540,7 @@ needs a kubelet.
 - [ ] the node schema is declared and the file does not match it → 12, with the path to the mismatch in `message`
 - [ ] no schema and no file → success, `data: {}`
 - [ ] the agent produced no text → `result.md` exists and contains the stub
-- [ ] `usage` is normalized: claude-code gives cost, codex gives tokens, and the fields are present for both
+- [ ] `usage` is normalized: claude-code gives cost, codex gives tokens, opencode gives both per step and they are summed, and the fields are present for all three
 
 **Timeout and signals:**
 
@@ -1366,13 +1561,23 @@ needs a kubelet.
 - [ ] no `inputs.json` → `inputs` is `skipped`, and nothing else changes
 - [ ] the controller serves bytes that do not match the digest → 21, class `infra`, the agent never runs
 - [ ] the callback refuses a key outside the run's manifest, and a token of another run
-- [ ] codex is started with `--image` for each image input
+- [ ] codex is started with `--image` for each image input, opencode with `--file`
 - [ ] no input name or byte reaches a log chunk
 
 **Runtime equivalence:**
 
 - [ ] for every role in the fixture, the effective set of operations on claude-code and on codex is the same
-- [ ] a "read-only" role cannot write a file into `/workspace` on either runtime
+- [ ] for every role in the fixture, opencode's rules decide each operation as claude-code under `-p` would, for `build`, `general` and `explore` alike
+- [ ] a "read-only" role cannot write a file into `/workspace` on any runtime
+
+**opencode:**
+
+- [ ] started as `opencode run --standalone --format json --agent build`, the prompt on stdin and nowhere in the arguments
+- [ ] its rules, instruction file and provider are in `OPENCODE_CONFIG_CONTENT`; the key is in `HALIPHRON_LLM_API_KEY` alone and not inlined anywhere
+- [ ] a role's MCP header value is in the agent's environment and never in `opencode.json`; a server `opencode mcp list` does not show connected → 30
+- [ ] a marketplace plugin's skills, agents, commands and MCP servers land in opencode's places; its hooks are logged as left out; a source that leaves the catalogue is refused and the agent told
+- [ ] the role's `opencode` packages are installed with `opencode plugin add` in `$HOME`; one that fails is reported to the agent and the run goes on
+- [ ] `trustRepositorySources: false` sets `OPENCODE_DISABLE_PROJECT_CONFIG=1`
 
 ---
 
@@ -1380,7 +1585,7 @@ needs a kubelet.
 
 | # | Question | Decision | Condition for revisiting |
 |---|---|---|---|
-| 1 | `opencode` as a third runtime | Not in v1. `HALIPHRON_AGENT` is a ready-made extension point | When there is demand. It would need a row in the role translation table and an equivalence test |
+| 1 | ~~`opencode` as a third runtime~~ | **Done**: a column of the table in section 8, opencode's rules there, and the import of marketplace plugins in 7a; the equivalence is `TestOpenCodesRulesGrantWhatClaudeCodeWouldAndNothingMore` | — |
 | 2 | A repository cache | Not doing it. Cloning a monorepo on every run costs minutes and traffic | When clone time becomes a noticeable share of the duration. The solution: a PVC with a bare mirror and `--reference` |
 | 3 | Live log viewing through `kubectl logs -f` | Not doing it. Chunks work identically for a local cluster and for a cluster behind NAT, and they outlive the pod | If the upload-interval latency becomes a complaint — shorten the interval, it is a parameter |
 | 4 | Verifying cost inside the pod | Not doing it: the pod is an interested party and its arithmetic is untrustworthy by construction | Once there is a proxy in front of the LLM; accounting moves there and becomes unforgeable |

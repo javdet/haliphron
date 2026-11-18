@@ -420,7 +420,7 @@ components:
 
     AgentType:
       type: string
-      enum: [claude-code, codex]
+      enum: [claude-code, codex, opencode]
       maxLength: 32
 
     FailureClass:
@@ -434,7 +434,7 @@ components:
 
     RuntimePhase:
       type: string
-      enum: [init, validate, fetch, checkpoint, auth, clone, inputs, role, plugins,
+      enum: [init, validate, fetch, checkpoint, auth, clone, clone-extra, inputs, role, plugins,
              mcp-prepare, mcp-verify, run, parse, output, persist, commit, push,
              pr, finalize, notify]
       description: An entrypoint phase. The names are contract, not logging.
@@ -559,6 +559,13 @@ components:
           maxLength: 65536
           description: The first 64 KiB of `result.md` — the only content in this contract
         repo: {$ref: '#/components/schemas/RepoResult'}
+        extraRepos:
+          type: array
+          maxItems: 31
+          description: |
+            `repo` for each repository of `HALIPHRON_EXTRA_REPOS` that was
+            cloned, named by its path, whatever the outcome of the git phases
+          items: {$ref: '#/components/schemas/ExtraRepoResult'}
         usage: {$ref: '#/components/schemas/Usage'}
         phaseTimings:
           type: array
@@ -584,6 +591,14 @@ components:
         imageVersion: {type: string, maxLength: 128}
         contractVersion: {type: string, maxLength: 16}
         agentVersion: {type: string, maxLength: 64}
+
+    ExtraRepoResult:
+      allOf:
+        - $ref: '#/components/schemas/RepoResult'
+        - type: object
+          required: [path]
+          properties:
+            path: {type: string, maxLength: 64}
 
     RepoResult:
       type: object

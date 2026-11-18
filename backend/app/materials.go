@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"net/url"
 	"slices"
 	"strings"
 	"time"
@@ -102,18 +103,9 @@ func (s *Service) materials(ctx context.Context, runID runv1.ULID, spec runv1.Re
 		}
 	}
 
-	if gitURL := gitTokenTarget(spec, role); gitURL != "" && s.git != nil {
-		ttl := time.Duration(spec.Runtime.TimeoutSeconds) * time.Second * 2
-		provider := spec.Repo.Provider
-		if spec.Repo.URL == "" {
-			provider = run.ProviderFor(gitURL)
-		}
-		token, err := s.git.MintToken(ctx, gitURL, provider, ttl)
-		if err != nil {
-			return nil, nil, fmt.Errorf("mint git token for %s: %w", runID, err)
-		}
-		if token != "" {
-			secrets[runv1.SecretKeyGitToken] = token
+	if s.git != nil {
+		if err := s.gitTokens(ctx, runID, spec, role, secrets); err != nil {
+			return nil, nil, err
 		}
 	}
 
@@ -154,6 +146,79 @@ func (s *Service) materials(ctx context.Context, runID runv1.ULID, spec runv1.Re
 	}
 
 	return secrets, roleConfig, nil
+}
+
+// gitTokens mints the run's git credentials into secrets: SecretKeyGitToken for
+// the working repository (or the marketplace of a run without one), and — for a
+// run with extraRepos — SecretKeyGitTokens, one entry per host the run clones
+// from, the working repository's included.
+//
+// One mint per host rather than per repository: git asks the credential helper
+// by host, so two tokens for one host could not both be offered. Two
+// repositories on one host that need different tokens — two GitHub App
+// installations — are the known limit of that, and the run fails at clone or
+// push for the one the token does not open.
+func (s *Service) gitTokens(ctx context.Context, runID runv1.ULID, spec runv1.RenderedRunSpec,
+	role *run.Role, secrets map[string]string) error {
+
+	ttl := time.Duration(spec.Runtime.TimeoutSeconds) * time.Second * 2
+
+	gitURL := gitTokenTarget(spec, role)
+	if gitURL != "" {
+		provider := spec.Repo.Provider
+		if spec.Repo.URL == "" {
+			provider = run.ProviderFor(gitURL)
+		}
+		token, err := s.git.MintToken(ctx, gitURL, provider, ttl)
+		if err != nil {
+			return fmt.Errorf("mint git token for %s: %w", runID, err)
+		}
+		if token != "" {
+			secrets[runv1.SecretKeyGitToken] = token
+		}
+	}
+	if len(spec.ExtraRepos) == 0 || spec.Repo.URL == "" {
+		return nil
+	}
+
+	hosts := runv1.GitHostTokens{}
+	if host := repoHost(spec.Repo.URL); host != "" && secrets[runv1.SecretKeyGitToken] != "" {
+		hosts[host] = runv1.GitHostToken{Provider: spec.Repo.Provider, Token: secrets[runv1.SecretKeyGitToken]}
+	}
+	minted := map[string]bool{repoHost(spec.Repo.URL): true}
+	for _, extra := range spec.ExtraRepos {
+		host := repoHost(extra.URL)
+		if host == "" || minted[host] {
+			continue
+		}
+		minted[host] = true
+		token, err := s.git.MintToken(ctx, extra.URL, extra.Provider, ttl)
+		if err != nil {
+			return fmt.Errorf("mint git token for %s on %s: %w", runID, host, err)
+		}
+		if token != "" {
+			hosts[host] = runv1.GitHostToken{Provider: extra.Provider, Token: token}
+		}
+	}
+	if len(hosts) == 0 {
+		return nil
+	}
+	encoded, err := json.Marshal(hosts)
+	if err != nil {
+		return fmt.Errorf("render git tokens for %s: %w", runID, err)
+	}
+	secrets[runv1.SecretKeyGitTokens] = string(encoded)
+	return nil
+}
+
+// repoHost is host[:port] of a repository URL, as git names it to a credential
+// helper; empty when the URL has none.
+func repoHost(raw string) string {
+	parsed, err := url.Parse(strings.TrimSpace(raw))
+	if err != nil {
+		return ""
+	}
+	return parsed.Host
 }
 
 // gitTokenTarget is the repository a run's git token is minted for: the run's

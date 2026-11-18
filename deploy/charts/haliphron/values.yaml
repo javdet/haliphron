@@ -317,7 +317,7 @@ agent:
   tolerations: []
 
   defaultModel: anthropic/claude-opus-5
-  defaultAgentType: claude-code   # claude-code | codex
+  defaultAgentType: claude-code   # claude-code | codex | opencode
 
   timeoutSeconds: 3600    # how long a single run may take
   ttlSeconds: 86400       # how long a finished run is kept

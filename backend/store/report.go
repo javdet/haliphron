@@ -557,7 +557,91 @@ func promoteAttempt(ctx context.Context, tx *sql.Tx, id runv1.ULID, epoch int64,
 	if err != nil {
 		return fmt.Errorf("store: promote attempt %d of %s: %w", attempt, id, err)
 	}
+	if len(report.ExtraRepos) > 0 {
+		if err := mergeExtraRepoResults(ctx, tx, id, report.ExtraRepos); err != nil {
+			return err
+		}
+	}
 	return nil
+}
+
+// mergeExtraRepoResults folds a report's extraRepos into the run's, by path and
+// field by field, under the rule the working repository's columns follow in
+// the statement above: a value the report carries replaces the stored one, and
+// a value it does not carry leaves the stored one alone. A later attempt that
+// opened no pull request — because the earlier one already had, or because it
+// failed before getting there — therefore never erases the one that exists.
+//
+// Read and written in the caller's transaction, which holds the run's row lock
+// (lock_run.sql), so two reports for one run cannot interleave their merges.
+func mergeExtraRepoResults(ctx context.Context, tx *sql.Tx, id runv1.ULID, incoming []runv1.ExtraRepoResult) error {
+	var raw []byte
+	if err := tx.QueryRowContext(ctx, `SELECT extra_repo_results FROM runs WHERE id = $1`, id).
+		Scan(&raw); err != nil {
+		return fmt.Errorf("store: read extra repository results of %s: %w", id, err)
+	}
+	var stored []runv1.ExtraRepoResult
+	if len(raw) > 0 {
+		if err := json.Unmarshal(raw, &stored); err != nil {
+			return fmt.Errorf("store: decode extra repository results of %s: %w", id, err)
+		}
+	}
+	merged := MergeExtraRepoResults(stored, incoming)
+	encoded, err := json.Marshal(merged)
+	if err != nil {
+		return fmt.Errorf("store: encode extra repository results of %s: %w", id, err)
+	}
+	if _, err := tx.ExecContext(ctx,
+		`UPDATE runs SET extra_repo_results = $2 WHERE id = $1`, id, encoded); err != nil {
+		return fmt.Errorf("store: write extra repository results of %s: %w", id, err)
+	}
+	return nil
+}
+
+// MergeExtraRepoResults is the merge rule of mergeExtraRepoResults, pure: the
+// stored order is kept, a path seen for the first time is appended, and an
+// entry with an empty path — which no image writes — is dropped rather than
+// stored under a key nothing can look up.
+func MergeExtraRepoResults(stored, incoming []runv1.ExtraRepoResult) []runv1.ExtraRepoResult {
+	out := append([]runv1.ExtraRepoResult(nil), stored...)
+	index := make(map[string]int, len(out))
+	for i, r := range out {
+		index[r.Path] = i
+	}
+	for _, in := range incoming {
+		if in.Path == "" {
+			continue
+		}
+		i, ok := index[in.Path]
+		if !ok {
+			index[in.Path] = len(out)
+			out = append(out, runv1.ExtraRepoResult{Path: in.Path})
+			i = len(out) - 1
+		}
+		cur := &out[i]
+		if in.Pushed {
+			cur.Pushed = true
+		}
+		if in.TargetBranch != "" {
+			cur.TargetBranch = truncate(in.TargetBranch, 255)
+		}
+		if in.CommitSHA != "" {
+			cur.CommitSHA = truncate(in.CommitSHA, 64)
+		}
+		if in.PRURL != "" {
+			cur.PRURL = truncate(in.PRURL, 512)
+		}
+		if in.PRNumber != 0 {
+			cur.PRNumber = in.PRNumber
+		}
+		if in.PRAction != "" {
+			cur.PRAction = in.PRAction
+		}
+	}
+	if len(out) > runv1.MaxExtraRepos {
+		out = out[:runv1.MaxExtraRepos]
+	}
+	return out
 }
 
 func extendLeaseTx(ctx context.Context, tx *sql.Tx, id runv1.ULID, ttl time.Duration) (time.Time, error) {

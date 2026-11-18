@@ -32,7 +32,7 @@ import {
   tokens,
 } from '../components/ui'
 import { downloadInput } from '../api/client'
-import type { Attempt, Run } from '../api/types'
+import type { Attempt, Run, RunRepo } from '../api/types'
 
 type Tab = 'result' | 'logs' | 'attempts'
 
@@ -227,7 +227,7 @@ function Summary({ run }: { run: Run }) {
         </dl>
       </Card>
 
-      {(run.repo || run.pr_url || run.commit_sha) && (
+      {!run.repos && (run.repo || run.pr_url || run.commit_sha) && (
         <Card title="Source">
           <dl className="kv">
             {run.repo && (
@@ -268,6 +268,67 @@ function Summary({ run }: { run: Run }) {
         </Card>
       )}
     </div>
+  )
+}
+
+/** What the run did to the pull request; 'none' says nothing worth a word. */
+const PR_ACTION: Partial<Record<NonNullable<RunRepo['pr_action']>, string>> = {
+  created: 'opened',
+  updated: 'updated',
+}
+
+/**
+ * Each repository of a run with several: where the agent found it and what was
+ * pushed from it. Pushed says a commit reached the branch, nothing about whether
+ * the change in it is right.
+ */
+function ReposCard({ run, repos }: { run: Run; repos: RunRepo[] }) {
+  return (
+    <Card title={`Repositories (${repos.length})`} tight>
+      <div className="table-wrap">
+        <table>
+          <thead>
+            <tr>
+              <th>Repository</th>
+              <th>Path</th>
+              <th>Base</th>
+              <th>Branch</th>
+              <th>Pushed</th>
+              <th>Commit</th>
+              <th>Pull request</th>
+            </tr>
+          </thead>
+          <tbody>
+            {repos.map((r) => (
+              <tr key={r.path}>
+                <td className="small trunc" title={r.url}>
+                  {r.url}
+                </td>
+                <td className="mono small muted nowrap">{r.path}</td>
+                <td className="mono small nowrap">{r.base_branch || <span className="faint">default</span>}</td>
+                <td className="mono small nowrap">
+                  {r.target_branch || run.target_branch || <span className="faint">—</span>}
+                </td>
+                <td className="small nowrap">{r.pushed ? 'yes' : <span className="faint">no</span>}</td>
+                <td className="mono small nowrap" title={r.commit_sha}>
+                  {r.commit_sha ? r.commit_sha.slice(0, 12) : <span className="faint">—</span>}
+                </td>
+                <td className="small nowrap">
+                  {r.pr_url ? (
+                    <a href={r.pr_url} target="_blank" rel="noreferrer noopener">
+                      {r.pr_number ? `#${r.pr_number}` : 'open'}
+                    </a>
+                  ) : (
+                    <span className="faint">—</span>
+                  )}
+                  {r.pr_action && PR_ACTION[r.pr_action] && <span className="faint"> {PR_ACTION[r.pr_action]}</span>}
+                </td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
+    </Card>
   )
 }
 
@@ -563,6 +624,7 @@ export function RunDetailPage() {
         <ErrorBanner error={retry.error} what="retry the run" />
         <Summary run={data} />
         <LocksAndDeferrals id={id} live={live} />
+        {data.repos && data.repos.length > 0 && <ReposCard run={data} repos={data.repos} />}
         <InputsCard id={id} />
         <RunTokensCard runId={id} live={live} />
 

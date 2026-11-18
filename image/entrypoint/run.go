@@ -60,6 +60,10 @@ type Run struct {
 	// missingPlugins is what the plugins phase was asked to install and could
 	// not. The run goes ahead without it, and the agent is told.
 	missingPlugins []missingPlugin
+	// openCode is what the plugins phase made of the role's marketplaces for
+	// an opencode run, which the launch's permission rules have to name. Empty
+	// for the other runtimes.
+	openCode openCodeImports
 	// inputs are the files the inputs phase put in DirInputs, verified, in
 	// manifest order. Empty when the run has none.
 	inputs []fetchedInput
@@ -81,6 +85,10 @@ type Run struct {
 	logRef    *runv1.ObjectRef
 
 	repo runv1.RepoResult
+	// primary and extras are the repositories the git phases act on, built on
+	// first use from cfg and layout; primary's Result is &repo.
+	primary *repoWork
+	extras  []*repoWork
 
 	timings   []runv1.PhaseTiming
 	failure   *Failure

@@ -291,6 +291,10 @@ type Run struct {
 	PRAction  runv1.PRAction
 	CommitSHA string
 	Pushed    bool
+	// ExtraRepoResults is what happened to each of the spec's extraRepos,
+	// merged across attempts by promoteAttempt. Empty for a run without them
+	// and for one whose report has not arrived.
+	ExtraRepoResults []runv1.ExtraRepoResult
 
 	CostUSD          runv1.MoneyUSD
 	InputTokens      int64
@@ -328,6 +332,7 @@ const runColumns = `
 	       status, status_reason, status_message, failure_class, exit_code, observed_phase,
 	       cancel_requested_at, cancel_reason,
 	       result_summary, result_ref, pr_url, pr_number, pr_action, commit_sha, pushed,
+	       extra_repo_results,
 	       cost_usd, input_tokens, output_tokens, cache_read_tokens, cache_write_tokens, num_turns,
 	       completion_received_at, created_at, queued_at, started_at, finished_at, updated_at`
 
@@ -837,6 +842,7 @@ func scanRun(row rowScanner) (Run, error) {
 		prAction   sql.NullString
 		commit     sql.NullString
 		pushed     sql.NullBool
+		extras     []byte
 		completed  sql.NullTime
 		startedAt  sql.NullTime
 		finishedAt sql.NullTime
@@ -849,6 +855,7 @@ func scanRun(row rowScanner) (Run, error) {
 		&r.Status, &reason, &message, &r.FailureClass, &exitCode, &phase,
 		&cancelAt, &cancelWhy,
 		&summary, &resultRef, &prURL, &prNumber, &prAction, &commit, &pushed,
+		&extras,
 		&r.CostUSD, &r.InputTokens, &r.OutputTokens, &r.CacheReadTokens, &r.CacheWriteTokens, &r.NumTurns,
 		&completed, &r.CreatedAt, &r.QueuedAt, &startedAt, &finishedAt, &r.UpdatedAt)
 	if err != nil {
@@ -882,6 +889,11 @@ func scanRun(row rowScanner) (Run, error) {
 	r.PRAction = runv1.PRAction(prAction.String)
 	r.CommitSHA = commit.String
 	r.Pushed = pushed.Bool
+	if len(extras) > 0 {
+		if err := json.Unmarshal(extras, &r.ExtraRepoResults); err != nil {
+			return Run{}, fmt.Errorf("store: decode extra_repo_results of %s: %w", r.ID, err)
+		}
+	}
 	r.CompletionReceivedAt = timePtr(completed)
 	r.StartedAt = timePtr(startedAt)
 	r.FinishedAt = timePtr(finishedAt)

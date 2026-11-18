@@ -229,7 +229,7 @@ func (c *Chat) collectFiles(ctx context.Context, candidates []chatCandidate, res
 	return files, b.String()
 }
 
-// fileReadDenied reports whether the bot's role leaves claude-code without its
+// fileReadDenied reports whether the bot's role leaves claude-code or opencode without its
 // Read tool, the one it opens images and PDFs with. Read from the role and the
 // installation's ceiling, the same two policies admission intersects.
 func (c *Chat) fileReadDenied(ctx context.Context) bool {
@@ -251,7 +251,9 @@ func (c *Chat) fileReadDenied(ctx context.Context) bool {
 			}
 		}
 	}
-	if agent != "" && agent != runv1.AgentClaudeCode {
+	// codex reads through its shell, so no single tool denies it the files;
+	// claude-code and opencode read with a tool the deny list can name.
+	if agent == runv1.AgentCodex {
 		return false
 	}
 	for _, d := range deny {

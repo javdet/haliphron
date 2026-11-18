@@ -2,6 +2,7 @@ import { useState } from 'react'
 import { useNavigate, useParams } from 'react-router-dom'
 import { useRoles, useRuns, useSchedule, useUpdateSchedule } from '../api/hooks'
 import { StatusBadge } from '../components/StatusBadge'
+import { extraRepoCount, TemplateRepos } from '../components/RunSpecFields'
 import { Card, Empty, ErrorBanner, Spinner, Time, elapsed, money } from '../components/ui'
 import { DeleteScheduleDialog, LastFire, NextFire, ScheduleDialog, useRunNow } from './SchedulesPage'
 
@@ -105,8 +106,10 @@ export function ScheduleDetailPage() {
                 </dd>
                 <dt>Role</dt>
                 <dd>{s.run.role || <span className="faint">default</span>}</dd>
-                <dt>Repository</dt>
-                <dd className="small">{s.run.repo || <span className="faint">none</span>}</dd>
+                <dt>{extraRepoCount(s.run) > 0 ? 'Repositories' : 'Repository'}</dt>
+                <dd className="small">
+                  {extraRepoCount(s.run) > 0 ? <TemplateRepos template={s.run} /> : s.run.repo || <span className="faint">none</span>}
+                </dd>
                 {s.run.base_branch && (
                   <>
                     <dt>Base</dt>

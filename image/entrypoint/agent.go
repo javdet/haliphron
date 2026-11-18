@@ -19,10 +19,10 @@ import (
 	runv1 "github.com/automagicops/haliphron/api/run/v1"
 )
 
-// Two runtimes, one image.
+// Three runtimes, one image.
 //
-// Not two images: git, pull requests, uploads, notification, the checkpoint and
-// log redaction are the same work either way. Four things differ —
+// Not three images: git, pull requests, uploads, notification, the checkpoint
+// and log redaction are the same work every way. Four things differ —
 // authentication, preparing the MCP configuration, the launch command and the
 // output parser — and this file is those four things.
 //
@@ -98,6 +98,8 @@ func runtimeFor(agent runv1.AgentType) (Runtime, error) {
 		return claudeCode{}, nil
 	case runv1.AgentCodex:
 		return codex{}, nil
+	case runv1.AgentOpenCode:
+		return openCode{}, nil
 	default:
 		return nil, fail(runv1.ExitConfig, "UnknownAgent", "no runtime for %q", agent)
 	}
@@ -115,8 +117,9 @@ func phaseAuth(_ context.Context, r *Run) error {
 		return err
 	}
 	if r.cfg.Agent != runv1.AgentClaudeCode && runv1.IsClaudeOAuthToken(r.secrets.LLMAPIKey) {
-		// Refused here rather than left to the provider: codex would send the
-		// token to OpenAI and report a 401 that says nothing about why.
+		// Refused here rather than left to the provider: codex or opencode
+		// would send the token to a provider API and report a 401 that says
+		// nothing about why.
 		return fail(runv1.ExitConfig, "CredentialMismatch",
 			"the model credential is a Claude subscription OAuth token, which authenticates "+
 				"claude-code only; %s needs an API key for its own provider", r.cfg.Agent)
@@ -155,11 +158,68 @@ func phaseAuth(_ context.Context, r *Run) error {
 	if err != nil {
 		return fail(runv1.ExitConfig, "RepoURLUnusable", "%s", err)
 	}
-	if err := r.writeGitCredentialHelper(host); err != nil {
+	if len(r.cfg.ExtraRepos) == 0 {
+		if err := r.writeGitCredentialHelper(host); err != nil {
+			return err
+		}
+		r.logf("model credential wired for %s; git credential helper at %s",
+			r.cfg.Agent, r.gitCredentialHelperPath())
+		return nil
+	}
+	return r.wireHostCredentials(host)
+}
+
+// wireHostCredentials is the git credential of a run with extra repositories:
+// one token per host the run clones from, each written to a file of its own,
+// and a helper that answers each of those hosts from its own file.
+//
+// Only the hosts the spec names, and only those with a token. A host in
+// SecretKeyGitTokens that no repository of the run is on gets no answer, by the
+// same rule that keeps the run's token from a marketplace a repository named.
+func (r *Run) wireHostCredentials(primaryHost string) error {
+	hosts := []string{primaryHost}
+	for _, extra := range r.cfg.ExtraRepos {
+		host, err := gitHost(extra.URL)
+		if err != nil {
+			return fail(runv1.ExitConfig, "RepoURLUnusable", "%s: %s", extra.Path, err)
+		}
+		if !slices.Contains(hosts, host) {
+			hosts = append(hosts, host)
+		}
+	}
+
+	dir := filepath.Join(r.layout.RunPrivate, "git-tokens")
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		return failWrap(runv1.ExitConfig, "LayoutUnwritable", err, "creating %s", dir)
+	}
+	var answers []credentialAnswer
+	for i, host := range hosts {
+		entry, ok := r.secrets.GitTokens[host]
+		switch {
+		case ok && entry.Token != "":
+			path := filepath.Join(dir, strconv.Itoa(i))
+			if err := os.WriteFile(path, []byte(entry.Token), 0o400); err != nil {
+				return failWrap(runv1.ExitConfig, "LayoutUnwritable", err, "writing %s", path)
+			}
+			answers = append(answers, credentialAnswer{host: host, tokenPath: path})
+		case host == primaryHost && r.secrets.GitToken != "":
+			// A backend that wrote no entry for the working repository's
+			// host still wrote git-token for it.
+			answers = append(answers, credentialAnswer{
+				host: host, tokenPath: filepath.Join(r.layout.Secrets, runv1.SecretKeyGitToken)})
+		default:
+			r.logf("no git token for %s; its repositories are cloned without one", host)
+		}
+	}
+	if err := r.writeCredentialHelper(answers); err != nil {
 		return err
 	}
-	r.logf("model credential wired for %s; git credential helper at %s",
-		r.cfg.Agent, r.gitCredentialHelperPath())
+	names := make([]string, len(answers))
+	for i, a := range answers {
+		names[i] = a.host
+	}
+	r.logf("model credential wired for %s; git credential helper at %s answers %s",
+		r.cfg.Agent, r.gitCredentialHelperPath(), orDefault(strings.Join(names, ", "), "no host"))
 	return nil
 }
 
@@ -216,24 +276,45 @@ func (r *Run) gitCredentialHelperPath() string {
 // helper which host it is talking to; the helper answers that one and stays
 // silent for the rest.
 func (r *Run) writeGitCredentialHelper(host string) error {
-	tokenPath := filepath.Join(r.layout.Secrets, runv1.SecretKeyGitToken)
+	return r.writeCredentialHelper([]credentialAnswer{
+		{host: host, tokenPath: filepath.Join(r.layout.Secrets, runv1.SecretKeyGitToken)},
+	})
+}
+
+// credentialAnswer is one host the credential helper answers, and the file its
+// token is read from.
+type credentialAnswer struct {
+	host, tokenPath string
+}
+
+// writeCredentialHelper writes the helper for a set of hosts. Each host is a
+// quoted case pattern, so a '*' or '?' in it matches itself and nothing else;
+// gitHost has already refused a quote or a newline.
+func (r *Run) writeCredentialHelper(answers []credentialAnswer) error {
+	var cases strings.Builder
+	for _, a := range answers {
+		cases.WriteString("  '" + a.host + "') token='" + a.tokenPath + "' ;;\n")
+	}
 	script := "#!/bin/sh\n" +
 		"# Answers git's credential protocol for haliphron runs. Only 'get' is\n" +
 		"# implemented: there is nothing to store and nothing to erase, because the\n" +
-		"# credential lives in a read-only mount for the lifetime of the pod.\n" +
+		"# credential lives in a read-only file for the lifetime of the pod.\n" +
 		"#\n" +
-		"# The answer is bound to one host. A clone of anything else — a plugin\n" +
-		"# marketplace on another forge, or one a repository named — proceeds\n" +
-		"# unauthenticated rather than with this run's token.\n" +
+		"# The answer is bound to the hosts of the run's own repositories. A clone\n" +
+		"# of anything else — a plugin marketplace on another forge, or one a\n" +
+		"# repository named — proceeds unauthenticated rather than with a token.\n" +
 		"[ \"$1\" = get ] || exit 0\n" +
 		"asked=\n" +
 		"while IFS='=' read -r key value; do\n" +
 		"  [ -n \"$key\" ] || break\n" +
 		"  [ \"$key\" = host ] && asked=$value\n" +
 		"done\n" +
-		"[ \"$asked\" = '" + host + "' ] || exit 0\n" +
+		"case \"$asked\" in\n" +
+		cases.String() +
+		"  *) exit 0 ;;\n" +
+		"esac\n" +
 		"printf 'username=x-access-token\\n'\n" +
-		"printf 'password=%s\\n' \"$(cat '" + tokenPath + "')\"\n"
+		"printf 'password=%s\\n' \"$(cat \"$token\")\"\n"
 
 	path := r.gitCredentialHelperPath()
 	if err := os.WriteFile(path, []byte(script), 0o700); err != nil {

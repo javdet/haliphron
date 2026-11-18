@@ -713,8 +713,8 @@ components:
     AgentType:
       type: string
       maxLength: 32
-      enum: [claude-code, codex]
-      description: opencode is deferred (closed question 6), but the value is an extension point
+      enum: [claude-code, codex, opencode]
+      description: The runtime inside the agent image. All three are implemented by the one image.
 
     InputRef:
       type: object
@@ -987,6 +987,16 @@ components:
           default: 30
           description: How long to hold the connection when there is no work. Clamped to `maxWaitSeconds`.
         capacitySlots: {type: integer, format: int32, minimum: 0, maximum: 256, description: An update to the declared capacity}
+        features:
+          type: array
+          maxItems: 32
+          description: |
+            Parts of the lease this controller carries out that an older one would
+            silently ignore. A run that needs one is issued only to a poll that
+            declares it, and otherwise waits in Queued. `extraRepos` is
+            `spec.extraRepos`: the pod receives `HALIPHRON_EXTRA_REPOS` and a
+            `/repos` volume. Unknown values are ignored.
+          items: {type: string, maxLength: 64}
 
     LeaseResponse:
       type: object
@@ -1093,7 +1103,11 @@ components:
             only references. This is checked by the controller's admission
             policy.
 
-            Known keys: `git-token`, `llm-api-key`, `llm-base-url` when the
+            Known keys: `git-token`, `git-tokens.json` when the run clones
+            from more than one host — a JSON object of host to
+            `{"provider", "token"}`, one entry per host of `spec.repo` and
+            `spec.extraRepos`, beside which `git-token` still carries the
+            working repository's token — `llm-api-key`, `llm-base-url` when the
             model key belongs to a gateway such as OpenRouter, `mcp.json`,
             `presigned.json` in object-store mode only, and `agent-env.json`
             when the role adds variables to the agent's environment — a JSON
@@ -1187,6 +1201,17 @@ components:
           maxItems: 8
           items: {type: string, maxLength: 253}
         repo: {$ref: '#/components/schemas/RepoSpec'}
+        extraRepos:
+          type: array
+          maxItems: 31
+          description: |
+            Repositories the run works in beside `repo`, cloned under
+            `/repos/<path>` before the agent starts. Each one with changes is
+            committed, pushed to `repo.targetBranch` and proposed for review like
+            `repo`; the branch, `createPR`, `submodules` and `lfs` are `repo`'s and
+            apply to all of them. Issued only to a controller whose lease poll
+            declares the `extraRepos` feature.
+          items: {$ref: '#/components/schemas/ExtraRepoSpec'}
         runtime: {$ref: '#/components/schemas/RuntimeSpec'}
         toolPolicy: {$ref: '#/components/schemas/ToolPolicy'}
         budget: {$ref: '#/components/schemas/BudgetSpec'}
@@ -1217,6 +1242,21 @@ components:
         submodules: {type: boolean}
         lfs: {type: boolean}
         createPR: {type: boolean, default: true}
+
+    ExtraRepoSpec:
+      type: object
+      required: [url, path]
+      properties:
+        url: {type: string, minLength: 1, maxLength: 2048}
+        provider: {$ref: '#/components/schemas/GitProvider'}
+        baseBranch: {type: string, maxLength: 255, description: Empty means the remote's default branch}
+        path:
+          type: string
+          minLength: 1
+          maxLength: 64
+          pattern: '^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$'
+          description: The directory under `/repos` the repository is cloned into, unique within the run
+        cloneDepth: {type: integer, format: int32, minimum: 0, description: 0 means a full clone}
 
     GitProvider:
       type: string
@@ -1378,7 +1418,7 @@ components:
       type: string
       maxLength: 32
       enum:
-        [init, validate, fetch, checkpoint, auth, clone, inputs, role, plugins,
+        [init, validate, fetch, checkpoint, auth, clone, clone-extra, inputs, role, plugins,
          mcp-prepare, mcp-verify, run, parse, output, persist, commit, push, pr,
          finalize, notify]
       description: |
@@ -1856,6 +1896,14 @@ components:
             Duplicated into `runs.result_summary` so that the run list in the UI
             does not hit the artifact store for every row.
         repo: {$ref: '#/components/schemas/RepoResult'}
+        extraRepos:
+          type: array
+          maxItems: 31
+          description: |
+            `repo` for each of the spec's `extraRepos` that was cloned, named by
+            its path. Reported whatever the outcome, so a pull request opened in
+            one repository is visible even on a run that failed to push another.
+          items: {$ref: '#/components/schemas/ExtraRepoResult'}
         usage: {$ref: '#/components/schemas/Usage'}
         phaseTimings:
           type: array
@@ -1883,6 +1931,14 @@ components:
         contractVersion: {type: string, maxLength: 16}
         agentVersion: {type: string, maxLength: 64}
 
+    ExtraRepoResult:
+      allOf:
+        - $ref: '#/components/schemas/RepoResult'
+        - type: object
+          required: [path]
+          properties:
+            path: {type: string, maxLength: 64}
+
     RepoResult:
       type: object
       description: Absent for a run without a repository — which is a legal case
@@ -1899,7 +1955,7 @@ components:
 
     RuntimePhase:
       type: string
-      enum: [init, validate, fetch, checkpoint, auth, clone, inputs, role, plugins,
+      enum: [init, validate, fetch, checkpoint, auth, clone, clone-extra, inputs, role, plugins,
              mcp-prepare, mcp-verify, run, parse, output, persist, commit, push,
              pr, finalize, notify]
       description: |

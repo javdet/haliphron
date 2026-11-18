@@ -144,6 +144,14 @@ Because of this rule `roleConfig` moved from `RenderedRunSpec` into `Lease`
 (delta D15): the contents of the role files are material, and the CR gets
 `materials.configMapName`.
 
+`spec.extraRepos` is spec, not material: a list of `{url, provider, baseBranch,
+path, cloneDepth}` with nothing secret in it, the same values the pod receives as
+`HALIPHRON_EXTRA_REPOS`. `maxItems: 31` is the schema's ceiling — 32 repositories
+with the working one — and bounds the immutability rule's cost like every other
+list; the limit an installation enforces is lower and set in the UI. The field is
+additive: every CR created before it exists stays valid, and the status is
+unchanged (`status.prURL` is the working repository's).
+
 ---
 
 ## 4. `spec` immutability, and why a new epoch means a new CR
@@ -431,7 +439,7 @@ interpreted depends on these values.
 | `activeDeadlineSeconds` | `timeoutSeconds` + slack for the clone and the upload | a backstop; the normal timeout must have time to upload the partial result |
 | requests | **equal to limits** | QoS class Guaranteed: an agent evicted halfway costs an hour of work and a second bill for the model |
 | `automountServiceAccountToken` | `false` | the pod does not need the cluster API |
-| `securityContext` | non-root, `readOnlyRootFilesystem: true`, `allowPrivilegeEscalation: false`, seccomp `RuntimeDefault` | section 14 of the architecture. Writes are needed in four directories, all emptyDir; the root stays read-only because the image moves the CLI caches into `$HOME` (contract 3, delta R6) |
+| `securityContext` | non-root, `readOnlyRootFilesystem: true`, `allowPrivilegeEscalation: false`, seccomp `RuntimeDefault` | section 14 of the architecture. Writes are needed in four directories, all emptyDir — five with `/repos`, mounted only for a run with `spec.extraRepos`; the root stays read-only because the image moves the CLI caches into `$HOME` (contract 3, delta R6) |
 | `terminationGracePeriodSeconds` | from the cancel command's `gracePeriodSeconds` | give the pod time to upload the partial result before SIGKILL |
 | `volumeMounts` | the per-run Secret at `/haliphron/secrets/` (0400), the ConfigMap at `/haliphron/role/` | secrets end up neither in `spec`, nor in `kubectl describe`, nor in the environment the agent inherits |
 | `env` | the non-secret runtime contract variables as literals, plus `HALIPHRON_PROMPT` from a `secretKeyRef` | the list is `ContractEnv` in `api/run/v1/runtime.go`; the one exception is below |
@@ -443,9 +451,10 @@ the namespace could send a forged completion for somebody else's run.
 **`envFrom` will not do here**, and this is delta R1 of contract 3. The Secret's
 keys are fixed by contract 1 — `prompt`, `git-token`, `llm-api-key`,
 `llm-base-url` when the key belongs to a gateway, `mcp.json`,
-`callback-token`, `presigned.json` in object-store mode, and `agent-env.json`
-when the role adds variables to the agent's environment — and all but the
-first are invalid environment variable names. `envFrom` silently skips such
+`callback-token`, `presigned.json` in object-store mode, `agent-env.json`
+when the role adds variables to the agent's environment, and `git-tokens.json`
+for a run with extra repositories — and all but the first are invalid
+environment variable names. `envFrom` silently skips such
 keys, leaving an Event in the namespace: the pod starts with no token, no MCP
 configuration and no credentials at all, and the first intelligible message
 about it is a clone that failed to authenticate.

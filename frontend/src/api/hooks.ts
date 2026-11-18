@@ -38,6 +38,7 @@ import {
   type ModelCredentialType,
   type Role,
   type Run,
+  type RunLimits,
   type RunList,
   type RunRetention,
   type RunStats,
@@ -84,6 +85,7 @@ export const keys = {
   gitCredential: () => ['git-credential'] as const,
   runRetention: () => ['run-retention'] as const,
   tokenRetention: () => ['token-retention'] as const,
+  runLimits: () => ['run-limits'] as const,
   chatIntegration: (platform: ChatPlatform) => ['integrations', platform] as const,
   locks: (runId?: string) => ['locks', runId ?? ''] as const,
   deferred: (filter: DeferredFilter) => ['deferred-runs', filter] as const,
@@ -780,6 +782,26 @@ export function usePutTokenRetention() {
         body: { run_token_retention_seconds },
       }),
     onSuccess: (saved) => qc.setQueryData(keys.tokenRetention(), saved),
+  })
+}
+
+// ---------------------------------------------------------------------------
+// run limits
+// ---------------------------------------------------------------------------
+
+export function useRunLimits() {
+  return useQuery({
+    queryKey: keys.runLimits(),
+    queryFn: ({ signal }) => request<RunLimits>('/run-limits', { signal }),
+  })
+}
+
+export function usePutRunLimits() {
+  const qc = useQueryClient()
+  return useMutation({
+    mutationFn: (max_repos_per_run: number) =>
+      request<RunLimits>('/run-limits', { method: 'PUT', body: { max_repos_per_run } }),
+    onSuccess: (saved) => qc.setQueryData(keys.runLimits(), saved),
   })
 }
 

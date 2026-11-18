@@ -272,3 +272,47 @@ func TestSecretFilesAreReadOnlyToTheirOwnerAndBadKeysAreRefused(t *testing.T) {
 }
 
 func errorsAs(err error, target any) bool { return errors.As(err, target) }
+
+func TestTheReposVolumeIsMountedAndCleanedUp(t *testing.T) {
+	row := testRow()
+	spec, err := Container(row, 1, nil, testHost())
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, m := range spec.HostConfig.Mounts {
+		if m.Target == runv1.MountRepos {
+			t.Fatal("a run without extra repositories was given the repos volume")
+		}
+	}
+
+	row.Spec.ExtraRepos = []runv1.ExtraRepoSpec{{URL: "https://git.example.com/a/lib.git", Path: "lib", CloneDepth: 1}}
+	spec, err = Container(row, 1, nil, testHost())
+	if err != nil {
+		t.Fatal(err)
+	}
+	var source string
+	for _, m := range spec.HostConfig.Mounts {
+		if m.Target == runv1.MountRepos {
+			if m.Type != "volume" || m.ReadOnly || m.VolumeOptions == nil || m.VolumeOptions.NoCopy {
+				t.Errorf("%s must be a writable named volume initialised from the image, got %+v", m.Target, m)
+			}
+			source = m.Source
+		}
+	}
+	if source == "" {
+		t.Fatalf("no mount at %s", runv1.MountRepos)
+	}
+	if !slices.Contains(VolumeNames(row.RunID, row.Epoch, 1), source) {
+		t.Errorf("cleanup does not name the repos volume %s: %v", source, VolumeNames(row.RunID, row.Epoch, 1))
+	}
+
+	var env string
+	for _, kv := range spec.Env {
+		if strings.HasPrefix(kv, runv1.EnvExtraRepos+"=") {
+			env = strings.TrimPrefix(kv, runv1.EnvExtraRepos+"=")
+		}
+	}
+	if !strings.Contains(env, `"path":"lib"`) {
+		t.Errorf("%s is %q, want the spec's extra repositories", runv1.EnvExtraRepos, env)
+	}
+}

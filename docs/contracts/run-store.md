@@ -122,7 +122,7 @@ takes it into its head to order by it would look wrong.
 |---|---|---|---|
 | admission | `spec`, `prompt`, `prompt_sha256`, `agent`, `model`, `timeout_seconds`, `repo_*` | backend | once, at `INSERT` |
 | ownership | `cluster_id`, `lease_epoch`, `attempt`, `ack_deadline`, `lease_deadline`, `ack_expiries` | backend | lease, ack, heartbeat, expiry; `ack_expiries` is reset only by an operator's retry |
-| observation | `status`, `observed_phase`, the result, the cost | backend, from the controller's reports | ingest |
+| observation | `status`, `observed_phase`, the result, the cost, `extra_repo_results` | backend, from the controller's reports | ingest |
 
 **Admission is immutable, and a trigger checks it.** `spec` is rendered once and
 handed out byte-for-byte on every lease — including a lease after reassignment.
@@ -137,6 +137,22 @@ drift test, and shredding it into forty columns would mean a migration for every
 new optional field. Only the fields the UI filters and sorts by, and placement
 selects by, are duplicated outward; the trigger freezes them together with `spec`,
 so they cannot diverge.
+
+**Extra repositories** (0023) are in `spec.extraRepos` only; the `repo_*` columns
+and the result columns (`pr_url`, `pr_number`, `pr_action`, `commit_sha`,
+`pushed`) describe the working repository, as they always did. What became of the
+others is `extra_repo_results`, a JSON array of `{path, pushed, targetBranch,
+commitSHA, prURL, prNumber, prAction}`, written by `promoteAttempt` in the
+report's transaction under the run's row lock. It is **merged, never replaced**:
+by `path`, field by field, a value the report carries replaces the stored one and
+a value it does not carry leaves it — the `COALESCE` rule the working
+repository's columns follow — so a later attempt that opened no pull request
+keeps the one an earlier attempt opened. A path seen for the first time is
+appended. `runtime_phase` gains `clone-extra`, between `clone` and `inputs`.
+
+The lease statement issues a run with `spec ? 'extraRepos'` only to a poll that
+declared the `extraRepos` feature (`lease.sql`, `$6`); the run otherwise stays
+`Queued`.
 
 ---
 
@@ -458,6 +474,15 @@ them forever. On the same pass as run retention, a batched `DELETE` removes
 `user` and `service` rows are never selected. The deletion is not audited per
 row; a save appends a `token_retention.saved` audit record in its own
 transaction.
+
+**A run's limits are data too** (0023). `run_limits` holds one row per tenant,
+`max_repos_per_run` (1–32, a `CHECK`; 32 is the CRD's ceiling on
+`spec.extraRepos` plus the working repository), saved from the UI's Settings page
+and nowhere else; no row means the backend's default of ten. Admission reads the
+row by primary key for every request that names extra repositories, with no
+cache, so a value saved on one replica applies to the next admission on all of
+them. A lower limit does not touch runs already admitted: their spec is frozen.
+A save appends a `run_limits.saved` audit record in its own transaction.
 
 `api_tokens.last_used_at` is written on authentication, which means every read of
 this table is potentially a write. Update it no more than once a minute

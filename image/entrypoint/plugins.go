@@ -45,8 +45,9 @@ func phasePlugins(ctx context.Context, r *Run) error {
 	if err != nil {
 		return err
 	}
-	installer, ok := rt.(PluginInstaller)
-	if !ok {
+	importer, imports := rt.(PluginImporter)
+	installer, installs := rt.(PluginInstaller)
+	if !imports && !installs {
 		return skip("this runtime does not install plugins")
 	}
 
@@ -54,11 +55,22 @@ func phasePlugins(ctx context.Context, r *Run) error {
 	if err != nil {
 		return err
 	}
+	if !imports && len(found.spec.OpenCode) > 0 {
+		// Packages for opencode's own plugin system. Nothing else can load
+		// them, so a role shared between runtimes keeps them without making
+		// every other run fail on them.
+		r.logf("plugins: ignoring %d opencode package(s): this run is %s", len(found.spec.OpenCode), r.cfg.Agent)
+		found.spec.OpenCode = nil
+	}
 	if found.spec.IsEmpty() {
 		return skip("no marketplace or plugin is declared by the role or the repository")
 	}
-	r.logf("plugins: %d marketplace(s), %d plugin(s), from %s",
-		len(found.spec.Marketplaces), len(found.spec.Enabled), found.origin)
+	r.logf("plugins: %d marketplace(s), %d plugin(s), %d opencode package(s), from %s",
+		len(found.spec.Marketplaces), len(found.spec.Enabled), len(found.spec.OpenCode), found.origin)
+
+	if imports {
+		return r.importPlugins(ctx, importer, found.spec)
+	}
 
 	// Best effort, all of it. A marketplace that cannot be fetched or a plugin
 	// that will not install costs the run that plugin and nothing else: the
@@ -222,10 +234,11 @@ func (r *Run) resolvePlugins() (pluginSources, error) {
 	// first source rather than a fallback.
 	//
 	// The files in question are `.claude/settings*.json`, which is claude-code's
-	// own format and says nothing about what codex should load. A codex run
-	// therefore takes its plugins from the role and nowhere else, rather than
-	// inheriting a list written for the other runtime and issuing `codex plugin
-	// add` for every entry of it.
+	// own format and says nothing about what codex or opencode should load. A
+	// codex or opencode run therefore takes its plugins from the role and
+	// nowhere else, rather than inheriting a list written for another runtime.
+	// (An opencode run that trusts the repository still loads the repository's
+	// own .opencode/ plugins — opencode does that itself; see openCode.Env.)
 	repoReadable := role.TrustsRepository() && r.cfg.HasRepo() &&
 		r.cfg.Agent == runv1.AgentClaudeCode
 	repoSource := func(path string) (pluginSources, bool, error) {

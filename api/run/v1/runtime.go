@@ -65,6 +65,11 @@ const (
 	EnvLFS          = "HALIPHRON_LFS"
 	EnvCreatePR     = "HALIPHRON_CREATE_PR"
 
+	// EnvExtraRepos is the spec's extraRepos as a JSON array of ExtraRepoSpec,
+	// absent when the run has none. Not a secret: the same values are in the
+	// CR, and the tokens for their hosts are in SecretKeyGitTokens.
+	EnvExtraRepos = "HALIPHRON_EXTRA_REPOS"
+
 	// EnvPrompt carries the task itself. It is sourced from SecretKeyPrompt
 	// with valueFrom.secretKeyRef and never written as a literal value.
 	//
@@ -128,6 +133,14 @@ const (
 // commit of phase PhaseCommit into a commit of the run's own output.
 const (
 	MountWorkspace = "/workspace"
+
+	// MountRepos holds the run's extra repositories, one directory per
+	// ExtraRepoSpec.Path. A volume of its own beside the workspace and not a
+	// directory inside it: a repository nested in the working tree is a second
+	// "src/main.go" for the agent to confuse with the first, a tree every
+	// recursive search walks, and a directory the CLIs cannot be told is
+	// separately writable.
+	MountRepos = "/repos"
 
 	// DirRunIO is the exchange with the agent: what it reads, what it writes.
 	DirRunIO = "/workspace/.haliphron"
@@ -223,7 +236,7 @@ const MaxRoleSystemPromptBytes = 32 << 10
 // logging: they key the checkpoint, they are the phase field of PhaseTiming,
 // and the UI groups a run's timeline by them.
 //
-// +kubebuilder:validation:Enum=init;validate;fetch;checkpoint;auth;clone;inputs;role;plugins;mcp-prepare;mcp-verify;run;parse;output;persist;commit;push;pr;finalize;notify
+// +kubebuilder:validation:Enum=init;validate;fetch;checkpoint;auth;clone;clone-extra;inputs;role;plugins;mcp-prepare;mcp-verify;run;parse;output;persist;commit;push;pr;finalize;notify
 type RuntimePhase string
 
 const (
@@ -248,6 +261,14 @@ const (
 	// helper. The token is never written into .git/config.
 	RuntimePhaseAuth  RuntimePhase = "auth"
 	RuntimePhaseClone RuntimePhase = "clone"
+	// RuntimePhaseCloneExtra clones the spec's extraRepos under MountRepos,
+	// each onto the run's branch. A run without any skips it.
+	//
+	// A phase of its own rather than the tail of RuntimePhaseClone so that the
+	// timeline says which clone failed and took the time, and so that a
+	// failure here reads as what it is — a repository beside the work, not
+	// the work itself.
+	RuntimePhaseCloneExtra RuntimePhase = "clone-extra"
 	// RuntimePhaseInputs fetches the run's input files from the controller
 	// into DirInputs, verifying each against its digest. A run without
 	// SecretKeyInputs skips it.
@@ -321,7 +342,8 @@ const (
 // done", which is only meaningful against a fixed sequence.
 var RuntimePhases = []RuntimePhase{
 	RuntimePhaseInit, RuntimePhaseValidate, RuntimePhaseFetch, RuntimePhaseCheckpoint,
-	RuntimePhaseAuth, RuntimePhaseClone, RuntimePhaseInputs, RuntimePhaseRole, RuntimePhasePlugins,
+	RuntimePhaseAuth, RuntimePhaseClone, RuntimePhaseCloneExtra, RuntimePhaseInputs,
+	RuntimePhaseRole, RuntimePhasePlugins,
 	RuntimePhaseMCPPrepare, RuntimePhaseMCPVerify,
 	RuntimePhaseRun, RuntimePhaseParse, RuntimePhaseOutput, RuntimePhasePersist,
 	RuntimePhaseCommit, RuntimePhasePush, RuntimePhasePR,
@@ -363,7 +385,7 @@ var ContractEnv = []string{
 	EnvAgent, EnvModel, EnvRole, EnvTimeoutSeconds, EnvMaxTurns, EnvPermissionMode,
 	EnvAllowedTools, EnvDeniedTools,
 	EnvRepoURL, EnvGitProvider, EnvBaseBranch, EnvTargetBranch,
-	EnvCloneDepth, EnvSubmodules, EnvLFS, EnvCreatePR,
+	EnvCloneDepth, EnvSubmodules, EnvLFS, EnvCreatePR, EnvExtraRepos,
 	EnvPrompt, EnvPromptSHA256, EnvCompletedPhases,
 	EnvLogChunkSeconds, EnvOTLPEndpoint, EnvTraceparent,
 	EnvArtifactMode, EnvStoragePrefix, EnvImageVersion,

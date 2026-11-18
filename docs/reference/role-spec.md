@@ -27,9 +27,9 @@ Every field is optional.
 | Field | Type | Notes |
 |---|---|---|
 | `description` | string | what the role is for; configures nothing; at most 1 KiB; see below |
-| `agent` | string | `claude-code` or `codex` |
+| `agent` | string | `claude-code`, `codex` or `opencode` |
 | `model` | string | |
-| `image` | string | overrides the installation's agent image |
+| `image` | string | overrides the installation's agent image. An image older than the release that added `repos` ignores a run's extra repositories and works in the working repository only |
 | `permissionMode` | string | `default`, `acceptEdits`, `bypassPermissions` or `plan` |
 | `maxTurns` | integer | |
 | `systemPrompt` | string | **appended** to the agent's system prompt, never substituted; at most 32 KiB; see below |
@@ -74,6 +74,7 @@ Every field is optional.
 |---|---|---|
 | `marketplaces` | array of [PluginMarketplace](#pluginmarketplace) | at most 16 |
 | `enabled` | array of string | `plugin@marketplace`, at most 64 |
+| `opencode` | array of string | opencode's own packages, at most 32; opencode runs only — see below |
 | `trustRepositorySources` | boolean | default **true**; see below |
 
 ### PluginMarketplace
@@ -100,9 +101,30 @@ fetched; it is refused when the role is saved rather than an hour later in a
 pod. A private repository is fetched with the run's own git credential, so that
 credential must reach both the run's repository and the marketplace.
 
+**opencode** has no marketplaces. An opencode run still gets every `enabled`
+plugin: the pod reads the catalogue itself and copies the plugin's skills,
+agents (as subagents named `<plugin>/<name>`), commands and MCP servers (named
+`plugin_<plugin>_<server>`) to where opencode looks. A plugin's hooks are not
+carried over; opencode cannot run them. `opencode` lists what opencode installs
+natively, with `opencode plugin add`: an npm package — `name`, `@scope/name`,
+either with `@version` — or a git package, `github:owner/repo#ref` or
+`git+https://host/path#ref`. Local paths and tarball URLs are refused. A
+claude-code or codex run ignores the list.
+
+```json
+"plugins": {
+  "marketplaces": [{"name": "playneta", "url": "playneta/claude-plugin"}],
+  "enabled": ["playneta-infra-coder@playneta"],
+  "opencode": ["opencode-wakatime@1.2.0"]
+}
+```
+
 `trustRepositorySources` decides whether the cloned repository's own
 `.claude/settings.<role>.json` may choose marketplaces and plugins, overriding
-the list above. It defaults to true. A plugin is arbitrary code that runs beside
+the list above. For an opencode run it also decides whether the repository's own
+`opencode.json` and `.opencode/` (its plugins, agents and MCP servers) are
+loaded; `false` drops them, and the repository's `AGENTS.md` with them. It
+defaults to true. A plugin is arbitrary code that runs beside
 the agent, so set it to `false` for a role that runs against repositories the
 installation does not control. The full resolution order is in
 [the agent runtime contract](../contracts/agent-runtime.md).
@@ -178,7 +200,8 @@ replaces nothing. The agent sees, in order:
 
 On claude-code, 2 and 3 are passed together through `--append-system-prompt`.
 codex has no equivalent flag, so they become a prefix of the prompt in the same
-order.
+order. opencode gets them as a file named in its `instructions`, which it adds
+after its own prompt.
 
 A role cannot switch the rules in step 2 off. They are what the git phases rely
 on, and a role that could replace them would produce runs that exit 0 and push
@@ -301,8 +324,8 @@ not post in chat, the backend posts their answers.
 Names the entrypoint sets itself, which a role may not set in the agent's
 environment:
 
-- any name starting `ANTHROPIC_`, `CLAUDE_`, `CODEX_`, `OPENAI_`, `HALIPHRON_`
-  or `GIT_`;
+- any name starting `ANTHROPIC_`, `CLAUDE_`, `CODEX_`, `OPENAI_`, `OPENCODE_`,
+  `HALIPHRON_` or `GIT_`;
 - `PATH`, `HOME`, `USER`, `SHELL`, `TMPDIR`, `GH_TOKEN`, `GL_TOKEN`,
   `GITHUB_TOKEN`, `GITLAB_TOKEN`, `LD_PRELOAD`, `LD_LIBRARY_PATH`,
   `NODE_OPTIONS`.

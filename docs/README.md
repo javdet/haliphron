@@ -1,6 +1,6 @@
 # Haliphron documentation
 
-Haliphron runs headless coding agents — claude-code, codex — as one-shot
+Haliphron runs headless coding agents — claude-code, codex, opencode — as one-shot
 Kubernetes Jobs, on request from REST, MCP, Slack or a UI. It is delivered
 on-prem and single-tenant, as two Helm charts.
 

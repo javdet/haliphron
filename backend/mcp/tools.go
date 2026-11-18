@@ -38,6 +38,27 @@ type toolExecution struct {
 	TaskSupport string `json:"taskSupport"`
 }
 
+// reposSchema is run_agent's repos argument. An array of objects rather than
+// "a string or an object": several MCP clients do not survive oneOf.
+var reposSchema = map[string]any{
+	"type":     "array",
+	"minItems": 1,
+	"maxItems": run.MaxReposCeiling,
+	"description": "Several repositories instead of repo and base_branch. The first is the working directory; " +
+		"the others are cloned beside it under /repos/<name>, and every one you change is pushed to the " +
+		"run's branch and gets its own pull request. The installation limits how many one run may name.",
+	"items": map[string]any{
+		"type": "object",
+		"properties": map[string]any{
+			"url":         map[string]any{"type": "string", "description": "Clone URL, without credentials."},
+			"base_branch": map[string]any{"type": "string", "description": "Default: the remote's default branch (main for the first)."},
+			"name":        map[string]any{"type": "string", "description": "Directory under /repos. Not for the first. Default: the URL's last segment."},
+			"depth":       map[string]any{"type": "integer", "minimum": 0, "description": "Clone depth, 0 for a full clone. Not for the first. Default: 1."},
+		},
+		"required": []string{"url"},
+	},
+}
+
 func toolDefinitions(c Caller, tasks bool) []tool {
 	var runAgentExecution *toolExecution
 	if tasks {
@@ -56,11 +77,12 @@ func toolDefinitions(c Caller, tasks bool) []tool {
 				"type": "object",
 				"properties": map[string]any{
 					"prompt":          map[string]any{"type": "string", "description": "What the agent should do."},
-					"agent":           map[string]any{"type": "string", "enum": []string{"claude-code", "codex"}},
+					"agent":           map[string]any{"type": "string", "enum": []string{"claude-code", "codex", "opencode"}},
 					"model":           map[string]any{"type": "string"},
 					"role":            map[string]any{"type": "string", "description": "A configured role: its tools, model and files."},
 					"repo":            map[string]any{"type": "string", "description": "Clone URL. Omit for a run without a repository."},
 					"base_branch":     map[string]any{"type": "string"},
+					"repos":           reposSchema,
 					"timeout_seconds": map[string]any{"type": "integer", "minimum": 60, "maximum": 86400},
 					"max_cost_usd":    map[string]any{"type": "string", "description": "Ceiling for this run, as a decimal."},
 					"async":           map[string]any{"type": "boolean", "description": "Default true. False waits for the run to finish."},
@@ -240,9 +262,10 @@ type runAgentArgs struct {
 	Model string `json:"model,omitempty"`
 	Role  string `json:"role,omitempty"`
 
-	Repo         string `json:"repo,omitempty"`
-	BaseBranch   string `json:"base_branch,omitempty"`
-	TargetBranch string `json:"target_branch,omitempty"`
+	Repo         string    `json:"repo,omitempty"`
+	BaseBranch   string    `json:"base_branch,omitempty"`
+	TargetBranch string    `json:"target_branch,omitempty"`
+	Repos        []repoArg `json:"repos,omitempty"`
 
 	TimeoutSeconds int32  `json:"timeout_seconds,omitempty"`
 	MaxCostUSD     string `json:"max_cost_usd,omitempty"`
@@ -255,6 +278,14 @@ type runAgentArgs struct {
 	// back instead of a second one. Named in the arguments rather than taken
 	// from a header because an MCP client has no headers to speak of.
 	IdempotencyKey string `json:"idempotency_key,omitempty"`
+}
+
+// repoArg is one entry of run_agent's repos.
+type repoArg struct {
+	URL        string `json:"url"`
+	BaseBranch string `json:"base_branch,omitempty"`
+	Name       string `json:"name,omitempty"`
+	Depth      *int32 `json:"depth,omitempty"`
 }
 
 func (s *Server) runAgent(r *http.Request, c Caller, raw json.RawMessage) (any, *rpcError) {
@@ -319,6 +350,15 @@ func (s *Server) admit(r *http.Request, c Caller, raw json.RawMessage) (runAgent
 		Priority:       args.Priority,
 		CreatedBy:      c.Name(),
 		CreatedVia:     c.Via(),
+	}
+	if len(args.Repos) > 0 {
+		repos := make([]run.RepoRequest, len(args.Repos))
+		for i, a := range args.Repos {
+			repos[i] = run.RepoRequest{URL: a.URL, BaseBranch: a.BaseBranch, Name: a.Name, Depth: a.Depth}
+		}
+		if err := submit.SetRepos(repos); err != nil {
+			return args, app.SubmitOptions{}, app.Submitted{}, err
+		}
 	}
 	if c.Parent != nil {
 		submit.ParentRunID = c.Parent.ID
@@ -412,6 +452,13 @@ func runText(item store.Run) string {
 	}
 	if item.PRURL != "" {
 		text += "\n\npull request: " + item.PRURL
+	}
+	// Every repository's, for a run with several: the parent that started it
+	// has to know about each change it is now responsible for.
+	for _, res := range item.ExtraRepoResults {
+		if res.PRURL != "" {
+			text += "\npull request (/repos/" + res.Path + "): " + res.PRURL
+		}
 	}
 	return text
 }

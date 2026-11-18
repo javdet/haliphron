@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## What this is
 
-Haliphron runs headless coding agents (claude-code, codex) as one-shot Kubernetes Jobs — or as
+Haliphron runs headless coding agents (claude-code, codex, opencode) as one-shot Kubernetes Jobs — or as
 containers on one Docker host, through the second controller in `dockerhost/` — on
 request from REST, MCP, Slack or a UI, and orchestrates them into workflows. On-prem, single
 tenant, delivered as two Helm charts.

@@ -14,7 +14,7 @@ credential** in the UI, or its own endpoint. Choose what kind it is:
 
 | Type | What | Works for |
 |---|---|---|
-| `api_key` | an Anthropic key (`sk-ant-api…`), an OpenAI key, or a gateway's token | claude-code and codex |
+| `api_key` | an Anthropic key (`sk-ant-api…`), an OpenAI key, the key of the provider an opencode run's model names, or a gateway's token | claude-code, codex and opencode |
 | `oauth_token` | a Claude Pro/Max subscription token from `claude setup-token` (`sk-ant-oat…`) | claude-code only |
 
 ```sh
@@ -61,6 +61,14 @@ What the pod does with it:
   `base_url` set to the root plus `/v1` and `wire_api = "responses"`, and that
   provider selected. This codex speaks only the Responses API, so the gateway
   must serve `/v1/responses`. OpenRouter does.
+- **opencode** gets a provider of its own, `haliphron-gateway`, speaking the
+  chat completions API at the root plus `/v1`, with the run's model declared on
+  it and selected as `haliphron-gateway/<model as written>`. The gateway must
+  serve `/v1/chat/completions`. OpenRouter and LiteLLM do.
+
+Without a gateway, opencode picks the provider from the model's qualifier —
+`anthropic/claude-opus-5` goes to Anthropic, `openai/gpt-5.1` to OpenAI — so the
+stored key must be that provider's.
 
 The endpoint travels in the lease as `llm-base-url`, next to the key. Replacing
 the key without restating `base_url` clears it. That way a key meant for
@@ -85,8 +93,8 @@ otherwise prefer.
 
 Runs then count against the plan's usage limits rather than an API bill, and
 the `cost_usd` a run reports is what the CLI computed, not what was charged.
-A codex run with a subscription token fails in the `auth` phase with
-`CredentialMismatch`. Check that the plan's terms allow automated use before
+A codex or opencode run with a subscription token fails in the `auth` phase
+with `CredentialMismatch`. Check that the plan's terms allow automated use before
 relying on it for more than trying Haliphron out.
 
 ## Store the git token

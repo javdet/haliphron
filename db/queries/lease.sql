@@ -1,7 +1,8 @@
 -- lease: hand work to a cluster that is asking for it.
 --
 -- $1 cluster_id, $2 agent types the cluster will accept, $3 how many,
--- $4 ack timeout seconds, $5 lease TTL seconds.
+-- $4 ack timeout seconds, $5 lease TTL seconds, $6 whether the poll declared
+-- the extraRepos feature.
 --
 -- FOR UPDATE SKIP LOCKED is what makes two concurrent polls from the same
 -- cluster — which happen, because a controller reconnects before the previous
@@ -23,6 +24,11 @@
 -- the path to *starting* a run; it is bounded at admission, so returning it
 -- here adds at most 512 KiB to a message that already carries a git token, a
 -- model key and mcp.json, and it removes the store from that path entirely.
+--
+-- A run whose spec has extraRepos is not handed to a controller that did not
+-- declare the feature. An older controller would drop the field without a word
+-- and run the task in one repository, which reports success and is the worst
+-- outcome available; the run waits in Queued instead.
 WITH picked AS (
   SELECT id
   FROM runs
@@ -30,6 +36,7 @@ WITH picked AS (
     AND cluster_id = $1
     AND agent = ANY ($2::agent_type[])
     AND cancel_requested_at IS NULL
+    AND ($6::boolean OR NOT (spec ? 'extraRepos'))
   ORDER BY priority DESC, created_at
   FOR UPDATE SKIP LOCKED
   LIMIT $3

@@ -318,7 +318,7 @@ const (
 	// LabelClusterID is the cluster identity the backend registered. Useful
 	// when one namespace is inspected next to a backend UI.
 	LabelClusterID = GroupName + "/cluster-id"
-	// LabelAgent is claude-code or codex.
+	// LabelAgent is claude-code, codex or opencode.
 	LabelAgent = GroupName + "/agent"
 	// LabelComponent marks the objects the controller owns.
 	LabelComponent = GroupName + "/component"

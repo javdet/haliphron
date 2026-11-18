@@ -128,6 +128,11 @@ func (s *Server) createSchedule(w http.ResponseWriter, r *http.Request, c caller
 	if req.Enabled != nil {
 		enabled = *req.Enabled
 	}
+	template, err := req.Run.submitRequest()
+	if err != nil {
+		s.failFor(w, r, err)
+		return
+	}
 	sch, err := s.app.CreateSchedule(r.Context(), app.ScheduleInput{
 		Name:                    req.Name,
 		Description:             req.Description,
@@ -136,7 +141,7 @@ func (s *Server) createSchedule(w http.ResponseWriter, r *http.Request, c caller
 		Enabled:                 enabled,
 		ConcurrencyPolicy:       req.ConcurrencyPolicy,
 		StartingDeadlineSeconds: req.StartingDeadlineSeconds,
-		Run:                     req.Run.submitRequest(),
+		Run:                     template,
 	}, c.Name(), c.Via())
 	if err != nil {
 		s.failFor(w, r, err)
@@ -160,7 +165,11 @@ func (s *Server) patchSchedule(w http.ResponseWriter, r *http.Request, c caller)
 		StartingDeadlineSeconds: req.StartingDeadlineSeconds,
 	}
 	if req.Run != nil {
-		template := req.Run.submitRequest()
+		template, err := req.Run.submitRequest()
+		if err != nil {
+			s.failFor(w, r, err)
+			return
+		}
 		patch.Run = &template
 	}
 	sch, err := s.app.UpdateSchedule(r.Context(), runv1.ULID(r.PathValue("id")), patch, c.Name(), c.Via())

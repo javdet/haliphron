@@ -8,16 +8,23 @@ import (
 
 // The role's plugins, as they travel and as they are validated.
 //
-// A plugin is a marketplace entry that both supported runtimes can install:
+// A plugin is a marketplace entry that every supported runtime can use:
 // skills, agents, hooks, MCP servers and executables on the agent's PATH. The
 // document below is rendered by the backend into RoleConfigKeyPlugins, mounted
 // read-only at MountRoleConfig, and read by the entrypoint's plugins phase.
 //
 // It is deliberately not a rendered settings.<role>.json. claude-code keeps
-// this state as JSON under CLAUDE_CONFIG_DIR and codex as TOML under
-// CODEX_HOME; a document shaped like either one would have to be translated for
-// the other, and the translation would live in the backend, which is the one
-// place that must not know what a runtime's configuration looks like.
+// this state as JSON under CLAUDE_CONFIG_DIR, codex as TOML under CODEX_HOME
+// and opencode as its own opencode.json; a document shaped like any one of them
+// would have to be translated for the others, and the translation would live in
+// the backend, which is the one place that must not know what a runtime's
+// configuration looks like.
+//
+// opencode has no marketplaces of its own. A `plugin@marketplace` entry reaches
+// it through the entrypoint, which reads the catalogue and copies the plugin's
+// skills, agents, commands and MCP servers into opencode's own places; what
+// opencode does install natively — npm and git packages — is the separate
+// OpenCode list.
 
 // PluginSpec is a role's plugin configuration.
 type PluginSpec struct {
@@ -32,6 +39,17 @@ type PluginSpec struct {
 	// not derivable from the repository that carries it: `playneta/claude-plugin`
 	// may well declare itself `playneta`.
 	Enabled []string `json:"enabled,omitempty"`
+
+	// OpenCode are opencode's own plugins: npm packages (`name`,
+	// `@scope/name`, either with `@version`) or git packages
+	// (`github:owner/repo#ref`, `git+https://host/path#ref`), installed with
+	// `opencode plugin add`. Only opencode runs read it — a claude-code or
+	// codex run ignores it, as an opencode run ignores nothing else here.
+	//
+	// It is not a resolution source of its own. The chain picks one source
+	// and this list travels in the role's document, so it is installed when
+	// the role's document is the source that wins.
+	OpenCode []string `json:"opencode,omitempty"`
 
 	// TrustRepositorySources decides whether the cloned repository's own
 	// settings may choose marketplaces and plugins.
@@ -61,7 +79,7 @@ type PluginMarketplace struct {
 // source declines to answer, which is what makes the resolution chain a chain
 // rather than a lookup: the first source with something to say wins.
 func (p *PluginSpec) IsEmpty() bool {
-	return p == nil || (len(p.Marketplaces) == 0 && len(p.Enabled) == 0)
+	return p == nil || (len(p.Marketplaces) == 0 && len(p.Enabled) == 0 && len(p.OpenCode) == 0)
 }
 
 // Declares reports whether the role said anything about plugins at all,
@@ -183,6 +201,94 @@ func PluginID(raw string) (plugin, marketplace string, err error) {
 	return plugin, marketplace, nil
 }
 
+var (
+	// An npm package name, scoped or not, as npm itself admits one: lower case,
+	// no leading dot or underscore.
+	openCodeNPMPattern = regexp.MustCompile(`^(@[a-z0-9][a-z0-9._-]*/)?[a-z0-9][a-z0-9._-]*$`)
+	// An npm version or range. Spaces are left out: a range that needs one is
+	// written with a hyphen-less comparator instead, and a space would be an
+	// argument boundary to every shell that ever logs the spec.
+	openCodeVersionPattern = regexp.MustCompile(`^[A-Za-z0-9.^~<>=*+|-]+$`)
+	// The git hosts' path half: owner/repo, or a deeper path for a forge that
+	// nests groups.
+	openCodeGitPathPattern = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._-]*(/[A-Za-z0-9][A-Za-z0-9._-]*)+$`)
+)
+
+// MaxOpenCodePlugins bounds the native list. Each entry is an npm install
+// standing between a paid-for lease and the agent starting.
+const MaxOpenCodePlugins = 32
+
+// OpenCodePlugin checks one entry of PluginSpec.OpenCode and returns it
+// trimmed.
+//
+// Registry packages and git packages only. Not a local path — the only local
+// path that means anything in a pod is one the entrypoint made — and not a
+// tarball URL, which would be code fetched from anywhere with no name to
+// review. The spec reaches `opencode plugin add` as one argument, which is why
+// a leading dash is refused whatever else it is.
+func OpenCodePlugin(raw string) (string, error) {
+	spec := strings.TrimSpace(raw)
+	switch {
+	case spec == "":
+		return "", fmt.Errorf("the empty string names no opencode plugin")
+	case len(spec) > 512:
+		return "", fmt.Errorf("%q is longer than 512 characters", spec)
+	case strings.ContainsAny(spec, " \t\n\r"):
+		return "", fmt.Errorf("%q contains whitespace", spec)
+	case strings.HasPrefix(spec, "-"):
+		return "", fmt.Errorf("%q starts with a dash", spec)
+	}
+
+	gitRef := func(rest string) error {
+		path, ref, hasRef := strings.Cut(rest, "#")
+		if !openCodeGitPathPattern.MatchString(path) || strings.Contains(path, "..") {
+			return fmt.Errorf("%q names no usable repository", spec)
+		}
+		if hasRef {
+			if _, err := PluginRef(ref); err != nil || ref == "" {
+				return fmt.Errorf("%q has an unusable ref", spec)
+			}
+		}
+		return nil
+	}
+	switch {
+	case strings.HasPrefix(spec, "github:"):
+		if err := gitRef(strings.TrimPrefix(spec, "github:")); err != nil {
+			return "", err
+		}
+		return spec, nil
+	case strings.HasPrefix(spec, "git+https://"):
+		rest := strings.TrimPrefix(spec, "git+https://")
+		host, path, _ := strings.Cut(rest, "/")
+		if !pluginHostPattern.MatchString(host) {
+			return "", fmt.Errorf("%q names no usable host", spec)
+		}
+		if err := gitRef(path); err != nil {
+			return "", err
+		}
+		return spec, nil
+	case strings.Contains(spec, ":"):
+		return "", fmt.Errorf("%q is neither an npm package nor a github: or git+https: package", spec)
+	}
+
+	// name, @scope/name, name@version, @scope/name@version: the version is
+	// whatever follows the last @ that is not the scope's.
+	name, version := spec, ""
+	if i := strings.LastIndex(spec, "@"); i > 0 {
+		name, version = spec[:i], spec[i+1:]
+		if version == "" {
+			return "", fmt.Errorf("%q ends with @ and no version", spec)
+		}
+	}
+	if !openCodeNPMPattern.MatchString(name) || len(name) > 214 {
+		return "", fmt.Errorf("%q is not a usable npm package name", name)
+	}
+	if version != "" && !openCodeVersionPattern.MatchString(version) {
+		return "", fmt.Errorf("%q is not a usable npm version", version)
+	}
+	return spec, nil
+}
+
 // PluginMarketplaceName checks the optional declared name.
 func PluginMarketplaceName(raw string) (string, error) {
 	name := strings.TrimSpace(raw)
@@ -243,6 +349,24 @@ func ValidatePluginSpec(spec *PluginSpec) (field string, err error) {
 			}
 			declared[name] = true
 		}
+	}
+
+	if len(spec.OpenCode) > MaxOpenCodePlugins {
+		return "plugins.opencode", fmt.Errorf("a role may name at most %d opencode plugins",
+			MaxOpenCodePlugins)
+	}
+	native := map[string]bool{}
+	for i, raw := range spec.OpenCode {
+		at := fmt.Sprintf("plugins.opencode[%d]", i)
+		plugin, err := OpenCodePlugin(raw)
+		if err != nil {
+			return at, err
+		}
+		if native[plugin] {
+			return at, fmt.Errorf("%q is named twice", plugin)
+		}
+		native[plugin] = true
+		spec.OpenCode[i] = plugin
 	}
 
 	seen := map[string]bool{}

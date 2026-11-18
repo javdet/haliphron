@@ -456,6 +456,10 @@ type scheduleTemplate struct {
 	BaseBranch   string `json:"base_branch,omitempty"`
 	TargetBranch string `json:"target_branch,omitempty"`
 	CreatePR     *bool  `json:"create_pr,omitempty"`
+	// Repos is the request's repos list when it named more than one
+	// repository; Repo and BaseBranch are then empty, as they were in the
+	// request.
+	Repos []templateRepo `json:"repos,omitempty"`
 
 	TimeoutSeconds int32  `json:"timeout_seconds,omitempty"`
 	MaxCostUSD     string `json:"max_cost_usd,omitempty"`
@@ -463,8 +467,38 @@ type scheduleTemplate struct {
 	Priority       int32  `json:"priority,omitempty"`
 }
 
+// templateRepo is one entry of a template's repos, in the public API's shape.
+type templateRepo struct {
+	URL        string `json:"url"`
+	BaseBranch string `json:"base_branch,omitempty"`
+	Name       string `json:"name,omitempty"`
+	Depth      *int32 `json:"depth,omitempty"`
+}
+
+func templateReposOf(repos []run.RepoRequest) []templateRepo {
+	if len(repos) == 0 {
+		return nil
+	}
+	out := make([]templateRepo, len(repos))
+	for i, r := range repos {
+		out[i] = templateRepo{URL: r.URL, BaseBranch: r.BaseBranch, Name: r.Name, Depth: r.Depth}
+	}
+	return out
+}
+
+func repoRequestsOf(repos []templateRepo) []run.RepoRequest {
+	if len(repos) == 0 {
+		return nil
+	}
+	out := make([]run.RepoRequest, len(repos))
+	for i, r := range repos {
+		out[i] = run.RepoRequest{URL: r.URL, BaseBranch: r.BaseBranch, Name: r.Name, Depth: r.Depth}
+	}
+	return out
+}
+
 func templateOf(req run.SubmitRequest) scheduleTemplate {
-	return scheduleTemplate{
+	t := scheduleTemplate{
 		Prompt:         req.Prompt,
 		Agent:          string(req.Agent),
 		Model:          req.Model,
@@ -478,6 +512,13 @@ func templateOf(req run.SubmitRequest) scheduleTemplate {
 		MaxTurns:       req.MaxTurns,
 		Priority:       req.Priority,
 	}
+	if repos := req.Repos(); repos != nil {
+		// Stored as the list it was given as, so the template reads back the
+		// way it was written and through the same SetRepos.
+		t.Repo, t.BaseBranch = "", ""
+		t.Repos = templateReposOf(repos)
+	}
+	return t
 }
 
 func decodeSchedule(row store.Schedule) (Schedule, error) {
@@ -495,7 +536,7 @@ func decodeTemplate(raw json.RawMessage) (run.SubmitRequest, error) {
 	if err := json.Unmarshal(raw, &t); err != nil {
 		return run.SubmitRequest{}, err
 	}
-	return run.SubmitRequest{
+	req := run.SubmitRequest{
 		Prompt:         t.Prompt,
 		Agent:          runv1.AgentType(t.Agent),
 		Model:          t.Model,
@@ -508,5 +549,9 @@ func decodeTemplate(raw json.RawMessage) (run.SubmitRequest, error) {
 		MaxCostUSD:     runv1.MoneyUSD(t.MaxCostUSD),
 		MaxTurns:       t.MaxTurns,
 		Priority:       t.Priority,
-	}, nil
+	}
+	if err := req.SetRepos(repoRequestsOf(t.Repos)); err != nil {
+		return run.SubmitRequest{}, err
+	}
+	return req, nil
 }

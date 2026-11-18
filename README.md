@@ -1,6 +1,6 @@
 # Haliphron
 
-Run headless coding agents — claude-code, codex — as one-shot Kubernetes Jobs,
+Run headless coding agents — claude-code, codex, opencode — as one-shot Kubernetes Jobs,
 on request from a REST API, MCP, Slack or a web UI.
 
 An agent starts, does the work in a repository, opens a pull request, and

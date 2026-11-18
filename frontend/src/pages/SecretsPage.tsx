@@ -107,13 +107,15 @@ function ModelCredentialDialog({ current, onClose }: { current?: ModelCredential
         {type === 'api_key' ? (
           <>
             An Anthropic key (<span className="mono">sk-ant-api…</span>) for claude-code, an OpenAI key for codex,
-            or the token of a gateway in front of either. Billed per token by the provider.
+            the key of whichever provider an opencode run&apos;s model names, or the token of a gateway in front of
+            any of them. Billed per token by the provider.
           </>
         ) : (
           <>
             Run <span className="mono">claude setup-token</span> on a machine signed in to a Pro or Max plan and
             paste the <span className="mono">sk-ant-oat…</span> token it prints. Works for claude-code runs only —
-            codex runs are refused — and runs count against the plan&apos;s usage limits, not an API bill.
+            codex and opencode runs are refused — and runs count against the plan&apos;s usage limits, not an API
+            bill.
           </>
         )}
       </div>

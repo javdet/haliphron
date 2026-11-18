@@ -137,6 +137,7 @@ agents bridge's gateway address and the callback port, default
 | `/haliphron/run` | named volume `…-run` | read-write, same |
 | `/home/agent` | named volume `…-home` | read-write, same |
 | `/tmp` | named volume `…-tmp` | read-write, same |
+| `/repos` | named volume `…-repos`, only when the run has `spec.extraRepos` | read-write, same; the image creates `/repos` owned by 1000 |
 | `/haliphron/secrets` | bind, `/run/haliphron/runs/<run>/<epoch>/a<n>/secrets` | read-only; files 0400 and the directory 0500, owned 1000:1000 |
 | `/haliphron/role` | bind, `…/a<n>/role`, only when the role has files | read-only; files 0444 |
 
@@ -352,7 +353,8 @@ cancellation that races a deliberate exit (code ≤ 128) loses to it.
   begins. Each attempt gets a new container, new volumes, freshly written secret
   files and `HALIPHRON_COMPLETED_PHASES` from `status.completedPhases`.
 - **After a terminal phase is recorded** the attempt's container, its four
-  volumes and its secret files are removed.
+  volumes — five with `…-repos` — and its secret files are removed. Cleanup
+  always names the fifth and treats one that was never created as gone.
 - **Presigned bundle refresh** before an attempt, object-store mode only: CRD
   contract §8, unchanged.
 - **Cancel:** the stop sequence with the command's grace. The entrypoint's

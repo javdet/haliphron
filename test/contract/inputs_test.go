@@ -116,15 +116,18 @@ func TestARunMayNotWriteUnderTheInputsPrefix(t *testing.T) {
 	}
 }
 
-func TestTheInputsPhaseComesAfterTheCloneAndBeforeTheRole(t *testing.T) {
+func TestTheInputsPhaseComesAfterTheClonesAndBeforeTheRole(t *testing.T) {
 	t.Parallel()
 
+	// After both clones — the working repository's owns the whole workspace,
+	// and DirInputs is inside it — and right before the role.
 	clone := slices.Index(runv1.RuntimePhases, runv1.RuntimePhaseClone)
+	cloneExtra := slices.Index(runv1.RuntimePhases, runv1.RuntimePhaseCloneExtra)
 	inputs := slices.Index(runv1.RuntimePhases, runv1.RuntimePhaseInputs)
 	role := slices.Index(runv1.RuntimePhases, runv1.RuntimePhaseRole)
-	if clone < 0 || inputs != clone+1 || role != inputs+1 {
-		t.Fatalf("the phases run clone=%d inputs=%d role=%d; inputs must sit between the clone and the role",
-			clone, inputs, role)
+	if clone < 0 || cloneExtra != clone+1 || inputs != cloneExtra+1 || role != inputs+1 {
+		t.Fatalf("the phases run clone=%d clone-extra=%d inputs=%d role=%d; inputs must sit between the clones and the role",
+			clone, cloneExtra, inputs, role)
 	}
 	if runv1.RuntimePhaseInputs.Resumable() {
 		t.Error("the inputs phase is resumable; its files live in the pod's emptyDir and are gone with it")

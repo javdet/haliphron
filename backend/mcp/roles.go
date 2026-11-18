@@ -28,12 +28,13 @@ import (
 // so get_role is withheld from it too.
 
 const roleSpecHint = `The spec is the role spec object, camelCase, every field optional: ` +
-	`description, agent ("claude-code" or "codex"), model, image, permissionMode ("default", ` +
+	`description, agent ("claude-code", "codex" or "opencode"), model, image, permissionMode ("default", ` +
 	`"acceptEdits", "bypassPermissions", "plan"), maxTurns, systemPrompt (appended to the agent's own), ` +
 	`env [{name, value}], secretEnv [{name, secret}] (secret names a managed secret), resources {cpu, ` +
 	`memory, ephemeralStorage}, mcpServers [{name, transport ("stdio", "http", "sse"), url, command, ` +
 	`args}], nodeSelector, tolerations, toolPolicy {allow, deny}, plugins {marketplaces [{name, url, ` +
-	`ref}], enabled ["plugin@marketplace"]}, configFiles {flat file name: contents}, clusterSelector. ` +
+	`ref}], enabled ["plugin@marketplace"], opencode ["npm-package@version" or "github:owner/repo#ref"] ` +
+	`(opencode runs only)}, configFiles {flat file name: contents}, clusterSelector. ` +
 	`Unknown fields are kept and ignored.`
 
 // roleToolDefinitions are offered to an operator's token, never to a run's.

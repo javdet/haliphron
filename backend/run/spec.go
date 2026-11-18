@@ -2,6 +2,7 @@ package run
 
 import (
 	"fmt"
+	"net/url"
 	"regexp"
 	"strings"
 
@@ -33,6 +34,12 @@ type SubmitRequest struct {
 	TargetBranch string
 	CreatePR     *bool
 
+	// ExtraRepos are the repositories after the first of a request's repos:
+	// cloned beside the working one and changed, pushed and proposed like it.
+	// RepoURL and BaseBranch are the first. SetRepos is how a transport fills
+	// the three from one list, so REST and MCP cannot split it differently.
+	ExtraRepos []RepoRequest
+
 	TimeoutSeconds int32
 	MaxCostUSD     runv1.MoneyUSD
 	MaxTurns       int32
@@ -52,6 +59,71 @@ type SubmitRequest struct {
 	// checks them against the installation's caps, sniffs their type, stores
 	// them under the run's prefix and writes the manifest in the run's insert.
 	Inputs []InputFile
+}
+
+// RepoRequest is one repository of a request's repos list, in the caller's
+// terms.
+type RepoRequest struct {
+	URL        string
+	BaseBranch string
+	// Name is the directory under runv1.MountRepos. Empty is the URL's
+	// basename, made unique within the run.
+	Name string
+	// Depth nil is a shallow clone of depth 1; zero is a full clone.
+	Depth *int32
+}
+
+// SetRepos fills RepoURL, BaseBranch and ExtraRepos from a request's repos
+// list. repos[0] is the working repository, the one a single repo names, and
+// takes neither a name nor a depth: it is always /workspace and is cloned the
+// way a single repository always was.
+func (r *SubmitRequest) SetRepos(repos []RepoRequest) error {
+	if len(repos) == 0 {
+		return nil
+	}
+	switch {
+	case r.RepoURL != "":
+		return invalid("repos", "give repo or repos, not both; repos[0] is the working repository")
+	case r.BaseBranch != "":
+		return invalid("base_branch", "with repos, the working repository's base branch is repos[0].base_branch")
+	case repos[0].Name != "":
+		return invalid("repos[0].name", "the first repository is the working directory, %s, and takes no name",
+			runv1.MountWorkspace)
+	case repos[0].Depth != nil:
+		return invalid("repos[0].depth", "the first repository is cloned in full; depth applies to the others")
+	case strings.TrimSpace(repos[0].URL) == "":
+		return invalid("repos[0].url", "a repository needs a url")
+	}
+	r.RepoURL = strings.TrimSpace(repos[0].URL)
+	r.BaseBranch = repos[0].BaseBranch
+	r.ExtraRepos = append([]RepoRequest(nil), repos[1:]...)
+	return nil
+}
+
+// Repos is the inverse of SetRepos: the request's repositories as one list,
+// working repository first, or nil for a request with at most one. A request
+// with only RepoURL is left to say it the way it always did.
+func (r SubmitRequest) Repos() []RepoRequest {
+	if len(r.ExtraRepos) == 0 {
+		return nil
+	}
+	out := []RepoRequest{{URL: r.RepoURL, BaseBranch: r.BaseBranch}}
+	return append(out, r.ExtraRepos...)
+}
+
+// ExtraReposOf turns a rendered spec's extraRepos back into the requests that
+// would render them again, for a run admitted on behalf of another — a
+// deferred continuation — which must work in the same repositories.
+func ExtraReposOf(spec []runv1.ExtraRepoSpec) []RepoRequest {
+	if len(spec) == 0 {
+		return nil
+	}
+	out := make([]RepoRequest, len(spec))
+	for i, e := range spec {
+		depth := e.CloneDepth
+		out[i] = RepoRequest{URL: e.URL, BaseBranch: e.BaseBranch, Name: e.Path, Depth: &depth}
+	}
+	return out
 }
 
 // InputFile is one file sent with a request, as admission receives it. Its
@@ -96,6 +168,20 @@ type Defaults struct {
 	MaxPromptBytes int
 	MaxDepth       int16
 	MaxChildren    int32
+
+	// MaxRepos is how many repositories a run may name, the working one
+	// included. It is not configuration: admission reads it from the store on
+	// every request, where the UI saves it, and sets it on its copy of the
+	// defaults. Zero is DefaultMaxRepos.
+	MaxRepos int
+}
+
+// RepoLimit is the repository limit in force, with zero meaning the default.
+func (d Defaults) RepoLimit() int {
+	if d.MaxRepos <= 0 {
+		return DefaultMaxRepos
+	}
+	return d.MaxRepos
 }
 
 // ChildLimit is the fan-out ceiling in force, with zero meaning the built-in
@@ -220,6 +306,20 @@ const (
 	// the missing headroom at the price of making an object store a
 	// prerequisite for starting any run at all.
 	MaxPromptBytes = 512 << 10
+
+	// DefaultMaxRepos is how many repositories a run may name, the working
+	// one included, until an operator saves another number in the UI.
+	DefaultMaxRepos = 10
+	// MaxReposCeiling is the most that may be saved: the working repository
+	// plus runv1.MaxExtraRepos, the CRD's own ceiling. A limit above it would
+	// admit runs the cluster's API server refuses.
+	MaxReposCeiling = runv1.MaxExtraRepos + 1
+
+	// DefaultExtraCloneDepth is the depth of an extra repository's clone when
+	// the request names none. Shallow, because ten full clones are what fills
+	// a pod's ephemeral storage; pushing a new branch from a shallow clone to
+	// the remote it came from works, because the remote has the base.
+	DefaultExtraCloneDepth = 1
 )
 
 // PromptTooLargeError is a prompt over the ceiling.
@@ -264,8 +364,9 @@ func Render(id runv1.ULID, req SubmitRequest, role *Role, def Defaults) (runv1.R
 		// PromptSHA256 is filled in by the caller, which is where the prompt
 		// itself is: this function renders the shape of the run, and the digest
 		// is a fact about the request it was rendered from.
-		Repo:    renderRepo(id, req),
-		Runtime: renderRuntime(req, role, def),
+		Repo:       renderRepo(id, req),
+		ExtraRepos: renderExtraRepos(req),
+		Runtime:    renderRuntime(req, role, def),
 	}
 
 	if policy := intersect(def.ToolPolicyCeiling, roleToolPolicy(role)); policy != nil {
@@ -324,7 +425,7 @@ func validate(req SubmitRequest, def Defaults) error {
 		return &PromptTooLargeError{Size: len(req.Prompt), Limit: maxPrompt}
 	}
 
-	if req.Agent != "" && req.Agent != runv1.AgentClaudeCode && req.Agent != runv1.AgentCodex {
+	if req.Agent != "" && !req.Agent.Known() {
 		return invalid("agent", "%q is not a known runtime", req.Agent)
 	}
 	if req.TimeoutSeconds != 0 && (req.TimeoutSeconds < MinTimeoutSeconds || req.TimeoutSeconds > MaxTimeoutSeconds) {
@@ -345,8 +446,16 @@ func validate(req SubmitRequest, def Defaults) error {
 	if req.RepoURL != "" && len(req.RepoURL) > 2048 {
 		return invalid("repo", "url exceeds 2048 characters")
 	}
+	if req.RepoURL != "" {
+		if err := checkRepoURL("repo", req.RepoURL, false); err != nil {
+			return err
+		}
+	}
 	if req.RepoURL == "" && req.TargetBranch != "" {
 		return invalid("target_branch", "a run without a repository has no branch to create")
+	}
+	if err := validateExtraRepos(req, def.RepoLimit()); err != nil {
+		return err
 	}
 	if req.Depth > maxDepth {
 		// The failure mode of an unbounded chain is spend, not incorrectness,
@@ -408,6 +517,182 @@ func renderRepo(id runv1.ULID, req SubmitRequest) runv1.RepoSpec {
 		repo.TargetBranch = TargetBranch(id)
 	}
 	return repo
+}
+
+// validateExtraRepos applies the rules for the repositories after the first:
+// the limit, a usable URL for each, no repository twice, and names the pod can
+// make a directory of.
+//
+// The limit is named in the refusal because the caller is often a model, and a
+// number it can read is a request it can split rather than retry.
+func validateExtraRepos(req SubmitRequest, limit int) error {
+	if len(req.ExtraRepos) == 0 {
+		return nil
+	}
+	total := len(req.ExtraRepos) + 1
+	if total > limit {
+		return invalid("repos", "%d repositories exceeds the limit of %d", total, limit)
+	}
+	if total > MaxReposCeiling {
+		return invalid("repos", "%d repositories exceeds the limit of %d", total, MaxReposCeiling)
+	}
+	if req.RepoURL == "" {
+		return invalid("repos", "extra repositories need a working repository to sit beside")
+	}
+
+	seen := map[string]int{normalizeRepoURL(req.RepoURL): 0}
+	names := map[string]int{}
+	for i, extra := range req.ExtraRepos {
+		at := i + 1 // the index in the caller's repos list
+		field := func(name string) string { return fmt.Sprintf("repos[%d].%s", at, name) }
+		repoURL := strings.TrimSpace(extra.URL)
+		switch {
+		case repoURL == "":
+			return invalid(field("url"), "a repository needs a url")
+		case len(repoURL) > 2048:
+			return invalid(field("url"), "url exceeds 2048 characters")
+		}
+		if err := checkRepoURL(field("url"), repoURL, true); err != nil {
+			return err
+		}
+		key := normalizeRepoURL(repoURL)
+		if first, dup := seen[key]; dup {
+			return invalid(field("url"), "is the same repository as repos[%d]", first)
+		}
+		seen[key] = at
+		if extra.BaseBranch != "" && !branchPattern.MatchString(extra.BaseBranch) {
+			return invalid(field("base_branch"), "%q is not a usable git branch name", extra.BaseBranch)
+		}
+		if extra.Depth != nil && *extra.Depth < 0 {
+			return invalid(field("depth"), "must be 0 for a full clone, or a positive depth")
+		}
+		if extra.Name != "" {
+			if err := runv1.ExtraRepoPath(extra.Name); err != nil {
+				return invalid(field("name"), "%s", err)
+			}
+			if first, dup := names[extra.Name]; dup {
+				return invalid(field("name"), "%q is already the name of repos[%d]", extra.Name, first)
+			}
+			names[extra.Name] = at
+		}
+	}
+	return nil
+}
+
+// checkRepoURL refuses a repository URL that would carry a credential, and —
+// for an extra repository, whose token is minted per host — one with no host
+// to mint it for.
+//
+// A credential in the URL is refused rather than stripped: it would otherwise
+// be in the CR, in `kubectl describe pod`, in the agent's system prompt and in
+// every log line that names the repository, and the platform has a place for
+// it that is none of those.
+func checkRepoURL(field, raw string, needHost bool) error {
+	parsed, err := url.Parse(raw)
+	if err != nil {
+		if needHost {
+			return invalid(field, "%q is not a repository URL", raw)
+		}
+		// A single repository has always been taken as given; one that is not
+		// a URL fails at the clone with git's own words.
+		return nil
+	}
+	if parsed.User != nil {
+		return invalid(field, "a repository URL must not carry credentials; store the token under Secrets instead")
+	}
+	if needHost && (parsed.Host == "" || (parsed.Scheme != "https" && parsed.Scheme != "http")) {
+		return invalid(field, "%q is not an http(s) repository URL", raw)
+	}
+	return nil
+}
+
+// normalizeRepoURL is what two spellings of one repository have in common: the
+// host case-folded, and the path without a trailing slash or ".git".
+func normalizeRepoURL(raw string) string {
+	raw = strings.TrimSpace(raw)
+	parsed, err := url.Parse(raw)
+	if err != nil || parsed.Host == "" {
+		return strings.TrimSuffix(strings.TrimSuffix(strings.ToLower(raw), "/"), ".git")
+	}
+	path := strings.TrimSuffix(strings.TrimSuffix(parsed.Path, "/"), ".git")
+	return strings.ToLower(parsed.Host) + path
+}
+
+// renderExtraRepos renders the repositories after the first. validate has
+// already refused anything it would have to guess about.
+func renderExtraRepos(req SubmitRequest) []runv1.ExtraRepoSpec {
+	if len(req.ExtraRepos) == 0 || req.RepoURL == "" {
+		return nil
+	}
+	taken := map[string]bool{}
+	for _, extra := range req.ExtraRepos {
+		if extra.Name != "" {
+			taken[extra.Name] = true
+		}
+	}
+	out := make([]runv1.ExtraRepoSpec, len(req.ExtraRepos))
+	for i, extra := range req.ExtraRepos {
+		repoURL := strings.TrimSpace(extra.URL)
+		path := extra.Name
+		if path == "" {
+			path = uniqueName(defaultRepoName(repoURL), taken)
+			taken[path] = true
+		}
+		depth := int32(DefaultExtraCloneDepth)
+		if extra.Depth != nil {
+			depth = *extra.Depth
+		}
+		out[i] = runv1.ExtraRepoSpec{
+			URL: repoURL, Provider: ProviderFor(repoURL), BaseBranch: extra.BaseBranch,
+			Path: path, CloneDepth: depth,
+		}
+	}
+	return out
+}
+
+// defaultRepoName is the last segment of the URL's path without ".git", with
+// anything ExtraRepoPath would refuse replaced: a name made up by the platform
+// is the platform's to make valid, where a name the caller chose is refused.
+func defaultRepoName(raw string) string {
+	path := raw
+	if parsed, err := url.Parse(raw); err == nil {
+		path = parsed.Path
+	}
+	path = strings.TrimSuffix(strings.TrimSuffix(path, "/"), ".git")
+	if i := strings.LastIndex(path, "/"); i >= 0 {
+		path = path[i+1:]
+	}
+	var b strings.Builder
+	for _, c := range path {
+		switch {
+		case c >= 'A' && c <= 'Z', c >= 'a' && c <= 'z', c >= '0' && c <= '9', c == '.', c == '_', c == '-':
+			b.WriteRune(c)
+		default:
+			b.WriteByte('-')
+		}
+	}
+	name := strings.TrimLeft(b.String(), "._-")
+	if len(name) > 56 {
+		// Room for a "-NN" suffix inside the 64 the pattern allows.
+		name = name[:56]
+	}
+	if name == "" {
+		return "repo"
+	}
+	return name
+}
+
+// uniqueName is base, or base-2, base-3 … — the first one not taken.
+func uniqueName(base string, taken map[string]bool) string {
+	if !taken[base] {
+		return base
+	}
+	for n := 2; ; n++ {
+		candidate := fmt.Sprintf("%s-%d", base, n)
+		if !taken[candidate] {
+			return candidate
+		}
+	}
 }
 
 // ProviderFor infers the hosting API from the clone URL. It is a guess with one

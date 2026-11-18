@@ -43,6 +43,10 @@ type runFields struct {
 	BaseBranch   string `json:"base_branch,omitempty"`
 	TargetBranch string `json:"target_branch,omitempty"`
 	CreatePR     *bool  `json:"create_pr,omitempty"`
+	// Repos names several repositories: repos[0] is the working one, the
+	// one repo names, and the rest are cloned beside it. target_branch and
+	// create_pr apply to all of them. Exclusive with repo and base_branch.
+	Repos []repoField `json:"repos,omitempty"`
 
 	TimeoutSeconds int32  `json:"timeout_seconds,omitempty"`
 	MaxCostUSD     string `json:"max_cost_usd,omitempty"`
@@ -50,8 +54,20 @@ type runFields struct {
 	Priority       int32  `json:"priority,omitempty"`
 }
 
-func (f runFields) submitRequest() run.SubmitRequest {
-	return run.SubmitRequest{
+// repoField is one entry of repos.
+type repoField struct {
+	URL        string `json:"url"`
+	BaseBranch string `json:"base_branch,omitempty"`
+	// Name is the directory under /repos; the URL's basename when absent.
+	// Not allowed on repos[0], which is always /workspace.
+	Name string `json:"name,omitempty"`
+	// Depth is the clone depth, 0 for a full clone; 1 when absent. Not
+	// allowed on repos[0].
+	Depth *int32 `json:"depth,omitempty"`
+}
+
+func (f runFields) submitRequest() (run.SubmitRequest, error) {
+	req := run.SubmitRequest{
 		Prompt:         f.Prompt,
 		Agent:          runv1.AgentType(f.Agent),
 		Model:          f.Model,
@@ -65,10 +81,20 @@ func (f runFields) submitRequest() run.SubmitRequest {
 		MaxTurns:       f.MaxTurns,
 		Priority:       f.Priority,
 	}
+	if len(f.Repos) > 0 {
+		repos := make([]run.RepoRequest, len(f.Repos))
+		for i, r := range f.Repos {
+			repos[i] = run.RepoRequest{URL: r.URL, BaseBranch: r.BaseBranch, Name: r.Name, Depth: r.Depth}
+		}
+		if err := req.SetRepos(repos); err != nil {
+			return run.SubmitRequest{}, err
+		}
+	}
+	return req, nil
 }
 
 func runFieldsOf(req run.SubmitRequest) runFields {
-	return runFields{
+	f := runFields{
 		Prompt:         req.Prompt,
 		Agent:          string(req.Agent),
 		Model:          req.Model,
@@ -82,6 +108,14 @@ func runFieldsOf(req run.SubmitRequest) runFields {
 		MaxTurns:       req.MaxTurns,
 		Priority:       req.Priority,
 	}
+	if repos := req.Repos(); repos != nil {
+		f.Repo, f.BaseBranch = "", ""
+		f.Repos = make([]repoField, len(repos))
+		for i, r := range repos {
+			f.Repos[i] = repoField{URL: r.URL, BaseBranch: r.BaseBranch, Name: r.Name, Depth: r.Depth}
+		}
+	}
+	return f
 }
 
 // runResponse is a run as the API shows it.
@@ -112,6 +146,12 @@ type runResponse struct {
 	PRNumber      *int32 `json:"pr_number,omitempty"`
 	CommitSHA     string `json:"commit_sha,omitempty"`
 
+	// Repos is every repository of a run that has more than one, the working
+	// one first: what it was asked to work in, and what became of each. Absent
+	// for a run with one repository or none, which the fields above describe
+	// completely.
+	Repos []repoView `json:"repos,omitempty"`
+
 	CostUSD      string `json:"cost_usd"`
 	InputTokens  int64  `json:"input_tokens"`
 	OutputTokens int64  `json:"output_tokens"`
@@ -128,6 +168,62 @@ type runResponse struct {
 	CreatedAt  time.Time  `json:"created_at"`
 	StartedAt  *time.Time `json:"started_at,omitempty"`
 	FinishedAt *time.Time `json:"finished_at,omitempty"`
+}
+
+// repoView is one repository of a run with several.
+type repoView struct {
+	URL string `json:"url"`
+	// Path is where the agent found it: /workspace for the working
+	// repository, /repos/<name> for the others.
+	Path         string `json:"path"`
+	BaseBranch   string `json:"base_branch,omitempty"`
+	TargetBranch string `json:"target_branch,omitempty"`
+	Pushed       bool   `json:"pushed"`
+	CommitSHA    string `json:"commit_sha,omitempty"`
+	PRURL        string `json:"pr_url,omitempty"`
+	PRNumber     *int32 `json:"pr_number,omitempty"`
+	PRAction     string `json:"pr_action,omitempty"`
+}
+
+// reposView lists a run's repositories when it has more than one: the working
+// one from its columns, the others from the frozen spec joined with what the
+// reports said about them.
+func reposView(r store.Run) []repoView {
+	if len(r.Spec) == 0 {
+		return nil
+	}
+	var spec struct {
+		ExtraRepos []runv1.ExtraRepoSpec `json:"extraRepos"`
+	}
+	if err := json.Unmarshal(r.Spec, &spec); err != nil || len(spec.ExtraRepos) == 0 {
+		return nil
+	}
+	out := make([]repoView, 0, len(spec.ExtraRepos)+1)
+	out = append(out, repoView{
+		URL: r.RepoURL, Path: runv1.MountWorkspace, BaseBranch: r.BaseBranch, TargetBranch: r.TargetBranch,
+		Pushed: r.Pushed, CommitSHA: r.CommitSHA, PRURL: r.PRURL, PRNumber: r.PRNumber,
+		PRAction: string(r.PRAction),
+	})
+	results := make(map[string]runv1.ExtraRepoResult, len(r.ExtraRepoResults))
+	for _, res := range r.ExtraRepoResults {
+		results[res.Path] = res
+	}
+	for _, extra := range spec.ExtraRepos {
+		view := repoView{
+			URL: extra.URL, Path: runv1.MountRepos + "/" + extra.Path,
+			BaseBranch: extra.BaseBranch, TargetBranch: r.TargetBranch,
+		}
+		if res, ok := results[extra.Path]; ok {
+			view.Pushed, view.CommitSHA = res.Pushed, res.CommitSHA
+			view.PRURL, view.PRAction = res.PRURL, string(res.PRAction)
+			if res.PRNumber != 0 {
+				number := res.PRNumber
+				view.PRNumber = &number
+			}
+		}
+		out = append(out, view)
+	}
+	return out
 }
 
 // RunView renders a run for the public API. It is exported because the MCP
@@ -158,6 +254,7 @@ func RunView(r store.Run) runResponse {
 		PRURL:           r.PRURL,
 		PRNumber:        r.PRNumber,
 		CommitSHA:       r.CommitSHA,
+		Repos:           reposView(r),
 		CostUSD:         string(r.CostUSD),
 		InputTokens:     r.InputTokens,
 		OutputTokens:    r.OutputTokens,
@@ -181,7 +278,11 @@ func (s *Server) createRun(w http.ResponseWriter, r *http.Request, c caller) {
 		return
 	}
 
-	submit := req.submitRequest()
+	submit, err := req.submitRequest()
+	if err != nil {
+		s.failFor(w, r, err)
+		return
+	}
 	submit.CreatedBy = c.Name()
 	submit.CreatedVia = c.Via()
 	if c.Parent != nil {
