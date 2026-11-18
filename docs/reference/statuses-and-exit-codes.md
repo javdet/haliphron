@@ -89,7 +89,7 @@ means](../explanation/what-succeeded-means.md).
 
 ## Runtime phases
 
-The twenty phases of the agent image entrypoint, in execution order. The
+The twenty-one phases of the agent image entrypoint, in execution order. The
 order is contract: the checkpoint's resume rule is "every phase before the
 first unfinished one is done", which is only meaningful against a fixed
 sequence.
@@ -101,27 +101,33 @@ sequence.
 | 3 | `fetch` | reads the prompt and verifies it against its digest |
 | 4 | `checkpoint` | reads which phases a previous attempt completed |
 | 5 | `auth` | wires the model credential and the git credential helper |
-| 6 | `clone` | clones the repository |
-| 7 | `inputs` | fetches the files sent with the request from the controller into `.haliphron/inputs/`; skipped when there are none |
-| 8 | `role` | resolves the role chain and intersects it with the policy ceiling |
-| 9 | `plugins` | registers the role's marketplaces and installs its plugins |
-| 10 | `mcp-prepare` | renders MCP configuration, referencing secrets rather than inlining them |
-| 11 | `mcp-verify` | proves the MCP servers came up |
-| 12 | `run` | the agent CLI, under the timeout |
-| 13 | `parse` | normalises the runtime's output into `result.md` and usage |
-| 14 | `output` | wraps the payload in the envelope and validates any declared schema |
-| 15 | `persist` | uploads the result, output and log so far |
-| 16 | `commit` | commits what the agent left uncommitted |
-| 17 | `push` | pushes with `--force-with-lease` |
-| 18 | `pr` | creates or updates the pull request |
-| 19 | `finalize` | uploads the final log and the completion report |
-| 20 | `notify` | posts the report to the controller |
+| 6 | `clone` | clones the working repository into `/workspace` |
+| 7 | `clone-extra` | clones each extra repository into `/repos/<name>`; skipped for a run with one repository or none |
+| 8 | `inputs` | fetches the files sent with the request from the controller into `.haliphron/inputs/`; skipped when there are none |
+| 9 | `role` | resolves the role chain and intersects it with the policy ceiling |
+| 10 | `plugins` | registers the role's marketplaces and installs its plugins |
+| 11 | `mcp-prepare` | renders MCP configuration, referencing secrets rather than inlining them |
+| 12 | `mcp-verify` | proves the MCP servers came up |
+| 13 | `run` | the agent CLI, under the timeout |
+| 14 | `parse` | normalises the runtime's output into `result.md` and usage |
+| 15 | `output` | wraps the payload in the envelope and validates any declared schema |
+| 16 | `persist` | uploads the result, output and log so far |
+| 17 | `commit` | commits what the agent left uncommitted, in every repository |
+| 18 | `push` | pushes with `--force-with-lease`, from every repository with changes |
+| 19 | `pr` | creates or updates the pull request of every pushed repository |
+| 20 | `finalize` | uploads the final log and the completion report |
+| 21 | `notify` | posts the report to the controller |
 
 `persist` runs **before** the git phases, so what the model produced is durable
 before anything allowed to fail. See [what "Succeeded"
 means](../explanation/what-succeeded-means.md#persist-before-git).
 
 `notify` is last and cannot change the exit code.
+
+A failure before `run` abandons every later phase except `finalize` and
+`notify`. A failure from `run` onwards abandons nothing: the later phases still
+run, and the first failure is the one reported. With several repositories, a
+push refused in one still leaves the others pushed and proposed.
 
 ### Phase outcomes
 
@@ -132,8 +138,9 @@ means](../explanation/what-succeeded-means.md#persist-before-git).
 | `failed` | the phase ran and failed |
 
 `skipped` is a first-class answer, not a synonym for failure. A run without a
-repository skips four phases; a resumed attempt skips everything up to and
-including `run`.
+repository skips five phases (`clone`, `clone-extra`, `commit`, `push`, `pr`),
+a run with one repository skips `clone-extra`, and a resumed attempt skips
+everything up to and including `run`.
 
 ---
 
@@ -147,14 +154,18 @@ Produced deliberately by the image entrypoint.
 | 10 | agent error | the agent CLI exited non-zero | `agent` |
 | 11 | agent timeout | the entrypoint killed the agent at its timeout | `agent` |
 | 12 | output invalid | `output.json` is missing or fails the declared schema | `agent` |
-| 20 | git | clone, push or PR failed | `git` |
+| 20 | git | clone, push or PR failed for a reason a retry could change | `git` |
 | 21 | storage | an artifact upload failed | `infra` |
-| 30 | config | incomplete configuration, or MCP servers did not come up | `config` |
+| 30 | config | incomplete configuration, an access failure a retry cannot change (a permanently refused push, say), or MCP servers did not come up | `config` |
 
 Codes above 128 are signals and are not produced by the entrypoint. 137 is
 SIGKILL (OOMKilled, eviction); 143 is SIGTERM (drain, preemption). All of them
 mean the platform stopped the process rather than the agent finishing badly,
 so all of them classify as `infra`.
+
+With several repositories, failures in more than one are reported as one: exit
+30 only if every one of them is a permanent refusal, 20 otherwise, so the
+controller retries whenever a retry could change something.
 
 An unrecognised code below 128 is the agent's own and classifies as `agent`.
 
@@ -184,7 +195,7 @@ plane.
 |---|---|---|
 | `none` | — | no failure |
 | `infra` | **yes** | the platform failed: eviction, storage, a node going away |
-| `git` | **yes** | clone, push or PR failed |
+| `git` | **yes** | clone, push or PR failed for a surmountable reason |
 | `agent` | no | the agent ran and did not succeed |
 | `config` | no | the run was misconfigured |
 | `budget` | no | the run exhausted a ceiling |

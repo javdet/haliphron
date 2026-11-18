@@ -92,7 +92,7 @@ NetworkPolicy.
 | `backend/` | control plane: `restapi` `mcp` `clusterapi` listeners and the `mattermost` bot adapter → `app` use cases → `store` (pgx) |
 | `controller/` | the in-cluster controller: `lease` → `materialize` → `agentrun` reconciler → `launcher` (Job) |
 | `dockerhost/` | the second runtime, one Docker host: `lease` → `materialize` (SQLite row) → `reconcile` → `launcher` (container); reuses `controller/`'s Kubernetes-free packages and its env builder. Contract: `docs/contracts/docker-host.md` |
-| `image/` | the agent image entrypoint: twenty phases, `entrypoint/runner.go` is the spine |
+| `image/` | the agent image entrypoint: twenty-one phases, `entrypoint/runner.go` is the spine |
 | `db/` | migrations and the contract queries (`lease.sql`, `expire_*.sql`, `lock_run.sql`) |
 | `fake/` | `backend`, `controller`, `controlplane` — one faithful implementation of each contract side |
 | `test/*` | cross-module contract suites, one per track, kept out of the shipping modules |

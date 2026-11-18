@@ -13,15 +13,18 @@ did not choose. Nothing here assumes otherwise.
 
 | Path | What |
 |---|---|
-| `entrypoint/` | the twenty phases, as a package |
+| `entrypoint/` | the twenty-one phases, as a package |
 | `cmd/haliphron-entrypoint/` | the binary the image runs |
-| `Dockerfile` | Debian slim, Node, both agent CLIs, non-root, read-only root |
+| `Dockerfile` | Debian slim, Node, the three agent CLIs, non-root, read-only root |
 
 Inside `entrypoint/`, the files follow the pipeline rather than the type
 hierarchy: `phases.go` is init through role, except `inputs.go`, which reads the
 files a request arrived with from the controller; `agent.go` and `runtimes.go`
-are the model and the two CLIs, `persist.go` is output through finalize,
-`git.go` is the four git phases, `report.go` is the completion webhook.
+are the model and the three CLIs, `opencode.go` and `opencode_plugins.go` are
+opencode's configuration and the import of marketplace plugins into it,
+`persist.go` is output through finalize, `git.go` is the five git phases
+(`clone`, `clone-extra`, `commit`, `push`, `pr`), `report.go` is the completion
+webhook.
 `runner.go` is the spine and the only place that decides what happens after
 something fails.
 
@@ -59,8 +62,9 @@ and without a cluster, a backend or MinIO.
 Three rows of the contract's checklist are not reachable from there and belong
 to `docker run` — that the container starts as non-root, that it needs no write
 outside an emptyDir, and that it completes a run under `--read-only` with tmpfs
-on the four writable directories. `fake-controlplane -prepare` stages a run for
-exactly that; see the header of
+on the four writable directories (five with `/repos`, for a run with extra
+repositories). `fake-controlplane -prepare` stages a run for exactly that; see
+the header of
 [fake/cmd/fake-controlplane](../fake/cmd/fake-controlplane/main.go) for the
 command.
 

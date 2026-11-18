@@ -136,7 +136,9 @@ An agent pod is issued a per-run MCP token for the life of its run, so an
 agent can delegate by calling `run_agent` itself.
 
 Such a run is bound to its caller: `parent_run_id` is set, `depth` is one
-greater, and an omitted `role` or `repo` is inherited from the parent. Cost is
+greater, and an omitted `role` or `repo` is inherited from the parent. Only the
+parent's working repository is inherited, not its extra ones: a child that
+should work in several repositories passes `repos` itself. Cost is
 charged to the right budget because the chain is recorded.
 
 Two ceilings bound this, both on the control-plane chart:

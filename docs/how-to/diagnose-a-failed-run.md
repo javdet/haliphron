@@ -77,16 +77,25 @@ logs is not evidence that it was missing from the run.
 
 ### Exit 30, class `config`
 
-The run was misconfigured and refused before anything cost money.
-`status_message` names what was missing.
+The run was misconfigured. The cluster does not retry it, because a retry
+would get the same answer. `status_message` names what was wrong.
 
 Usually a missing model key or git token — see [how to give runs a git token
 and a model key](provide-run-credentials.md) — or MCP servers that did not
-come up, caught by the `mcp-verify` phase.
+come up, caught by the `mcp-verify` phase. Both are refused before the model
+is called, so nothing was spent.
+
+A git refusal that a retry would repeat is exit 30 too, not 20: a 401, 403 or
+404 on clone or push, a protected branch, no permission to open a pull request.
+When that happens in `push` or `pr`, the agent has already run and **its result
+is in storage** (see exit 20 below). Fix the token's access or the branch
+protection, then resubmit.
 
 ### Exit 20, class `git`
 
-Clone, push or pull request failed. **The result is already in storage**: the
+Clone, push or pull request failed for a reason a retry could change: the
+network, a 5xx from the forge, a ref conflict, an exhausted rate limit. The
+cluster retries it on its own. **The result is already in storage**: the
 `persist` phase runs before the git phases, so the model was paid for once and
 the work is not lost.
 
@@ -95,9 +104,11 @@ curl -sL https://haliphron.example.com/api/v1/runs/$RUN_ID/result \
   -H "Authorization: Bearer $TOKEN"
 ```
 
-A 403 on push usually means a protected branch or a token without permission
-on that repository. That is a configuration problem wearing a git exit code; a
-retry will discover the same answer.
+For a run with [several repositories](run-across-several-repositories.md), a
+refused push in one does not stop the others: they are still pushed and get
+their pull requests, and the run fails after the last. `repos` in `GET
+/api/v1/runs/{id}` says which were pushed. The run is exit 30 only if every
+refusal was permanent; otherwise it is exit 20 and the cluster retries it.
 
 ### Exit 11, status `TimedOut`
 

@@ -27,7 +27,7 @@ reference](../reference/rest-api.md#post-apiv1runs) for the full list.
 
 ## Submit without a repository
 
-Omit `repo`. The run skips the four git phases, carries no git token, and
+Omit `repo`. The run skips the git phases, carries no git token, and
 produces a result rather than a branch.
 
 ```sh
@@ -35,6 +35,14 @@ curl -sX POST https://haliphron.example.com/api/v1/runs \
   -H "Authorization: Bearer $TOKEN" -H 'Content-Type: application/json' \
   -d '{"prompt":"Draft release notes from this changelog: ..."}'
 ```
+
+## Submit against several repositories
+
+Send `repos`, a list of `{url, base_branch, name, depth}`, instead of `repo`
+and `base_branch`. The first is the working repository; the others are cloned
+beside it under `/repos/<name>`, and every one the agent changes gets its own
+pull request. See [how to run an agent across several
+repositories](run-across-several-repositories.md).
 
 ## Bound what it may spend
 

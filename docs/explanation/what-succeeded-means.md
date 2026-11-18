@@ -67,8 +67,9 @@ phases. What has been paid for is made durable before anything allowed to fail.
 
 The consequence is that a failed push does not lose a result. The agent ran,
 the model was paid, `result.md` and `output.json` are in storage — and then
-the push hit a protected branch and returned 403. The run fails with exit 20
-and failure class `git`, and the result is still there to read.
+the push hit a protected branch and returned 403. The run fails — exit 30,
+class `config`, since a retry would only meet the same 403 — and the result is
+still there to read.
 
 Reverse the order and a retry pays for the model a second time to produce
 something it already had. A test named
@@ -85,7 +86,7 @@ pod about to be deleted. It does not require a bucket.
 The runtime reports each phase as `ok`, `skipped` or `failed`, and `skipped`
 is a first-class outcome rather than a polite word for failure.
 
-A run without a repository skips four git phases; that is not a degraded run,
+A run without a repository skips the five git phases; that is not a degraded run,
 it is a different shape of run. A resumed attempt skips everything up to and
 including `run`, because the checkpoint says that work is already done — which
 is precisely how a retry avoids paying for the model twice.

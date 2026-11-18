@@ -47,7 +47,10 @@ arrive in a per-run Kubernetes Secret with an owner reference, so they are
 deleted with the run's objects.
 
 The git token lives about an hour. It is never written into `.git/config` — it
-goes through a credential helper instead — and it is never logged. Neither is
+goes through a credential helper instead — and it is never logged. A run with
+several repositories gets one token per host, and the helper answers only the
+hosts of the run's own repositories: a fetch from any other host gets no
+credential. Neither is
 the lease body that carried it: that message is the one place in the system
 where secret material travels in the clear, and there is no debug mode that
 prints it. A test asserts so, which is the only way a rule like that survives

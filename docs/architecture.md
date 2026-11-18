@@ -42,7 +42,7 @@ The contracts worked out (normative; this document is their rationale):
 ## 1. Goals, boundaries, non-goals
 
 ### Goals
-1. Running headless agents (claude-code, codex) as one-shot k8s Jobs on request from the API, MCP, Slack or the UI.
+1. Running headless agents (claude-code, codex, opencode) as one-shot k8s Jobs on request from the API, MCP, Slack or the UI.
 2. A role as a reusable agent configuration: prompt, tools, MCP servers, model, limits.
 3. Orchestrating chains of agents with branching and reliable joining of parallel branches.
 4. Running on a schedule.
@@ -849,17 +849,19 @@ The intersection is computed by the entrypoint. A caveat that matters in the lig
 
 ### Role → runtime
 
-Two runtimes, two configuration formats. A role is rendered into the required one:
+Three runtimes, three configuration formats. A role is rendered into the required one:
 
-| Role concept | claude-code | codex |
-|---|---|---|
-| `toolPolicy.allow` | `--allowedTools` | `enabled_tools` on the MCP server + the sandbox mode |
-| `permissionMode` | `--permission-mode` | `-s read-only` / `workspace-write` / bypass |
-| `mcpServers` | `--mcp-config` (JSON) | `[mcp_servers.*]` in `config.toml` |
-| `systemPromptFragment` | `--append-system-prompt` | a prompt prefix |
-| `model` | `ANTHROPIC_MODEL` | `OPENAI_MODEL` |
+| Role concept | claude-code | codex | opencode |
+|---|---|---|---|
+| `toolPolicy.allow` | `--allowedTools` | `enabled_tools` on the MCP server + the sandbox mode | ordered `allow` rules in `OPENCODE_CONFIG_CONTENT` |
+| `permissionMode` | `--permission-mode` | `-s read-only` / `workspace-write` / bypass | rules: `plan` denies edits and the shell, `acceptEdits` the shell, bypass nothing |
+| `mcpServers` | `--mcp-config` (JSON) | `[mcp_servers.*]` in `config.toml` | `mcp.servers` in `opencode.json` |
+| `systemPromptFragment` | `--append-system-prompt` | a prompt prefix | an `instructions` file |
+| `model` | `ANTHROPIC_MODEL` | `OPENAI_MODEL` | `--model <provider>/<model>` |
 
-An important consequence: **codex has no direct analogue of `--allowedTools` for built-in tools** — file and shell access is determined by the sandbox mode. A "read-only" role is expressed on codex through `-s read-only` and on claude-code through `permission-mode: plan` plus a deny list. The translation table must be written down explicitly and covered by tests: otherwise the same role on different agents will grant different powers, and that is a security hole rather than cosmetics.
+The normative version of this table, with the gateway and the cost columns, is section 8 of the [agent runtime contract](contracts/agent-runtime.md).
+
+An important consequence: **codex has no direct analogue of `--allowedTools` for built-in tools** — file and shell access is determined by the sandbox mode. A "read-only" role is expressed on codex through `-s read-only` and on claude-code through `permission-mode: plan` plus a deny list. opencode has the opposite problem: no permission flags at all, so the whole policy becomes configuration, delivered above anything the repository's own `opencode.json` says. The translation table must be written down explicitly and covered by tests: otherwise the same role on different agents will grant different powers, and that is a security hole rather than cosmetics.
 
 ---
 
@@ -886,18 +888,21 @@ The phase names are contract: the checkpoint is keyed by them, `phaseTimings` in
 4.  checkpoint      read HALIPHRON_COMPLETED_PHASES; on a retry, skip what is done
 5.  auth            LLM credentials, git credential helper, gh/glab
 6.  clone           clone, checkout base, create the target branch
-7.  role            the chain from section 10, intersected with the policy
-8.  mcp-prepare     render the MCP config for the runtime, secrets by reference
-9.  mcp-verify      check that the servers came up (otherwise code 30)
-10. run             start the agent CLI under a timeout, tee to a log file and chunks upstream
-11. parse           extract result, usage, cost, session id
-12. output          wrap the agent's output in the envelope, validate against the node schema
-13. persist         upload result.md, output.json, the log; report the phase
-14. commit          commit the leftover changes
-15. push            push --force-with-lease to the deterministic branch
-16. pr              create-or-update the PR/MR
-17. finalize        upload the final log and completion.json
-18. notify          POST the completion to the controller
+7.  clone-extra     clone each extra repository into /repos/<path>, on the same branch
+8.  inputs          fetch the files sent with the request from the controller
+9.  role            the chain from section 10, intersected with the policy
+10. plugins         register the role's marketplaces, install its plugins
+11. mcp-prepare     render the MCP config for the runtime, secrets by reference
+12. mcp-verify      check that the servers came up (otherwise code 30)
+13. run             start the agent CLI under a timeout, tee to a log file and chunks upstream
+14. parse           extract result, usage, cost, session id
+15. output          wrap the agent's output in the envelope, validate against the node schema
+16. persist         upload result.md, output.json, the log; report the phase
+17. commit          commit the leftover changes, in every repository
+18. push            push --force-with-lease to the deterministic branch, from every repository
+19. pr              create-or-update the PR/MR of every pushed repository
+20. finalize        upload the final log and completion.json
+21. notify          POST the completion to the controller
 ```
 
 **The "upload before notification" ordering is mandatory** (P5): the result is durable before it is announced. But that alone is not enough, and this is delta R2 of contract 3: `persist` comes **before the git phases**, not after. Otherwise a failed push takes with it a result that has already been paid for — it existed only in the filesystem of a deleted pod — and an idempotent retry (ADR 19) promises what it cannot deliver.
@@ -1305,7 +1310,7 @@ securityContext:
 resources: {limits: {...}}      # mandatory, or one agent eats the node
 ```
 
-`readOnlyRootFilesystem: true` is **achievable and mandatory** (contract 3, delta R6). There are exactly four writable directories — `/workspace`, `/haliphron/run`, `/home/agent`, `/tmp` — and all are emptyDir; the CLI caches are redirected into `$HOME` through `CLAUDE_CONFIG_DIR`, `CODEX_HOME`, `XDG_CACHE_HOME` and `npm_config_cache`. Verified by running the image under `docker run --read-only`, not by argument.
+`readOnlyRootFilesystem: true` is **achievable and mandatory** (contract 3, delta R6). There are exactly four writable directories — `/workspace`, `/haliphron/run`, `/home/agent`, `/tmp` — and all are emptyDir, plus `/repos` as a fifth for a run with extra repositories; the CLI caches are redirected into `$HOME` through `CLAUDE_CONFIG_DIR`, `CODEX_HOME`, `OPENCODE_CONFIG_DIR`, the `XDG_*` directories and `npm_config_cache`. Verified by running the image under `docker run --read-only`, not by argument.
 
 ### Network
 

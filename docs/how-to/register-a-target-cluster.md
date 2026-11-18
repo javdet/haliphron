@@ -100,8 +100,10 @@ ceiling.
 for one kind of work, label it and put the matching selector on the roles that
 belong there.
 
-`cluster.runtimes` is which agent types this cluster will run. Removing one
-makes the control plane place those runs elsewhere.
+`cluster.runtimes` is which agent types this cluster will run: by default
+`claude-code`, `codex` and `opencode`. Removing one makes the control plane
+place those runs elsewhere. A values file that sets the list replaces the
+default, so one written before opencode existed has to add it.
 
 ## Wire up metrics
 

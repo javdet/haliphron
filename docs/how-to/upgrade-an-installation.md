@@ -65,6 +65,13 @@ Agent Jobs already running are not touched by a controller restart. The
 controller rebuilds its view from the CRs, which is where everything that has
 to survive a restart lives.
 
+Upgrade the runtime chart before callers use a feature that needs the new
+controller. A run with several repositories (`repos`) is leased only to a
+controller that declares the `extraRepos` feature; until its cluster is
+upgraded, such a run waits in `Queued` rather than failing. A values file that
+pins `cluster.runtimes` keeps its list across upgrades, so add `opencode` to it
+by hand if the cluster should run opencode.
+
 ### Drain it first if you would rather not
 
 ```sh
@@ -87,6 +94,11 @@ helm upgrade haliphron deploy/charts/haliphron -n haliphron --reuse-values \
 
 Pin by digest. Runs already admitted keep the image their spec was rendered
 with; the new digest applies to the next admission.
+
+A role's own `image` is not moved by any of this. An agent image older than
+the release that added `repos` ignores a run's extra repositories and works in
+the working repository only, so rebuild role images on the new base before
+those roles get runs with several repositories.
 
 ## When the CRD schema changes
 

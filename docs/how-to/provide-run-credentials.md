@@ -198,8 +198,14 @@ These are stored as `git-token-github` and `git-token-gitlab`. In the UI,
 choose **GitHub only** or **GitLab only** in the Git token dialog. A token
 whose prefix names the other forge is refused.
 
-The provider is derived from the run's `repo` URL. With only `git-token`
+The provider is derived from each repository's URL. With only `git-token`
 stored, both forges use it.
+
+A run with [several repositories](run-across-several-repositories.md) gets one
+token per host it clones from, so repositories on github.com and on a GitLab
+instance can be mixed in one run. The pod's credential helper answers only the
+hosts of the run's own repositories. A repository URL with credentials in it
+(`https://user:token@…`) is refused at admission: put the token here instead.
 
 ## Use different names
 
@@ -226,7 +232,7 @@ untrusted agent pod](../explanation/the-untrusted-agent-pod.md).
 
 ## Run without a repository
 
-A run that names no `repo` gets no git token at all, and skips the four git
+A run that names no `repo` gets no git token at all, and skips the git
 phases. Use that for work that produces a result rather than a branch:
 
 ```sh
